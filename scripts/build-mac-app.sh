@@ -25,6 +25,12 @@ rm -rf "$APP_DIR" "$BUILD_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR"
 cp "$ROOT/scripts/mac-app/Info.plist" "$APP_DIR/Contents/Info.plist"
 
+echo "==> 生成应用图标（AppIcon.icns）"
+if [ ! -f "$ROOT/assets/AppIcon.icns" ]; then
+  "$ROOT/scripts/build-icon.sh" >/dev/null
+fi
+cp "$ROOT/assets/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+
 echo "==> 生成 main.swift（写入 node 路径与项目路径）"
 python3 - "$ROOT/scripts/mac-app/main.swift" "$BUILD_DIR/main.swift" "$NODE_BIN" "$ROOT" <<'PY'
 import sys
