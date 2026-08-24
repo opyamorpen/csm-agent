@@ -48,20 +48,39 @@ csm-agent/
 # 1. 安装依赖
 npm install
 
-# 2. 配置
-cp config/mcp.yaml config/local.yaml   # 填入真实 MCP 端点与凭据环境变量
+# 2. 配置（两种方式任选）
+#    a) 启动后点右上角 ⚙️ 在界面里配置 MCP 服务器（保存到 config/mcp.user.yaml，不入库）
+#    b) 或直接编辑 config/mcp.yaml
 
-# 3. 注入凭据
-export DEEPSEEK_API_KEY=...            # LLM（默认 deepseek/deepseek-v4-flash）
-export ONES_MCP_TOKEN=...
-export CRM_MCP_TOKEN=...
-export RECORDING_MCP_TOKEN=...
+# 3. 注入凭据（项目根目录建 .env，gitignore 已排除）
+#    .env 内容示例：
+#    DEEPSEEK_API_KEY=sk-...
+#    ONES_MCP_TOKEN=...
+#    CRM_MCP_TOKEN=...
+#    RECORDING_MCP_TOKEN=...
 
-# 4. 跑起来（CLI，交互式确认）
-npm run dev "整理 XX 客户本周的跟进记录"
+# 4. 跑起来（Web UI）
+npm run dev          # 打开 http://127.0.0.1:3210
+
+# 或用命令行交互
+npm run cli "整理 XX 客户本周的跟进记录"
 ```
 
-模型可用环境变量覆盖：`CSM_PROVIDER`（默认 `deepseek`）、`CSM_MODEL`（默认 `deepseek-v4-flash`）。
+## Mac 打包（原生 .app）
+
+零额外依赖（只需 Xcode 命令行工具 + Node，无需 Rust/Electron）：
+
+```bash
+./scripts/build-mac-app.sh
+open "dist-mac/CSM Agent.app"
+```
+
+产物是原生 Swift + WKWebView 壳：双击后自动拉起 `dist/index.js` 服务器，
+在独立窗口里加载 Web UI，退出时自动关闭服务器。凭据仍从项目根目录的 `.env` 读取。
+
+> 个人使用已做临时签名；如 Gatekeeper 拦截，右键 → 打开，或
+> `xattr -dr com.apple.quarantine "dist-mac/CSM Agent.app"`。
+> 正式团队分发需 Developer ID 签名 + 公证（notarize）。
 
 ## 确认协议（硬约束）
 

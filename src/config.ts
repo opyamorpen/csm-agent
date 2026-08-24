@@ -61,3 +61,30 @@ export function loadMcpServers(): McpServerConfig[] {
 export function saveMcpServers(servers: McpServerConfig[]): void {
   writeFileSync(USER_CONFIG, yaml.dump({ servers }, { lineWidth: -1, noRefs: true }), 'utf8');
 }
+
+/**
+ * Load a project-root `.env` file into process.env (only keys not already
+ * present). The packaged macOS app launches the server without a shell, so
+ * API keys and `${ENV_VAR}` tokens referenced in the MCP config must come
+ * from `.env` (which is gitignored).
+ */
+export function loadDotEnv(): void {
+  const envPath = join(configDir, '..', '.env');
+  try {
+    const text = readFileSync(envPath, 'utf8');
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i <= 0) continue;
+      const key = t.slice(0, i).trim();
+      let val = t.slice(i + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch {
+    /* no .env file */
+  }
+}

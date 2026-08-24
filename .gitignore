@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.build-mac/
+dist-mac/
 .env
 *.log
 .DS_Store

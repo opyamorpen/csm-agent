@@ -1,6 +1,6 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Model, Models, Tool } from '@earendil-works/pi-ai';
-import { loadMcpServers, type McpServerConfig } from './config.js';
+import { loadMcpServers, loadDotEnv, type McpServerConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { buildSystemPrompt } from './prompt.js';
@@ -22,6 +22,8 @@ export interface Runtime {
  * and shows which servers failed to connect.
  */
 export async function createRuntime(): Promise<Runtime> {
+  loadDotEnv();
+
   const models = builtinModels();
   const provider = process.env.CSM_PROVIDER ?? 'deepseek';
   const modelId = process.env.CSM_MODEL ?? 'deepseek-v4-flash';
