@@ -1,37 +1,20 @@
-# CSM agent — MCP server connections.
+# CSM agent — MCP 服务器配置（种子）
 #
-# Fill in the real endpoints before first use. Secrets must never be committed:
-# reference them as ${ENV_VAR}, which src/config.ts expands from process.env.
+# 这是默认种子配置，默认没有预置任何服务器。请在 app 界面点左下角「⚙️ 设置」
+# 添加你的 MCP 服务器；保存后会写入 config/mcp.user.yaml（优先于本文件，且被
+# gitignore，不会提交真实端点/凭据）。
 #
-# Transport options:
-#   - stdio:           a local executable (or `npx mcp-remote <url>` wrapper)
-#   - streamable-http: a remote MCP URL (headers carry the auth token)
+# 每个服务器最少只需：
+#   - name:       一个标识（工具会以 mcp__<name>__<tool> 命名）
+#   - transport:  streamable-http（远程地址）或 stdio（本地命令/npx）
+#   - url:        streamable-http 的 MCP 地址（stdio 则填 command/args）
+#   - headers:    可选鉴权，通常 Authorization: Bearer <token>，可用 ${ENV_VAR}
+#
+# 示例（不要照抄）：
+#   - name: crm
+#     transport: streamable-http
+#     url: "https://crm.example.com/mcp"
+#     headers:
+#       Authorization: "Bearer ${CRM_MCP_TOKEN}"
 
-servers:
-  - name: ones
-    transport: stdio
-    command: npx
-    args: ["-y", "mcp-remote", "https://YOUR-ONES-MCP-ENDPOINT"]
-    env:
-      ONES_MCP_TOKEN: "${ONES_MCP_TOKEN}"
-    toolCallTimeoutMs: 90000
-    # Heuristic used to decide which tools are WRITE operations and therefore
-    # require confirm_write approval first. Refine against the real tool list.
-    writeToolPatterns: ["create", "update", "delete", "add", "save", "write", "post", "put", "insert", "remove", "publish"]
-
-  - name: crm
-    transport: streamable-http
-    url: "https://YOUR-CRM-MCP-ENDPOINT/mcp"
-    headers:
-      Authorization: "Bearer ${CRM_MCP_TOKEN}"
-    toolCallTimeoutMs: 60000
-    writeToolPatterns: ["create", "update", "delete", "add", "save", "write", "post", "put", "insert", "remove", "log"]
-
-  - name: recording
-    transport: streamable-http
-    url: "https://YOUR-RECORDING-MCP-ENDPOINT/mcp"
-    headers:
-      Authorization: "Bearer ${RECORDING_MCP_TOKEN}"
-    toolCallTimeoutMs: 60000
-    # Recording system is read-only for the agent: no write patterns.
-    writeToolPatterns: []
+servers: []

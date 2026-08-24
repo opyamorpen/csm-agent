@@ -329,15 +329,20 @@
     if (placeholder) t.placeholder = placeholder; return t;
   }
 
+  // Store schema: Authorization header is either "Bearer <token>" (simple) or
+  // an arbitrary override (advanced). Normalize accordingly.
   function normalizeServer(s) {
+    const auth = (s.headers && s.headers.Authorization) || '';
+    const bearer = /^Bearer\s+(.+)$/i.exec(auth);
     return {
       name: s.name ?? '',
       transport: s.transport === 'stdio' ? 'stdio' : 'streamable-http',
+      url: s.url ?? '',
+      token: bearer ? bearer[1] : '',
+      authOverride: bearer ? '' : auth,
       command: s.command ?? '',
       args: (s.args ?? []).join(' '),
       env: Object.entries(s.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'),
-      url: s.url ?? '',
-      authorization: (s.headers && s.headers.Authorization) || '',
       writeToolPatterns: (s.writeToolPatterns ?? []).join(', '),
     };
   }
@@ -350,34 +355,51 @@
     head.append(title, remove);
     box.append(head);
 
+    // ── 简单字段：名称 + 地址 + Token ──
     const row1 = el('div', 'row');
-    const nameF = field('名称（serverName）'); nameF.append(makeInput('js-name', server.name, '例如 crm'));
-    const transF = field('传输方式'); transF.append(makeSelect('js-transport',
-      [{ value: 'stdio', label: 'stdio（本地命令/npx）' }, { value: 'streamable-http', label: 'streamable-http（远程 URL）' }], server.transport));
-    row1.append(nameF, transF);
+    const nameF = field('名称'); nameF.append(makeInput('js-name', server.name, '例如 crm'));
+    const urlF = field('MCP 地址'); urlF.append(makeInput('js-url', server.url, 'https://.../mcp'));
+    row1.append(nameF, urlF);
     box.append(row1);
 
-    const httpRow = el('div', 'row js-http');
-    const urlF = field('URL'); urlF.append(makeInput('js-url', server.url, 'https://.../mcp'));
-    const authF = field('Authorization（可用 ${ENV_VAR}）'); authF.append(makeInput('js-auth', server.authorization, 'Bearer ${CRM_MCP_TOKEN}'));
-    httpRow.append(urlF, authF);
-    box.append(httpRow);
+    const tokenRow = el('div', 'row');
+    const tokenF = field('Token（可选，可用 ${ENV_VAR}）'); tokenF.append(makeInput('js-token', server.token, '留空则无需鉴权'));
+    tokenRow.append(tokenF);
+    box.append(tokenRow);
 
-    const stdioRow = el('div', 'row js-stdio');
+    // ── 高级（折叠）──
+    const advToggle = el('button', 'adv-toggle', '▸ 高级设置');
+    const advBody = el('div', 'adv-body hidden');
+    const transF = field('传输方式'); transF.append(makeSelect('js-transport',
+      [{ value: 'streamable-http', label: 'streamable-http（远程地址）' }, { value: 'stdio', label: 'stdio（本地命令/npx）' }], server.transport));
+    advBody.append(transF);
+
+    const httpAdv = el('div', 'js-http');
+    const authF = field('自定义 Authorization（覆盖 Bearer token）'); authF.append(makeInput('js-auth', server.authOverride, 'Bearer ${CRM_MCP_TOKEN}'));
+    httpAdv.append(authF);
+    advBody.append(httpAdv);
+
+    const stdioAdv = el('div', 'js-stdio');
+    const cmdRow = el('div', 'row');
     const cmdF = field('命令'); cmdF.append(makeInput('js-command', server.command, 'npx'));
     const argsF = field('参数（空格分隔）'); argsF.append(makeInput('js-args', server.args, '-y mcp-remote https://...'));
-    stdioRow.append(cmdF, argsF);
-    box.append(stdioRow);
-
-    const envRow = el('div', 'row js-stdio');
-    const envF = field('环境变量（每行 KEY=VALUE）'); envF.append(makeTextarea('js-env', server.env, 'ONES_MCP_TOKEN=${ONES_MCP_TOKEN}'));
+    cmdRow.append(cmdF, argsF);
+    const envRow = el('div', 'row');
+    const envF = field('环境变量（每行 KEY=VALUE）'); envF.append(makeTextarea('js-env', server.env, 'TOKEN=${TOKEN}'));
     envRow.append(envF);
-    box.append(envRow);
+    stdioAdv.append(cmdRow, envRow);
+    advBody.append(stdioAdv);
 
     const wpRow = el('div', 'row');
-    const wpF = field('写操作关键词（逗号分隔）'); wpF.append(makeInput('js-write', server.writeToolPatterns, 'create, update, delete, add'));
+    const wpF = field('写操作关键词（留空用默认）'); wpF.append(makeInput('js-write', server.writeToolPatterns, ''));
     wpRow.append(wpF);
-    box.append(wpRow);
+    advBody.append(wpRow);
+
+    advToggle.addEventListener('click', () => {
+      const open = advBody.classList.toggle('hidden') === false;
+      advToggle.textContent = (open ? '▾ ' : '▸ ') + '高级设置';
+    });
+    box.append(advToggle, advBody);
 
     const statusLine = el('div', 'status-line');
     const failure = failures.find(([n]) => n === server.name);
@@ -387,9 +409,8 @@
 
     const syncVisibility = () => {
       const isHttp = transF.querySelector('select').value === 'streamable-http';
-      httpRow.style.display = isHttp ? '' : 'none';
-      stdioRow.style.display = isHttp ? 'none' : '';
-      envRow.style.display = isHttp ? 'none' : '';
+      httpAdv.style.display = isHttp ? '' : 'none';
+      stdioAdv.style.display = isHttp ? 'none' : '';
       title.textContent = nameF.querySelector('input').value.trim() || '(未命名)';
     };
     transF.querySelector('select').addEventListener('change', syncVisibility);
@@ -403,27 +424,32 @@
     const out = [];
     for (const box of serverList.querySelectorAll('.server-editor')) {
       const name = box.querySelector('.js-name').value.trim();
+      if (!name) continue;
       const transport = box.querySelector('.js-transport').value;
       const url = box.querySelector('.js-url').value.trim();
-      const authorization = box.querySelector('.js-auth').value.trim();
+      const token = box.querySelector('.js-token').value.trim();
+      const authOverride = box.querySelector('.js-auth').value.trim();
       const command = box.querySelector('.js-command').value.trim();
       const args = box.querySelector('.js-args').value.trim().split(/\s+/).filter(Boolean);
       const envText = box.querySelector('.js-env').value;
       const write = box.querySelector('.js-write').value.split(',').map((s) => s.trim()).filter(Boolean);
-      if (!name) continue;
+
       const env = {};
       for (const line of envText.split('\n')) {
         const idx = line.indexOf('=');
         if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
       }
-      const server = { name, transport, writeToolPatterns: write };
+
+      const server = { name, transport };
+      if (write.length) server.writeToolPatterns = write;
       if (transport === 'stdio') {
         server.command = command;
         if (args.length) server.args = args;
         if (Object.keys(env).length) server.env = env;
       } else {
         server.url = url;
-        if (authorization) server.headers = { Authorization: authorization };
+        const auth = authOverride || (token ? 'Bearer ' + token : '');
+        if (auth) server.headers = { Authorization: auth };
       }
       out.push(server);
     }

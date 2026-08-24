@@ -4,7 +4,7 @@ import { loadMcpServers, loadDotEnv, type McpServerConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
-import { buildSystemPrompt } from './prompt.js';
+import { buildSystemPrompt, type ToolSummary } from './prompt.js';
 
 export interface Runtime {
   models: Models;
@@ -13,8 +13,16 @@ export interface Runtime {
   systemPrompt: string;
   /** Current tool list; refreshed on reload(). New sessions pick it up. */
   tools: Tool[];
-  /** Reconnect MCP servers with a new config and refresh the tool list. */
+  /** Reconnect MCP servers with a new config and refresh the tool list + prompt. */
   reload: (servers: McpServerConfig[]) => Promise<void>;
+}
+
+function toolSummaries(mcp: McpHub): ToolSummary[] {
+  return mcp.listTools().map((t) => ({
+    server: t.server,
+    name: t.publicName,
+    description: t.description,
+  }));
 }
 
 /**
@@ -38,16 +46,16 @@ export async function createRuntime(): Promise<Runtime> {
   const mcp = new McpHub();
   await mcp.connect(loadMcpServers());
 
-  const systemPrompt = buildSystemPrompt();
   const runtime: Runtime = {
     models,
     model,
     mcp,
-    systemPrompt,
+    systemPrompt: buildSystemPrompt(toolSummaries(mcp)),
     tools: [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()],
     reload: async (servers) => {
       await mcp.reconnect(servers);
       runtime.tools = [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()];
+      runtime.systemPrompt = buildSystemPrompt(toolSummaries(mcp));
     },
   };
   return runtime;

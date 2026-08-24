@@ -64,7 +64,7 @@
         <h2>MCP 服务器配置</h2>
         <button id="settingsClose" class="icon-btn">✕</button>
       </div>
-      <p class="hint">配置保存在 <code>config/mcp.user.yaml</code>（已 gitignore，不入库）。凭据可用 <code>${ENV_VAR}</code> 引用环境变量。</p>
+      <p class="hint">添加任意数量的 MCP 服务器——每个只需填「名称 + 地址 + Token」即可（Token 可留空或用 <code>${ENV_VAR}</code> 引用环境变量）。配置保存在 <code>config/mcp.user.yaml</code>（不入库）。</p>
       <div id="serverList"></div>
       <div class="modal-actions">
         <button id="addServer" class="ghost">＋ 添加服务器</button>

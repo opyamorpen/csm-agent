@@ -337,6 +337,19 @@ footer { padding: 12px 18px; border-top: 1px solid var(--border); background: va
 .server-editor .status-line.ok { color: var(--ok); }
 .server-editor .status-line.fail { color: var(--danger); }
 
+.adv-toggle {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 2px 0;
+  margin-bottom: 6px;
+}
+.adv-toggle:hover { color: var(--accent); }
+.adv-body { border-top: 1px dashed var(--border); padding-top: 8px; margin-top: 2px; }
+.adv-body .field { margin-bottom: 8px; }
+
 .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
 .modal-actions .primary {
   background: var(--accent-2);
