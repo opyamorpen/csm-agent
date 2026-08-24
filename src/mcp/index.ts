@@ -73,6 +73,15 @@ export class McpHub {
     }
   }
 
+  /** Close all connections and reconnect with a fresh config. */
+  async reconnect(configs: McpServerConfig[]): Promise<void> {
+    await this.closeAll();
+    this.servers.clear();
+    this.toolIndex.clear();
+    this.failures.clear();
+    await this.connect(configs);
+  }
+
   private async connectOne(cfg: McpServerConfig): Promise<void> {
     const client = new Client({ name: 'csm-agent', version: '0.1.0' }, { capabilities: {} });
     if (cfg.transport === 'stdio') {

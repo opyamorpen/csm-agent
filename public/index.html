@@ -9,7 +9,10 @@
 <body>
   <header>
     <div class="brand">CSM Agent <span class="sub">客户成功助手</span></div>
-    <div id="status" class="status"><span class="dot"></span>连接中…</div>
+    <div class="right">
+      <div id="status" class="status"><span class="dot"></span>连接中…</div>
+      <button id="settingsBtn" class="icon-btn" title="MCP 服务器配置">⚙️</button>
+    </div>
   </header>
 
   <main id="chat">
@@ -22,6 +25,22 @@
       <button id="send" type="submit">发送</button>
     </form>
   </footer>
+
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>MCP 服务器配置</h2>
+        <button id="settingsClose" class="icon-btn">✕</button>
+      </div>
+      <p class="hint">配置保存在 <code>config/mcp.user.yaml</code>（已 gitignore，不入库）。凭据可用 <code>${ENV_VAR}</code> 引用环境变量。</p>
+      <div id="serverList"></div>
+      <div class="modal-actions">
+        <button id="addServer" class="ghost">＋ 添加服务器</button>
+        <button id="saveConfig" class="primary">保存并重连</button>
+      </div>
+      <div id="configResult"></div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

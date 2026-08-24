@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
+import { loadMcpServers, saveMcpServers, type McpServerConfig } from './config.js';
 import { AgentSession, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
 
@@ -58,6 +59,24 @@ function broadcast(session: Session, event: any): void {
   }
 }
 
+function validateServers(servers: unknown): string | null {
+  if (!Array.isArray(servers)) return 'servers 必须是数组';
+  for (const s of servers as Array<Record<string, unknown>>) {
+    if (!s || typeof s.name !== 'string' || !s.name.trim()) return '每个服务器都需要 name';
+    const transport = s.transport;
+    if (transport !== 'stdio' && transport !== 'streamable-http') {
+      return `服务器 "${s.name}": transport 必须是 stdio 或 streamable-http`;
+    }
+    if (transport === 'stdio' && typeof s.command !== 'string') {
+      return `服务器 "${s.name}": stdio 需要 command`;
+    }
+    if (transport === 'streamable-http' && typeof s.url !== 'string') {
+      return `服务器 "${s.name}": streamable-http 需要 url`;
+    }
+  }
+  return null;
+}
+
 function buildHandler(runtime: Runtime): http.RequestListener {
   return async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -76,11 +95,38 @@ function buildHandler(runtime: Runtime): http.RequestListener {
         return res.end(await readFile(join(publicDir, file), 'utf8'));
       }
 
+      // ── MCP configuration (read + save/reconnect) ──
+      if (req.method === 'GET' && path === '/api/config/mcp') {
+        return json(res, 200, {
+          servers: loadMcpServers(),
+          failures: [...runtime.mcp.failures.entries()],
+        });
+      }
+      if (req.method === 'PUT' && path === '/api/config/mcp') {
+        const body = await readBody(req);
+        const err = validateServers(body.servers);
+        if (err) return json(res, 400, { error: err });
+        const servers = body.servers as McpServerConfig[];
+        saveMcpServers(servers);
+        await runtime.reload(servers);
+        return json(res, 200, {
+          ok: true,
+          servers: loadMcpServers(),
+          failures: [...runtime.mcp.failures.entries()],
+        });
+      }
+
       // ── create session ──
       if (req.method === 'POST' && path === '/api/sessions') {
         const session: Session = {
           id: randomUUID(),
-          agent: new AgentSession(runtime),
+          agent: new AgentSession({
+            models: runtime.models,
+            model: runtime.model,
+            mcp: runtime.mcp,
+            tools: runtime.tools,
+            systemPrompt: runtime.systemPrompt,
+          }),
           events: [],
           clients: new Set(),
           pending: null,

@@ -36,6 +36,19 @@ header {
 .brand { font-weight: 650; }
 .brand .sub { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
 
+.right { display: flex; align-items: center; gap: 12px; }
+
+.icon-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 15px;
+}
+.icon-btn:hover { border-color: var(--accent); }
+
 .status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
 .status.ok .dot { background: var(--ok); }
@@ -116,3 +129,84 @@ footer { padding: 12px 18px; border-top: 1px solid var(--border); background: va
 
 .thinking { align-self: flex-start; color: var(--muted); font-size: 13px; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.4; } }
+
+/* settings modal */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 20px;
+}
+.modal.hidden { display: none; }
+
+.modal-box {
+  width: min(720px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.modal-head h2 { margin: 0; font-size: 17px; }
+.hint { color: var(--muted); font-size: 13px; margin: 4px 0 14px; }
+.hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+.server-editor {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: var(--panel-2);
+}
+.server-editor .row { display: flex; gap: 10px; margin-bottom: 9px; flex-wrap: wrap; }
+.server-editor label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 3px; }
+.server-editor .field { flex: 1 1 180px; min-width: 160px; }
+.server-editor input, .server-editor select, .server-editor textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+}
+.server-editor input:focus, .server-editor select:focus, .server-editor textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.server-editor textarea { min-height: 52px; resize: vertical; font-family: inherit; }
+.server-editor .ed-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.server-editor .ed-head .title { font-weight: 600; font-size: 14px; }
+.server-editor .remove { background: transparent; border: none; color: var(--danger); cursor: pointer; font-size: 13px; }
+.server-editor .status-line { font-size: 12px; color: var(--muted); }
+.server-editor .status-line.ok { color: var(--ok); }
+.server-editor .status-line.fail { color: var(--danger); }
+
+.modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+.modal-actions .primary {
+  background: var(--accent-2);
+  border: none;
+  color: #fff;
+  padding: 9px 18px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.modal-actions .ghost {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  padding: 9px 16px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 14px;
+}
+#configResult { margin-top: 12px; font-size: 13px; }
+#configResult.ok { color: var(--ok); }
+#configResult.err { color: var(--danger); }

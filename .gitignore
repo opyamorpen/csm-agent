@@ -6,3 +6,4 @@ dist/
 
 # Local overrides that may contain real endpoints / secrets must not be committed.
 config/local*.yaml
+config/mcp.user.yaml

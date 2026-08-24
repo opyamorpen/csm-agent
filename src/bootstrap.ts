@@ -1,6 +1,6 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Model, Models, Tool } from '@earendil-works/pi-ai';
-import { loadMcpConfig } from './config.js';
+import { loadMcpServers, type McpServerConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { buildSystemPrompt } from './prompt.js';
@@ -9,8 +9,11 @@ export interface Runtime {
   models: Models;
   model: Model<any>;
   mcp: McpHub;
-  tools: Tool[];
   systemPrompt: string;
+  /** Current tool list; refreshed on reload(). New sessions pick it up. */
+  tools: Tool[];
+  /** Reconnect MCP servers with a new config and refresh the tool list. */
+  reload: (servers: McpServerConfig[]) => Promise<void>;
 }
 
 /**
@@ -19,9 +22,6 @@ export interface Runtime {
  * and shows which servers failed to connect.
  */
 export async function createRuntime(): Promise<Runtime> {
-  const configPath = process.env.CSM_MCP_CONFIG ?? 'config/mcp.yaml';
-  const cfg = loadMcpConfig(configPath);
-
   const models = builtinModels();
   const provider = process.env.CSM_PROVIDER ?? 'deepseek';
   const modelId = process.env.CSM_MODEL ?? 'deepseek-v4-flash';
@@ -33,9 +33,19 @@ export async function createRuntime(): Promise<Runtime> {
   }
 
   const mcp = new McpHub();
-  await mcp.connect(cfg.servers);
+  await mcp.connect(loadMcpServers());
 
-  const tools = [confirmWriteTool, ...mcp.toPiTools()];
   const systemPrompt = buildSystemPrompt();
-  return { models, model, mcp, tools, systemPrompt };
+  const runtime: Runtime = {
+    models,
+    model,
+    mcp,
+    systemPrompt,
+    tools: [confirmWriteTool, ...mcp.toPiTools()],
+    reload: async (servers) => {
+      await mcp.reconnect(servers);
+      runtime.tools = [confirmWriteTool, ...mcp.toPiTools()];
+    },
+  };
+  return runtime;
 }
