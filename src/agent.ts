@@ -143,6 +143,11 @@ export class AgentSession {
     this.context.messages.push({ role: 'user', content: userInput, timestamp: Date.now() });
     return runLoop({ ...this.cfg, context: this.context, hooks });
   }
+
+  /** Restore conversation history (used when resuming a persisted session). */
+  restore(messages: Context['messages']): void {
+    this.context.messages = messages;
+  }
 }
 
 export interface RunParams extends SessionConfig {

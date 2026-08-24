@@ -15,9 +15,27 @@
     </div>
   </header>
 
-  <main id="chat">
-    <div id="messages"></div>
-  </main>
+  <div class="layout">
+    <aside id="sidebar">
+      <button id="newSession" class="new-session">＋ 新对话</button>
+      <div id="sessionList"></div>
+    </aside>
+
+    <main id="chat">
+      <div id="quickActions">
+        <button class="chip" data-template="整理「客户名称」本周的跟进记录">整理跟进记录</button>
+        <button class="chip" data-template="生成「客户名称」的客户档案">生成客户档案</button>
+        <button class="chip" data-template="把「客户名称」的成功实践沉淀成案例">沉淀客户案例</button>
+        <button class="chip" data-template="解析「客户名称」在三套系统里的身份">解析客户身份</button>
+      </div>
+      <div id="messages"></div>
+    </main>
+
+    <aside id="records">
+      <div class="panel-head">产出记录 <span id="recordCount" class="count"></span></div>
+      <div id="recordList"></div>
+    </aside>
+  </div>
 
   <footer>
     <form id="composer">
@@ -39,6 +57,17 @@
         <button id="saveConfig" class="primary">保存并重连</button>
       </div>
       <div id="configResult"></div>
+    </div>
+  </div>
+
+  <div id="recordModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="recordModalTitle">记录详情</h2>
+        <button id="recordClose" class="icon-btn">✕</button>
+      </div>
+      <div class="record-meta" id="recordMeta"></div>
+      <pre id="recordFields"></pre>
     </div>
   </div>
 

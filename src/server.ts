@@ -7,6 +7,7 @@ import type { Runtime } from './bootstrap.js';
 import { loadMcpServers, saveMcpServers, type McpServerConfig } from './config.js';
 import { AgentSession, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
+import { Store, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, '..', 'public');
@@ -16,18 +17,21 @@ interface PendingConfirm {
   resolve: (ok: boolean) => void;
 }
 
+type DisplayEvent = { type: string } & Record<string, unknown>;
+
 interface Session {
   id: string;
   agent: AgentSession;
-  events: Array<{ seq: number; event: AgentEvent | { type: 'user'; text: string } | { type: 'turn_start' } }>;
+  events: Array<{ seq: number; event: DisplayEvent }>;
   clients: Set<http.ServerResponse>;
   pending: PendingConfirm | null;
   busy: boolean;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  /** id of the most recent confirm_write draft record in this session */
+  lastRecordId: string | null;
 }
-
-type StreamEvent = { seq: number; event: any };
-
-const sessions = new Map<string, Session>();
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
@@ -51,14 +55,6 @@ function readBody(req: http.IncomingMessage): Promise<any> {
   });
 }
 
-function broadcast(session: Session, event: any): void {
-  session.events.push({ seq: session.events.length + 1, event });
-  const payload = `data: ${JSON.stringify({ seq: session.events.length, event })}\n\n`;
-  for (const client of session.clients) {
-    client.write(payload);
-  }
-}
-
 function validateServers(servers: unknown): string | null {
   if (!Array.isArray(servers)) return 'servers 必须是数组';
   for (const s of servers as Array<Record<string, unknown>>) {
@@ -77,7 +73,76 @@ function validateServers(servers: unknown): string | null {
   return null;
 }
 
-function buildHandler(runtime: Runtime): http.RequestListener {
+function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
+  const sessions = new Map<string, Session>();
+
+  function makeAgent(): AgentSession {
+    return new AgentSession({
+      models: runtime.models,
+      model: runtime.model,
+      mcp: runtime.mcp,
+      tools: runtime.tools,
+      systemPrompt: runtime.systemPrompt,
+    });
+  }
+
+  function persist(session: Session): void {
+    store.saveSession({
+      id: session.id,
+      title: session.title,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      messages: session.agent.context.messages as unknown[],
+      events: session.events as Array<{ seq: number; event: unknown }>,
+    });
+  }
+
+  function broadcast(session: Session, event: DisplayEvent): void {
+    session.events.push({ seq: session.events.length + 1, event });
+    session.updatedAt = Date.now();
+    persist(session);
+    const payload = `data: ${JSON.stringify({ seq: session.events.length, event })}\n\n`;
+    for (const client of session.clients) {
+      client.write(payload);
+    }
+  }
+
+  function removeSession(id: string): void {
+    const s = sessions.get(id);
+    if (s) {
+      for (const c of s.clients) {
+        try {
+          c.end();
+        } catch {
+          /* ignore */
+        }
+      }
+      sessions.delete(id);
+    }
+    store.deleteSession(id);
+  }
+
+  // ── load persisted sessions at boot ──
+  for (const meta of store.listSessions()) {
+    const stored = store.loadSession(meta.id);
+    if (!stored) continue;
+    const agent = makeAgent();
+    agent.restore((stored.messages ?? []) as never);
+    const session: Session = {
+      id: meta.id,
+      agent,
+      events: (stored.events ?? []) as Array<{ seq: number; event: DisplayEvent }>,
+      clients: new Set(),
+      pending: null,
+      busy: false,
+      title: stored.title || '新对话',
+      createdAt: stored.createdAt,
+      updatedAt: stored.updatedAt,
+      lastRecordId: null,
+    };
+    sessions.set(meta.id, session);
+  }
+
   return async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const path = url.pathname;
@@ -116,88 +181,164 @@ function buildHandler(runtime: Runtime): http.RequestListener {
         });
       }
 
+      // ── records ──
+      if (req.method === 'GET' && path === '/api/records') {
+        const sorted = [...store.records].sort((a, b) => b.createdAt - a.createdAt);
+        return json(res, 200, { records: sorted });
+      }
+
+      // ── session list ──
+      if (req.method === 'GET' && path === '/api/sessions') {
+        return json(res, 200, { sessions: store.listSessions() });
+      }
+
       // ── create session ──
       if (req.method === 'POST' && path === '/api/sessions') {
+        const now = Date.now();
         const session: Session = {
           id: randomUUID(),
-          agent: new AgentSession({
-            models: runtime.models,
-            model: runtime.model,
-            mcp: runtime.mcp,
-            tools: runtime.tools,
-            systemPrompt: runtime.systemPrompt,
-          }),
+          agent: makeAgent(),
           events: [],
           clients: new Set(),
           pending: null,
           busy: false,
+          title: '新对话',
+          createdAt: now,
+          updatedAt: now,
+          lastRecordId: null,
         };
         sessions.set(session.id, session);
+        persist(session);
         return json(res, 200, { id: session.id, mcpFailures: [...runtime.mcp.failures.entries()] });
       }
 
+      // ── per-session routes ──
       const match = path.match(/^\/api\/sessions\/([0-9a-f-]+)(\/.*)?$/);
       const session = match ? sessions.get(match[1]) : undefined;
-      if (!session) return json(res, 404, { error: 'session not found' });
-      const sub = match![2] ?? '';
+      if (match && !session) return json(res, 404, { error: 'session not found' });
+      if (session) {
+        const sub = match![2] ?? '';
 
-      // ── SSE event stream ──
-      if (req.method === 'GET' && sub === '/events') {
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        res.write('retry: 1000\n\n');
-        for (const { seq, event } of session.events) {
-          res.write(`data: ${JSON.stringify({ seq, event })}\n\n`);
-        }
-        session.clients.add(res);
-        req.on('close', () => session.clients.delete(res));
-        return;
-      }
-
-      // ── send a message ──
-      if (req.method === 'POST' && sub === '/messages') {
-        if (session.busy) return json(res, 409, { error: '已有进行中的请求' });
-        const body = await readBody(req);
-        const text = String(body.message ?? '').trim();
-        if (!text) return json(res, 400, { error: 'message is required' });
-
-        session.busy = true;
-        broadcast(session, { type: 'user', text });
-        broadcast(session, { type: 'turn_start' });
-
-        // Run the turn asynchronously; the HTTP handler returns immediately.
-        void (async () => {
-          try {
-            await session.agent.send(text, {
-              onEvent: (e) => broadcast(session, e),
-              requestConfirm: (draft) =>
-                new Promise<boolean>((resolve) => {
-                  session.pending = { draft, resolve };
-                }),
-            });
-          } catch (err) {
-            broadcast(session, { type: 'text', text: `运行出错: ${(err as Error).message}` });
-          } finally {
-            session.pending = null;
-            session.busy = false;
-            broadcast(session, { type: 'turn_end' });
+        // SSE event stream
+        if (req.method === 'GET' && sub === '/events') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          res.write('retry: 1000\n\n');
+          for (const { seq, event } of session.events) {
+            res.write(`data: ${JSON.stringify({ seq, event })}\n\n`);
           }
-        })();
+          session.clients.add(res);
+          req.on('close', () => session.clients.delete(res));
+          return;
+        }
 
-        return json(res, 202, { ok: true });
-      }
+        // rename
+        if (req.method === 'PATCH' && sub === '') {
+          const body = await readBody(req);
+          const title = String(body.title ?? '').trim();
+          if (!title) return json(res, 400, { error: 'title is required' });
+          session.title = title.slice(0, 80);
+          session.updatedAt = Date.now();
+          persist(session);
+          return json(res, 200, { ok: true, title: session.title });
+        }
 
-      // ── confirm / reject a pending draft ──
-      if (req.method === 'POST' && sub === '/confirm') {
-        if (!session.pending) return json(res, 409, { error: 'no pending confirmation' });
-        const body = await readBody(req);
-        const ok = body.approve === true;
-        session.pending.resolve(ok);
-        session.pending = null;
-        return json(res, 200, { ok, decided: ok ? 'approved' : 'rejected' });
+        // delete
+        if (req.method === 'DELETE' && sub === '') {
+          removeSession(session.id);
+          return json(res, 200, { ok: true });
+        }
+
+        // delete a record
+        const recMatch = sub.match(/^\/records\/([0-9a-f-]+)$/);
+        if (req.method === 'DELETE' && recMatch) {
+          const idx = store.records.findIndex((r) => r.id === recMatch[1]);
+          if (idx >= 0) {
+            store.records.splice(idx, 1);
+            store.persistRecords();
+          }
+          return json(res, 200, { ok: true });
+        }
+
+        // send a message
+        if (req.method === 'POST' && sub === '/messages') {
+          if (session.busy) return json(res, 409, { error: '已有进行中的请求' });
+          const body = await readBody(req);
+          const text = String(body.message ?? '').trim();
+          if (!text) return json(res, 400, { error: 'message is required' });
+
+          if (session.title === '新对话' && session.events.filter((e) => e.event.type === 'user').length === 0) {
+            session.title = text.slice(0, 30);
+          }
+
+          session.busy = true;
+          broadcast(session, { type: 'user', text });
+          broadcast(session, { type: 'turn_start' });
+
+          void (async () => {
+            try {
+              await session.agent.send(text, {
+                onEvent: (e) => {
+                  // Record state machine (local留痕; does not affect CRM/ONES)
+                  if (e.type === 'confirm' && e.draft) {
+                    const rec = makeRecordFromDraft(e.draft, session.id, randomUUID(), Date.now());
+                    store.records.push(rec);
+                    store.persistRecords();
+                    session.lastRecordId = rec.id;
+                  } else if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
+                    const t = runtime.mcp.resolve(e.name);
+                    if (t && runtime.mcp.isWrite(t.server, t.rawName) && session.lastRecordId) {
+                      const rec = store.records.find((r) => r.id === session.lastRecordId && r.status === 'approved');
+                      if (rec) {
+                        rec.status = 'written';
+                        rec.result = typeof e.result === 'string' ? e.result.slice(0, 500) : undefined;
+                        rec.updatedAt = Date.now();
+                        store.persistRecords();
+                        session.lastRecordId = null;
+                      }
+                    }
+                  }
+                  broadcast(session, e as unknown as DisplayEvent);
+                },
+                requestConfirm: (draft) =>
+                  new Promise<boolean>((resolve) => {
+                    session.pending = { draft, resolve };
+                  }),
+              });
+            } catch (err) {
+              broadcast(session, { type: 'text', text: `运行出错: ${(err as Error).message}` });
+            } finally {
+              session.pending = null;
+              session.busy = false;
+              broadcast(session, { type: 'turn_end' });
+            }
+          })();
+
+          return json(res, 202, { ok: true });
+        }
+
+        // confirm / reject a pending draft
+        if (req.method === 'POST' && sub === '/confirm') {
+          if (!session.pending) return json(res, 409, { error: 'no pending confirmation' });
+          const body = await readBody(req);
+          const ok = body.approve === true;
+          session.pending.resolve(ok);
+          session.pending = null;
+
+          const rec = session.lastRecordId
+            ? store.records.find((r) => r.id === session.lastRecordId)
+            : undefined;
+          if (rec) {
+            rec.status = ok ? 'approved' : 'rejected';
+            rec.updatedAt = Date.now();
+            store.persistRecords();
+            if (!ok) session.lastRecordId = null;
+          }
+          return json(res, 200, { ok, decided: ok ? 'approved' : 'rejected' });
+        }
       }
 
       json(res, 404, { error: 'not found' });
@@ -208,7 +349,8 @@ function buildHandler(runtime: Runtime): http.RequestListener {
 }
 
 export async function startServer(runtime: Runtime, port: number): Promise<http.Server> {
-  const server = http.createServer(buildHandler(runtime));
+  const store = new Store(dataDir());
+  const server = http.createServer(buildHandler(runtime, store));
   await new Promise<void>((resolve) => server.listen(port, resolve));
   return server;
 }

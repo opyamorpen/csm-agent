@@ -4,6 +4,11 @@
   const sendEl = document.getElementById('send');
   const statusEl = document.getElementById('status');
   const form = document.getElementById('composer');
+  const sessionListEl = document.getElementById('sessionList');
+  const newSessionBtn = document.getElementById('newSession');
+  const recordListEl = document.getElementById('recordList');
+  const recordCountEl = document.getElementById('recordCount');
+  const quickActions = document.getElementById('quickActions');
 
   const settingsBtn = document.getElementById('settingsBtn');
   const settingsClose = document.getElementById('settingsClose');
@@ -13,7 +18,14 @@
   const saveConfigBtn = document.getElementById('saveConfig');
   const configResult = document.getElementById('configResult');
 
+  const recordModal = document.getElementById('recordModal');
+  const recordClose = document.getElementById('recordClose');
+  const recordModalTitle = document.getElementById('recordModalTitle');
+  const recordMeta = document.getElementById('recordMeta');
+  const recordFields = document.getElementById('recordFields');
+
   let sessionId = null;
+  let es = null;
   let busy = false;
   let maxSeq = 0;
   let mcpFailures = [];
@@ -34,11 +46,14 @@
     return n;
   }
 
+  // ── chat rendering ─────────────────────────────────────────────
+
+  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; }
+
   function addMessage(cls, text) {
     const n = el('div', 'msg ' + cls, text);
     messagesEl.appendChild(n);
     scrollDown();
-    return n;
   }
 
   function addToolLine(name, args) {
@@ -72,6 +87,7 @@
           body: JSON.stringify({ approve }),
         });
         actions.replaceWith(el('div', 'decided', approve ? '已批准，正在写入…' : '已拒绝'));
+        loadRecords();
       } catch (err) {
         actions.append(el('div', 'decided', '操作失败: ' + err.message));
       }
@@ -107,55 +123,155 @@
           scrollDown();
         }
         break;
-      case 'confirm': addConfirmCard(e.draft); break;
+      case 'confirm': addConfirmCard(e.draft); loadRecords(); break;
       case 'turn_end':
         busy = false;
         setThinking(false);
         sendEl.disabled = false;
         inputEl.disabled = false;
         inputEl.focus();
+        loadSessions();
+        loadRecords();
         break;
     }
   }
 
-  // ── MCP 配置面板 ────────────────────────────────────────────────
+  // ── sessions ───────────────────────────────────────────────────
 
-  function field(labelText) {
-    const wrap = el('div', 'field');
-    wrap.append(el('label', null, labelText));
-    return wrap;
+  async function loadSessions() {
+    try {
+      const res = await fetch('/api/sessions');
+      const data = await res.json();
+      renderSessionList(data.sessions || []);
+    } catch (_) { /* ignore */ }
   }
 
-  function makeInput(cls, value, placeholder) {
-    const i = document.createElement('input');
-    i.className = cls;
-    i.value = value ?? '';
-    if (placeholder) i.placeholder = placeholder;
-    return i;
-  }
-
-  function makeSelect(cls, options, value) {
-    const s = document.createElement('select');
-    s.className = cls;
-    for (const o of options) {
-      const opt = document.createElement('option');
-      opt.value = o.value;
-      opt.textContent = o.label;
-      s.append(opt);
+  function renderSessionList(sessions) {
+    sessionListEl.innerHTML = '';
+    for (const s of sessions) {
+      const item = el('div', 'session-item' + (s.id === sessionId ? ' active' : ''));
+      const t = el('span', 't', s.title || '新对话');
+      const ops = el('span', 'ops');
+      const rename = el('button', 'ren', '✎');
+      const del = el('button', 'del', '✕');
+      rename.onclick = (ev) => { ev.stopPropagation(); renameSession(s.id, s.title); };
+      del.onclick = (ev) => { ev.stopPropagation(); deleteSession(s.id); };
+      ops.append(rename, del);
+      item.append(t, ops);
+      item.onclick = () => switchSession(s.id);
+      sessionListEl.appendChild(item);
     }
-    s.value = value;
-    return s;
   }
 
+  function connectEvents(id) {
+    if (es) es.close();
+    es = new EventSource(`/api/sessions/${id}/events`);
+    es.onmessage = (msg) => {
+      try {
+        const { seq, event } = JSON.parse(msg.data);
+        if (seq <= maxSeq) return;
+        maxSeq = seq;
+        handleEvent(event);
+      } catch (_) { /* ignore */ }
+    };
+    es.onerror = () => setStatus('warn', '连接中断，正在重连…');
+  }
+
+  async function switchSession(id) {
+    sessionId = id;
+    clearMessages();
+    connectEvents(id);
+    renderSessionList(await (await fetch('/api/sessions')).json().then((d) => d.sessions));
+    setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+  }
+
+  async function newSession() {
+    const res = await fetch('/api/sessions', { method: 'POST' });
+    const data = await res.json();
+    await switchSession(data.id);
+    loadSessions();
+  }
+
+  async function renameSession(id, oldTitle) {
+    const title = prompt('会话名称：', oldTitle || '');
+    if (title === null || !title.trim()) return;
+    await fetch(`/api/sessions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    loadSessions();
+  }
+
+  async function deleteSession(id) {
+    if (!confirm('删除该会话？此操作不可恢复。')) return;
+    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    if (id === sessionId) {
+      await newSession();
+    } else {
+      loadSessions();
+    }
+  }
+
+  // ── records ────────────────────────────────────────────────────
+
+  const TYPE_LABEL = { followup: '跟进记录', profile: '客户档案', case: '客户案例' };
+  const STATUS_LABEL = { draft: '草稿', approved: '已批准', written: '已回写', rejected: '已拒绝' };
+
+  async function loadRecords() {
+    try {
+      const res = await fetch('/api/records');
+      const data = await res.json();
+      const records = data.records || [];
+      recordCountEl.textContent = records.length ? `(${records.length})` : '';
+      if (!records.length) {
+        recordListEl.innerHTML = el('div', 'empty', '暂无产出').outerHTML;
+        return;
+      }
+      recordListEl.innerHTML = '';
+      for (const r of records) {
+        const item = el('div', 'record-item');
+        item.append(el('div', 'r-title', r.title || '(无标题)'));
+        item.append(el('div', 'r-meta', (r.customer || '未指定客户') + ' → ' + (r.target === 'ones' ? 'ONES' : r.target === 'crm' ? 'CRM' : (r.target || '?'))));
+        const badges = el('div', 'badges');
+        badges.append(
+          el('span', 'badge type', TYPE_LABEL[r.type] || r.type || '记录'),
+          el('span', 'badge status-' + r.status, STATUS_LABEL[r.status] || r.status),
+        );
+        item.append(badges);
+        item.onclick = () => showRecord(r);
+        recordListEl.appendChild(item);
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  function showRecord(r) {
+    recordModalTitle.textContent = r.title || '记录详情';
+    recordMeta.textContent = `类型: ${TYPE_LABEL[r.type] || r.type} ｜ 客户: ${r.customer || '—'} ｜ 状态: ${STATUS_LABEL[r.status] || r.status} ｜ 目标: ${r.target || '—'}`;
+    recordFields.textContent = JSON.stringify(r.fields ?? {}, null, 2);
+    recordModal.classList.remove('hidden');
+  }
+
+  recordClose.addEventListener('click', () => recordModal.classList.add('hidden'));
+  recordModal.addEventListener('click', (ev) => { if (ev.target === recordModal) recordModal.classList.add('hidden'); });
+
+  // ── MCP 配置面板 ───────────────────────────────────────────────
+
+  function field(labelText) { const w = el('div', 'field'); w.append(el('label', null, labelText)); return w; }
+  function makeInput(cls, value, placeholder) {
+    const i = document.createElement('input'); i.className = cls; i.value = value ?? '';
+    if (placeholder) i.placeholder = placeholder; return i;
+  }
+  function makeSelect(cls, options, value) {
+    const s = document.createElement('select'); s.className = cls;
+    for (const o of options) { const opt = document.createElement('option'); opt.value = o.value; opt.textContent = o.label; s.append(opt); }
+    s.value = value; return s;
+  }
   function makeTextarea(cls, value, placeholder) {
-    const t = document.createElement('textarea');
-    t.className = cls;
-    t.value = value ?? '';
-    if (placeholder) t.placeholder = placeholder;
-    return t;
+    const t = document.createElement('textarea'); t.className = cls; t.value = value ?? '';
+    if (placeholder) t.placeholder = placeholder; return t;
   }
 
-  // Normalize a stored server into editor-friendly plain values.
   function normalizeServer(s) {
     return {
       name: s.name ?? '',
@@ -184,14 +300,12 @@
     row1.append(nameF, transF);
     box.append(row1);
 
-    // http fields
     const httpRow = el('div', 'row js-http');
     const urlF = field('URL'); urlF.append(makeInput('js-url', server.url, 'https://.../mcp'));
     const authF = field('Authorization（可用 ${ENV_VAR}）'); authF.append(makeInput('js-auth', server.authorization, 'Bearer ${CRM_MCP_TOKEN}'));
     httpRow.append(urlF, authF);
     box.append(httpRow);
 
-    // stdio fields
     const stdioRow = el('div', 'row js-stdio');
     const cmdF = field('命令'); cmdF.append(makeInput('js-command', server.command, 'npx'));
     const argsF = field('参数（空格分隔）'); argsF.append(makeInput('js-args', server.args, '-y mcp-remote https://...'));
@@ -204,11 +318,10 @@
     box.append(envRow);
 
     const wpRow = el('div', 'row');
-    const wpF = field('写操作关键词（逗号分隔，用于确认闸门）'); wpF.append(makeInput('js-write', server.writeToolPatterns, 'create, update, delete, add'));
+    const wpF = field('写操作关键词（逗号分隔）'); wpF.append(makeInput('js-write', server.writeToolPatterns, 'create, update, delete, add'));
     wpRow.append(wpF);
     box.append(wpRow);
 
-    // connection status
     const statusLine = el('div', 'status-line');
     const failure = failures.find(([n]) => n === server.name);
     if (failure) { statusLine.classList.add('fail'); statusLine.textContent = '未连接: ' + failure[1]; }
@@ -225,7 +338,6 @@
     transF.querySelector('select').addEventListener('change', syncVisibility);
     nameF.querySelector('input').addEventListener('input', syncVisibility);
     syncVisibility();
-
     remove.addEventListener('click', () => box.remove());
     return box;
   }
@@ -242,13 +354,11 @@
       const envText = box.querySelector('.js-env').value;
       const write = box.querySelector('.js-write').value.split(',').map((s) => s.trim()).filter(Boolean);
       if (!name) continue;
-
       const env = {};
       for (const line of envText.split('\n')) {
         const idx = line.indexOf('=');
         if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
       }
-
       const server = { name, transport, writeToolPatterns: write };
       if (transport === 'stdio') {
         server.command = command;
@@ -269,9 +379,7 @@
       const data = await res.json();
       mcpFailures = data.failures || [];
       serverList.innerHTML = '';
-      for (const s of data.servers) {
-        serverList.append(renderServerEditor(normalizeServer(s), mcpFailures));
-      }
+      for (const s of data.servers) serverList.append(renderServerEditor(normalizeServer(s), mcpFailures));
       configResult.textContent = '';
     } catch (err) {
       configResult.className = 'err';
@@ -279,16 +387,11 @@
     }
   }
 
-  settingsBtn.addEventListener('click', () => {
-    settingsModal.classList.remove('hidden');
-    loadMcpConfigUI();
-  });
+  settingsBtn.addEventListener('click', () => { settingsModal.classList.remove('hidden'); loadMcpConfigUI(); });
   settingsClose.addEventListener('click', () => settingsModal.classList.add('hidden'));
   settingsModal.addEventListener('click', (ev) => { if (ev.target === settingsModal) settingsModal.classList.add('hidden'); });
 
-  addServerBtn.addEventListener('click', () => {
-    serverList.append(renderServerEditor(normalizeServer({ transport: 'streamable-http' }), []));
-  });
+  addServerBtn.addEventListener('click', () => serverList.append(renderServerEditor(normalizeServer({ transport: 'streamable-http' }), [])));
 
   saveConfigBtn.addEventListener('click', async () => {
     const servers = collectServers();
@@ -308,13 +411,13 @@
       } else {
         configResult.className = 'ok';
         const fails = data.failures || [];
+        mcpFailures = fails;
         configResult.textContent = fails.length
           ? '已保存；未连接: ' + fails.map(([n, e]) => `${n}(${e})`).join('; ')
           : '已保存，全部连接成功。';
-        // refresh editors' status
         serverList.innerHTML = '';
         for (const s of data.servers) serverList.append(renderServerEditor(normalizeServer(s), fails));
-        refreshGlobalStatus();
+        setStatus(fails.length ? 'warn' : 'ok', fails.length ? '部分系统未连接: ' + fails.map(([n]) => n).join(', ') : '就绪');
       }
     } catch (err) {
       configResult.className = 'err';
@@ -324,31 +427,16 @@
     }
   });
 
-  function refreshGlobalStatus() {
-    const fails = mcpFailures;
-    setStatus(fails.length ? 'warn' : 'ok', fails.length ? '部分系统未连接: ' + fails.map(([n]) => n).join(', ') : '就绪');
+  // ── quick actions ──────────────────────────────────────────────
+
+  for (const chip of quickActions.querySelectorAll('.chip')) {
+    chip.addEventListener('click', () => {
+      inputEl.value = chip.dataset.template;
+      inputEl.focus();
+    });
   }
 
-  // ── chat bootstrap ─────────────────────────────────────────────
-
-  async function init() {
-    const res = await fetch('/api/sessions', { method: 'POST' });
-    const data = await res.json();
-    sessionId = data.id;
-    mcpFailures = data.mcpFailures || [];
-    refreshGlobalStatus();
-
-    const es = new EventSource(`/api/sessions/${sessionId}/events`);
-    es.onmessage = (msg) => {
-      try {
-        const { seq, event } = JSON.parse(msg.data);
-        if (seq <= maxSeq) return;
-        maxSeq = seq;
-        handleEvent(event);
-      } catch (_) { /* ignore */ }
-    };
-    es.onerror = () => setStatus('warn', '连接中断，正在重连…');
-  }
+  // ── composer ───────────────────────────────────────────────────
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -373,6 +461,22 @@
       addMessage('assistant', '发送失败: ' + err.message);
     }
   });
+
+  newSessionBtn.addEventListener('click', newSession);
+
+  // ── boot ───────────────────────────────────────────────────────
+
+  async function init() {
+    const listRes = await fetch('/api/sessions');
+    const listData = await listRes.json();
+    const sessions = listData.sessions || [];
+    if (sessions.length) {
+      await switchSession(sessions[0].id);
+    } else {
+      await newSession();
+    }
+    loadRecords();
+  }
 
   init().catch((err) => setStatus('warn', '启动失败: ' + err.message));
 })();
