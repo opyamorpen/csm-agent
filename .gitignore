@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+
+# Local overrides that may contain real endpoints / secrets must not be committed.
+config/local*.yaml

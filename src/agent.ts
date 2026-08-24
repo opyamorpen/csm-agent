@@ -1,0 +1,122 @@
+import type { AssistantMessage, Context, Model, Models, Tool, ToolCall } from '@earendil-works/pi-ai';
+import { CONFIRM_TOOL_NAME, type ConfirmDraft } from './tools/confirm.js';
+
+/** Structural gateway so the loop can be unit-tested with a fake. */
+export interface McpGateway {
+  resolve(publicName: string): { server: string; rawName: string } | undefined;
+  isWrite(server: string, rawName: string): boolean;
+  call(publicName: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+}
+
+export interface AgentEvent {
+  type: 'text' | 'tool_call' | 'confirm' | 'tool_result' | 'done';
+  text?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  draft?: ConfirmDraft;
+  result?: string;
+}
+
+export interface AgentHooks {
+  onEvent: (e: AgentEvent) => void;
+  /** Ask the human to approve/reject a draft. Resolve true = approve. */
+  requestConfirm: (draft: ConfirmDraft) => Promise<boolean>;
+}
+
+export interface RunParams {
+  models: Models;
+  model: Model<any>;
+  mcp: McpGateway;
+  tools: Tool[];
+  systemPrompt: string;
+  userInput: string;
+  hooks: AgentHooks;
+  maxIterations?: number;
+}
+
+export function extractText(content: readonly { type: string }[]): string {
+  return content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof (b as { text?: unknown }).text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+}
+
+export async function runAgent(params: RunParams): Promise<string> {
+  const { models, model, mcp, tools, systemPrompt, userInput, hooks, maxIterations = 20 } = params;
+
+  const context: Context = {
+    systemPrompt,
+    messages: [{ role: 'user', content: userInput, timestamp: Date.now() }],
+    tools,
+  };
+
+  let approvedWrite = false;
+  let lastText = '';
+
+  for (let i = 0; i < maxIterations; i++) {
+    const msg: AssistantMessage = await models.complete(model, context);
+    context.messages.push(msg);
+
+    const text = extractText(msg.content);
+    if (text) {
+      lastText = text;
+      hooks.onEvent({ type: 'text', text });
+    }
+
+    const calls = msg.content.filter((b): b is ToolCall => b.type === 'toolCall');
+    if (calls.length === 0) {
+      hooks.onEvent({ type: 'done', text: lastText });
+      return lastText || '(未得到最终答复)';
+    }
+
+    for (const call of calls) {
+      hooks.onEvent({ type: 'tool_call', name: call.name, arguments: call.arguments });
+
+      let resultText: string;
+      let isError = false;
+
+      if (call.name === CONFIRM_TOOL_NAME) {
+        const draft = call.arguments as unknown as ConfirmDraft;
+        hooks.onEvent({ type: 'confirm', draft });
+        const ok = await hooks.requestConfirm(draft);
+        approvedWrite = ok;
+        resultText = ok
+          ? 'APPROVED — 本次写操作已获批准，可以调用对应写工具。'
+          : 'REJECTED — 已拒绝，不要写入；请询问用户需要修改什么。';
+      } else {
+        const target = mcp.resolve(call.name);
+        if (!target) {
+          resultText = `未知工具: ${call.name}`;
+          isError = true;
+        } else if (mcp.isWrite(target.server, target.rawName) && !approvedWrite) {
+          resultText = `拒绝执行: ${call.name} 是写操作。必须先调用 ${CONFIRM_TOOL_NAME} 并获得 APPROVED。`;
+          isError = true;
+        } else {
+          try {
+            const r = await mcp.call(call.name, (call.arguments ?? {}) as Record<string, unknown>);
+            resultText = r.text;
+            isError = r.isError;
+            approvedWrite = false; // 一次性批准，用完即失效
+          } catch (err) {
+            resultText = `MCP 调用失败: ${(err as Error).message}`;
+            isError = true;
+          }
+        }
+      }
+
+      hooks.onEvent({ type: 'tool_result', name: call.name, result: resultText });
+      context.messages.push({
+        role: 'toolResult',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: 'text', text: resultText }],
+        isError,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  hooks.onEvent({ type: 'done', text: lastText });
+  return lastText || '（达到最大迭代次数，仍未得到最终答复）';
+}

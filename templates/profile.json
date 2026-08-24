@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "客户档案 Customer Profile",
+  "description": "每个客户一份的档案，回写 ONES（默认 Wiki 页面组「客户档案」）。",
+  "type": "object",
+  "required": ["customer_id", "customer_name"],
+  "properties": {
+    "customer_id": { "type": "string", "description": "CRM 中客户唯一 ID" },
+    "customer_name": { "type": "string", "description": "客户名称" },
+    "industry": { "type": "string", "description": "行业" },
+    "scale": { "type": "string", "description": "规模（人数/营收等）" },
+    "key_contacts": {
+      "type": "array",
+      "description": "关键联系人",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string" },
+          "contact": { "type": "string" }
+        }
+      }
+    },
+    "current_stage": { "type": "string", "description": "当前阶段（售前/实施/交付/续约等）" },
+    "products_used": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "使用中的产品/服务"
+    },
+    "contract_renewal": {
+      "type": "object",
+      "description": "合同与续约信息",
+      "properties": {
+        "contract_end": { "type": "string", "format": "date" },
+        "renewal_status": { "type": "string" }
+      }
+    },
+    "health_score": { "type": "string", "description": "健康度（如 红/黄/绿 或 1-5）" },
+    "recent_followup_summary": { "type": "string", "description": "最近跟进摘要" },
+    "related_ones_projects": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关联 ONES 项目"
+    },
+    "related_ones_items": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关联 ONES 需求/工单"
+    },
+    "related_recordings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关联录音清单（录音 ID）"
+    }
+  }
+}

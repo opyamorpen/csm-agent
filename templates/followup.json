@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "跟进记录 Follow-up Record",
+  "description": "每次客户互动的一条跟进记录，回写 CRM。",
+  "type": "object",
+  "required": ["customer_id", "customer_name", "followup_date", "method", "key_topics"],
+  "properties": {
+    "customer_id": { "type": "string", "description": "CRM 中客户唯一 ID" },
+    "customer_name": { "type": "string", "description": "客户名称" },
+    "followup_date": { "type": "string", "format": "date", "description": "跟进日期" },
+    "participants": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "参与人（CSM、客户方等）"
+    },
+    "method": {
+      "type": "string",
+      "enum": ["电话", "会议", "拜访", "线上"],
+      "description": "跟进方式"
+    },
+    "source_recording_id": { "type": "string", "description": "来源录音 ID" },
+    "source_transcript": { "type": "string", "description": "录音转录文本/摘要" },
+    "key_topics": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关键议题"
+    },
+    "customer_requests": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "客户诉求/反馈"
+    },
+    "action_items": {
+      "type": "array",
+      "description": "行动项与负责人",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": { "type": "string", "description": "行动内容" },
+          "owner": { "type": "string", "description": "负责人" },
+          "due": { "type": "string", "format": "date", "description": "截止日期" }
+        }
+      }
+    },
+    "next_steps": { "type": "string", "description": "下一步计划" },
+    "related_ones_items": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关联 ONES 需求/工单编号"
+    }
+  }
+}

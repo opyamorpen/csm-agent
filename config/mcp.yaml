@@ -1,0 +1,37 @@
+# CSM agent — MCP server connections.
+#
+# Fill in the real endpoints before first use. Secrets must never be committed:
+# reference them as ${ENV_VAR}, which src/config.ts expands from process.env.
+#
+# Transport options:
+#   - stdio:           a local executable (or `npx mcp-remote <url>` wrapper)
+#   - streamable-http: a remote MCP URL (headers carry the auth token)
+
+servers:
+  - name: ones
+    transport: stdio
+    command: npx
+    args: ["-y", "mcp-remote", "https://YOUR-ONES-MCP-ENDPOINT"]
+    env:
+      ONES_MCP_TOKEN: "${ONES_MCP_TOKEN}"
+    toolCallTimeoutMs: 90000
+    # Heuristic used to decide which tools are WRITE operations and therefore
+    # require confirm_write approval first. Refine against the real tool list.
+    writeToolPatterns: ["create", "update", "delete", "add", "save", "write", "post", "put", "insert", "remove", "publish"]
+
+  - name: crm
+    transport: streamable-http
+    url: "https://YOUR-CRM-MCP-ENDPOINT/mcp"
+    headers:
+      Authorization: "Bearer ${CRM_MCP_TOKEN}"
+    toolCallTimeoutMs: 60000
+    writeToolPatterns: ["create", "update", "delete", "add", "save", "write", "post", "put", "insert", "remove", "log"]
+
+  - name: recording
+    transport: streamable-http
+    url: "https://YOUR-RECORDING-MCP-ENDPOINT/mcp"
+    headers:
+      Authorization: "Bearer ${RECORDING_MCP_TOKEN}"
+    toolCallTimeoutMs: 60000
+    # Recording system is read-only for the agent: no write patterns.
+    writeToolPatterns: []
