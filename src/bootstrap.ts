@@ -3,6 +3,7 @@ import type { Model, Models, Tool } from '@earendil-works/pi-ai';
 import { loadMcpServers, loadDotEnv, type McpServerConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
+import { resolveCustomerTool } from './tools/customer.js';
 import { buildSystemPrompt } from './prompt.js';
 
 export interface Runtime {
@@ -43,10 +44,10 @@ export async function createRuntime(): Promise<Runtime> {
     model,
     mcp,
     systemPrompt,
-    tools: [confirmWriteTool, ...mcp.toPiTools()],
+    tools: [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()],
     reload: async (servers) => {
       await mcp.reconnect(servers);
-      runtime.tools = [confirmWriteTool, ...mcp.toPiTools()];
+      runtime.tools = [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()];
     },
   };
   return runtime;

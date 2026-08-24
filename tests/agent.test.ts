@@ -97,3 +97,40 @@ test('runAgent: approve lets the write tool through (one-shot)', async () => {
   assert.equal(writeCalls(), 1, '批准后应调用一次写工具');
   assert.equal(result, '已写入');
 });
+
+test('runAgent: local tool (resolve_customer) emits customer_context and bypasses MCP', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+
+  const contexts: Array<{ type: string; context?: any }> = [];
+  const emitted: Array<{ type: string; context?: any }> = [];
+
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('resolve_customer', { customer_name: '云启科技', health: '绿' })]),
+    fauxAssistantMessage('已解析'),
+  ]);
+
+  const localTools = {
+    resolve_customer: async (args: Record<string, unknown>, emit: (e: any) => void) => {
+      const ctx = { customer_name: String(args.customer_name), health: String(args.health) };
+      emit({ type: 'customer_context', context: ctx });
+      return { text: '已记录' };
+    },
+  };
+
+  const result = await runAgent({
+    models, model, mcp: gw, tools,
+    systemPrompt: 'test',
+    userInput: '解析客户',
+    localTools,
+    hooks: {
+      onEvent(e) { if (e.type === 'customer_context') emitted.push(e); },
+      requestConfirm: async () => false,
+    },
+  });
+
+  assert.equal(writeCalls(), 0);
+  assert.equal(emitted.length, 1);
+  assert.equal((emitted[0] as any).context.customer_name, '云启科技');
+  assert.equal(result, '已解析');
+});

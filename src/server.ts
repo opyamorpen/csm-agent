@@ -7,6 +7,7 @@ import type { Runtime } from './bootstrap.js';
 import { loadMcpServers, saveMcpServers, type McpServerConfig } from './config.js';
 import { AgentSession, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
+import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
 import { Store, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,8 @@ interface Session {
   updatedAt: number;
   /** id of the most recent confirm_write draft record in this session */
   lastRecordId: string | null;
+  /** latest structured customer context resolved in this session */
+  customer: CustomerContext | null;
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -76,13 +79,25 @@ function validateServers(servers: unknown): string | null {
 function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
   const sessions = new Map<string, Session>();
 
-  function makeAgent(): AgentSession {
+  function makeAgent(session: Session): AgentSession {
     return new AgentSession({
       models: runtime.models,
       model: runtime.model,
       mcp: runtime.mcp,
       tools: runtime.tools,
       systemPrompt: runtime.systemPrompt,
+      localTools: {
+        [CUSTOMER_CONTEXT_TOOL_NAME]: async (args, emit) => {
+          const next = extractCustomerContext(args);
+          if (Object.keys(next).length === 0) {
+            return { text: '未提供有效字段，客户上下文未更新。' };
+          }
+          session.customer = mergeCustomerContext(session.customer, next);
+          session.updatedAt = Date.now();
+          emit({ type: 'customer_context', context: session.customer });
+          return { text: `已记录客户上下文: ${session.customer.customer_name ?? '(未命名)'}` };
+        },
+      },
     });
   }
 
@@ -94,6 +109,7 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
       updatedAt: session.updatedAt,
       messages: session.agent.context.messages as unknown[],
       events: session.events as Array<{ seq: number; event: unknown }>,
+      customer: session.customer,
     });
   }
 
@@ -126,11 +142,9 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
   for (const meta of store.listSessions()) {
     const stored = store.loadSession(meta.id);
     if (!stored) continue;
-    const agent = makeAgent();
-    agent.restore((stored.messages ?? []) as never);
     const session: Session = {
       id: meta.id,
-      agent,
+      agent: null as unknown as AgentSession,
       events: (stored.events ?? []) as Array<{ seq: number; event: DisplayEvent }>,
       clients: new Set(),
       pending: null,
@@ -139,7 +153,11 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
       lastRecordId: null,
+      customer: (stored.customer as CustomerContext | undefined) ?? null,
     };
+    const agent = makeAgent(session);
+    session.agent = agent;
+    agent.restore((stored.messages ?? []) as never);
     sessions.set(meta.id, session);
   }
 
@@ -197,7 +215,7 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
         const now = Date.now();
         const session: Session = {
           id: randomUUID(),
-          agent: makeAgent(),
+          agent: null as unknown as AgentSession,
           events: [],
           clients: new Set(),
           pending: null,
@@ -206,7 +224,9 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
           createdAt: now,
           updatedAt: now,
           lastRecordId: null,
+          customer: null,
         };
+        session.agent = makeAgent(session);
         sessions.set(session.id, session);
         persist(session);
         return json(res, 200, { id: session.id, mcpFailures: [...runtime.mcp.failures.entries()] });

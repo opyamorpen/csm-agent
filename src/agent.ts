@@ -1,5 +1,6 @@
 import type { AssistantMessage, Context, Model, Models, Tool, ToolCall } from '@earendil-works/pi-ai';
 import { CONFIRM_TOOL_NAME, type ConfirmDraft } from './tools/confirm.js';
+import type { CustomerContext } from './tools/customer.js';
 
 /** Structural gateway so the loop can be unit-tested with a fake. */
 export interface McpGateway {
@@ -9,12 +10,13 @@ export interface McpGateway {
 }
 
 export interface AgentEvent {
-  type: 'text' | 'tool_call' | 'confirm' | 'tool_result' | 'done';
+  type: 'text' | 'tool_call' | 'confirm' | 'tool_result' | 'customer_context' | 'done';
   text?: string;
   name?: string;
   arguments?: Record<string, unknown>;
   draft?: ConfirmDraft;
   result?: string;
+  context?: CustomerContext;
 }
 
 export interface AgentHooks {
@@ -22,6 +24,12 @@ export interface AgentHooks {
   /** Ask the human to approve/reject a draft. Resolve true = approve. */
   requestConfirm: (draft: ConfirmDraft) => Promise<boolean>;
 }
+
+/** A non-interactive local tool handler (e.g. resolve_customer). */
+export type LocalToolHandler = (
+  args: Record<string, unknown>,
+  emit: (e: AgentEvent) => void,
+) => Promise<{ text: string; isError?: boolean }>;
 
 export function extractText(content: readonly { type: string }[]): string {
   return content
@@ -37,6 +45,7 @@ export interface LoopParams {
   mcp: McpGateway;
   context: Context;
   hooks: AgentHooks;
+  localTools?: Record<string, LocalToolHandler>;
   maxIterations?: number;
 }
 
@@ -45,7 +54,7 @@ export interface LoopParams {
  * Returns the final assistant text.
  */
 export async function runLoop(params: LoopParams): Promise<string> {
-  const { models, model, mcp, context, hooks, maxIterations = 20 } = params;
+  const { models, model, mcp, context, hooks, localTools = {}, maxIterations = 20 } = params;
 
   let approvedWrite = false;
   let lastText = '';
@@ -80,6 +89,15 @@ export async function runLoop(params: LoopParams): Promise<string> {
         resultText = ok
           ? 'APPROVED — 本次写操作已获批准，可以调用对应写工具。'
           : 'REJECTED — 已拒绝，不要写入；请询问用户需要修改什么。';
+      } else if (localTools[call.name]) {
+        try {
+          const r = await localTools[call.name]((call.arguments ?? {}) as Record<string, unknown>, hooks.onEvent);
+          resultText = r.text;
+          isError = !!r.isError;
+        } catch (err) {
+          resultText = `本地工具 ${call.name} 执行失败: ${(err as Error).message}`;
+          isError = true;
+        }
       } else {
         const target = mcp.resolve(call.name);
         if (!target) {
@@ -123,6 +141,7 @@ export interface SessionConfig {
   mcp: McpGateway;
   tools: Tool[];
   systemPrompt: string;
+  localTools?: Record<string, LocalToolHandler>;
   maxIterations?: number;
 }
 

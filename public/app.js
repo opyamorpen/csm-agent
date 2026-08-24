@@ -24,6 +24,13 @@
   const recordMeta = document.getElementById('recordMeta');
   const recordFields = document.getElementById('recordFields');
 
+  const customerCard = document.getElementById('customerCard');
+  const ccName = document.getElementById('ccName');
+  const ccHealth = document.getElementById('ccHealth');
+  const ccIdentity = document.getElementById('ccIdentity');
+  const ccFacts = document.getElementById('ccFacts');
+  const ccSummary = document.getElementById('ccSummary');
+
   let sessionId = null;
   let es = null;
   let busy = false;
@@ -48,7 +55,56 @@
 
   // ── chat rendering ─────────────────────────────────────────────
 
-  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; }
+  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); }
+
+  function renderCustomerCard(c) {
+    const empty = customerCard.querySelector('.cc-empty');
+    const body = customerCard.querySelector('.cc-body');
+    if (!c || !c.customer_name && !c.crm_customer_id && !c.ones_project && !c.recording_subject_id) {
+      customerCard.classList.add('empty');
+      empty.classList.remove('hidden');
+      body.classList.add('hidden');
+      return;
+    }
+    customerCard.classList.remove('empty');
+    empty.classList.add('hidden');
+    body.classList.remove('hidden');
+
+    ccName.textContent = c.customer_name || c.crm_customer_id || '(未命名客户)';
+
+    const h = c.health;
+    ccHealth.textContent = h ? ('健康度 ' + h) : '';
+    ccHealth.className = 'cc-health' + (h === '绿' ? ' ok' : h === '黄' ? ' warn' : h === '红' ? ' danger' : '');
+
+    ccIdentity.innerHTML = '';
+    const tags = [
+      c.crm_customer_id && ('CRM ' + c.crm_customer_id),
+      c.ones_project && ('ONES ' + c.ones_project),
+      c.recording_subject_id && ('录音 ' + c.recording_subject_id),
+    ].filter(Boolean);
+    for (const t of tags) { const s = el('span', 'tag', t); ccIdentity.appendChild(s); }
+
+    ccFacts.innerHTML = '';
+    const facts = [
+      c.industry && ['行业', c.industry],
+      c.scale && ['规模', c.scale],
+      c.stage && ['阶段', c.stage],
+      c.renewal_status && ['续约', c.renewal_status],
+      c.key_contacts && ['联系人', c.key_contacts],
+    ].filter(Boolean);
+    if (facts.length) {
+      const wrap = document.createElement('span');
+      facts.forEach(([k, v], i) => {
+        if (i) wrap.append(' · ');
+        const b = document.createElement('b'); b.textContent = k + ' ';
+        wrap.append(b, v);
+      });
+      ccFacts.appendChild(wrap);
+    }
+
+    if (c.summary) { ccSummary.classList.remove('hidden'); ccSummary.textContent = c.summary; }
+    else { ccSummary.classList.add('hidden'); }
+  }
 
   function addMessage(cls, text) {
     const n = el('div', 'msg ' + cls, text);
@@ -124,6 +180,7 @@
         }
         break;
       case 'confirm': addConfirmCard(e.draft); loadRecords(); break;
+      case 'customer_context': renderCustomerCard(e.context); break;
       case 'turn_end':
         busy = false;
         setThinking(false);

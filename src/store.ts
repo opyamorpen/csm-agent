@@ -33,6 +33,7 @@ export interface StoredSession {
   updatedAt: number;
   messages: unknown[];
   events: Array<{ seq: number; event: unknown }>;
+  customer?: unknown;
 }
 
 /** Default data home for sessions + records. Override with CSM_DATA_DIR. */

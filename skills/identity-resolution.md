@@ -25,10 +25,13 @@ description: 把自然语言中的"某个客户"解析为跨系统唯一标识�
 - 严禁在未确认唯一性时继续读取数据或回写。
 
 ## 输出
-一段确定的三元组映射 + 各系统主键，例如：
+锁定唯一标识后，调用 `resolve_customer` 工具，把结构化字段提交到界面上的客户上下文卡（增量更新，后续读到新信息可再次调用）。字段示例：
 ```
-客户: 杭州云启科技
-CRM 客户 ID: cust_1024
-ONES 项目: 云启-数据中台实施
-录音主体 ID: rec_subject_77
+resolve_customer({
+  customer_name: "杭州云启科技",
+  crm_customer_id: "cust_1024",
+  ones_project: "云启-数据中台实施",
+  recording_subject_id: "rec_subject_77"
+})
 ```
+并在对话里用一句话告知用户已锁定客户。
