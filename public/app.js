@@ -18,6 +18,10 @@
   const saveConfigBtn = document.getElementById('saveConfig');
   const configResult = document.getElementById('configResult');
 
+  const llmProvider = document.getElementById('llmProvider');
+  const llmModel = document.getElementById('llmModel');
+  const llmKey = document.getElementById('llmKey');
+
   const recordModal = document.getElementById('recordModal');
   const recordClose = document.getElementById('recordClose');
   const recordModalTitle = document.getElementById('recordModalTitle');
@@ -470,7 +474,27 @@
     }
   }
 
-  settingsBtn.addEventListener('click', () => { settingsModal.classList.remove('hidden'); loadMcpConfigUI(); });
+  async function loadLlmConfigUI() {
+    try {
+      const res = await fetch('/api/config/llm');
+      const data = await res.json();
+      llmProvider.value = data.provider || 'deepseek';
+      llmModel.value = data.model || '';
+      llmKey.value = '';
+      llmKey.placeholder = data.apiKeyConfigured
+        ? '已设置（留空则不修改）'
+        : 'sk-... 或用 ${ENV_VAR}';
+    } catch (err) {
+      configResult.className = 'err';
+      configResult.textContent = '加载失败: ' + err.message;
+    }
+  }
+
+  settingsBtn.addEventListener('click', () => {
+    settingsModal.classList.remove('hidden');
+    loadLlmConfigUI();
+    loadMcpConfigUI();
+  });
   settingsClose.addEventListener('click', () => settingsModal.classList.add('hidden'));
   settingsModal.addEventListener('click', (ev) => { if (ev.target === settingsModal) settingsModal.classList.add('hidden'); });
 
@@ -478,30 +502,50 @@
 
   saveConfigBtn.addEventListener('click', async () => {
     const servers = collectServers();
+    const llmPayload = {
+      provider: llmProvider.value,
+      model: llmModel.value.trim(),
+      apiKey: llmKey.value.trim(),
+    };
     saveConfigBtn.disabled = true;
     configResult.className = '';
-    configResult.textContent = '保存并重连中…';
+    configResult.textContent = '保存中…';
+    const results = [];
     try {
-      const res = await fetch('/api/config/mcp', {
+      // save LLM first (model switch may fail fast)
+      const llmRes = await fetch('/api/config/llm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(llmPayload),
+      });
+      const llmData = await llmRes.json();
+      if (!llmRes.ok) {
+        results.push('模型: ' + (llmData.error || llmRes.status));
+      } else {
+        results.push('模型: ' + llmData.provider + '/' + llmData.model + ' 已生效');
+      }
+
+      const mcpRes = await fetch('/api/config/mcp', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ servers }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        configResult.className = 'err';
-        configResult.textContent = '保存失败: ' + (data.error || res.status);
+      const mcpData = await mcpRes.json();
+      if (!mcpRes.ok) {
+        results.push('MCP: ' + (mcpData.error || mcpRes.status));
       } else {
-        configResult.className = 'ok';
-        const fails = data.failures || [];
+        const fails = mcpData.failures || [];
         mcpFailures = fails;
-        configResult.textContent = fails.length
-          ? '已保存；未连接: ' + fails.map(([n, e]) => `${n}(${e})`).join('; ')
-          : '已保存，全部连接成功。';
+        results.push(fails.length
+          ? 'MCP 已保存；未连接: ' + fails.map(([n, e]) => `${n}(${e})`).join('; ')
+          : 'MCP 已保存，全部连接成功');
         serverList.innerHTML = '';
-        for (const s of data.servers) serverList.append(renderServerEditor(normalizeServer(s), fails));
-        setStatus(fails.length ? 'warn' : 'ok', fails.length ? '部分系统未连接: ' + fails.map(([n]) => n).join(', ') : '就绪');
+        for (const s of mcpData.servers) serverList.append(renderServerEditor(normalizeServer(s), fails));
       }
+
+      configResult.className = 'ok';
+      configResult.textContent = results.join('；');
+      setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
     } catch (err) {
       configResult.className = 'err';
       configResult.textContent = '保存失败: ' + err.message;
@@ -548,6 +592,20 @@
   newSessionBtn.addEventListener('click', newSession);
 
   // ── boot ───────────────────────────────────────────────────────
+
+  const PROVIDERS = [
+    ['deepseek', 'DeepSeek'],
+    ['openai', 'OpenAI'],
+    ['anthropic', 'Anthropic (Claude)'],
+    ['moonshotai', 'Moonshot (Kimi)'],
+    ['groq', 'Groq'],
+  ];
+  for (const [id, label] of PROVIDERS) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = label;
+    llmProvider.appendChild(opt);
+  }
 
   async function init() {
     const listRes = await fetch('/api/sessions');

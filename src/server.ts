@@ -191,11 +191,41 @@ function buildHandler(runtime: Runtime, store: Store): http.RequestListener {
         if (err) return json(res, 400, { error: err });
         const servers = body.servers as McpServerConfig[];
         saveMcpServers(servers);
-        await runtime.reload(servers);
+        await runtime.reloadMcp(servers);
         return json(res, 200, {
           ok: true,
           servers: loadMcpServers(),
           failures: [...runtime.mcp.failures.entries()],
+        });
+      }
+
+      // ── LLM configuration (read + save/switch) ──
+      if (req.method === 'GET' && path === '/api/config/llm') {
+        return json(res, 200, {
+          provider: runtime.llm.provider,
+          model: runtime.llm.model,
+          apiKeyEnv: runtime.llm.apiKeyEnv,
+          apiKeyConfigured: !!runtime.llm.apiKey,
+        });
+      }
+      if (req.method === 'PUT' && path === '/api/config/llm') {
+        const body = await readBody(req);
+        if (!body.provider || !body.model) return json(res, 400, { error: 'provider 与 model 必填' });
+        try {
+          runtime.setLlm({
+            provider: String(body.provider),
+            model: String(body.model),
+            apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey : undefined,
+            apiKeyEnv: runtime.llm.apiKeyEnv,
+          });
+        } catch (err) {
+          return json(res, 400, { error: (err as Error).message });
+        }
+        return json(res, 200, {
+          ok: true,
+          provider: runtime.llm.provider,
+          model: runtime.llm.model,
+          apiKeyConfigured: !!runtime.llm.apiKey,
         });
       }
 

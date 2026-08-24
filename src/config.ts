@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -19,6 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const configDir = join(here, '..', 'config');
 
 const USER_CONFIG = join(configDir, 'mcp.user.yaml');
+const LLM_CONFIG = join(configDir, 'llm.user.yaml');
 
 /** Expand ${ENV_VAR} placeholders inside a config tree using process.env. */
 export function expandEnv(value: unknown): unknown {
@@ -87,4 +88,62 @@ export function loadDotEnv(): void {
   } catch {
     /* no .env file */
   }
+}
+
+// ── LLM (model) configuration ──────────────────────────────────────────────
+
+export interface LlmConfig {
+  provider: string;
+  model: string;
+  /** API key value; only written to disk, never returned by GET. */
+  apiKey?: string;
+  /** Environment variable the key should be exposed as. */
+  apiKeyEnv: string;
+}
+
+/** Provider id → { label, apiKeyEnv, defaultModel }. */
+export const LLM_PROVIDERS: Array<{ id: string; label: string; apiKeyEnv: string; defaultModel: string }> = [
+  { id: 'deepseek', label: 'DeepSeek', apiKeyEnv: 'DEEPSEEK_API_KEY', defaultModel: 'deepseek-v4-flash' },
+  { id: 'openai', label: 'OpenAI', apiKeyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-4o-mini' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', apiKeyEnv: 'ANTHROPIC_API_KEY', defaultModel: 'claude-sonnet-4-5' },
+  { id: 'moonshotai', label: 'Moonshot (Kimi)', apiKeyEnv: 'MOONSHOT_API_KEY', defaultModel: 'moonshot-v1-8k' },
+  { id: 'groq', label: 'Groq', apiKeyEnv: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },
+];
+
+export function providerFor(id: string) {
+  return LLM_PROVIDERS.find((p) => p.id === id);
+}
+
+export function loadLlmConfig(): LlmConfig {
+  try {
+    const raw = yaml.load(readFileSync(LLM_CONFIG, 'utf8')) as Partial<LlmConfig>;
+    const provider = typeof raw?.provider === 'string' ? raw.provider : 'deepseek';
+    const p = providerFor(provider) ?? providerFor('deepseek')!;
+    return {
+      provider,
+      model: typeof raw?.model === 'string' && raw.model ? raw.model : p.defaultModel,
+      apiKey: typeof raw?.apiKey === 'string' ? raw.apiKey : undefined,
+      apiKeyEnv: typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : p.apiKeyEnv,
+    };
+  } catch {
+    const p = providerFor('deepseek')!;
+    return { provider: 'deepseek', model: p.defaultModel, apiKeyEnv: p.apiKeyEnv };
+  }
+}
+
+export function saveLlmConfig(cfg: LlmConfig): void {
+  const p = providerFor(cfg.provider) ?? providerFor('deepseek')!;
+  const out: LlmConfig = {
+    provider: cfg.provider,
+    model: cfg.model || p.defaultModel,
+    apiKeyEnv: p.apiKeyEnv,
+  };
+  if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
+  atomicWriteYaml(LLM_CONFIG, { llm: out });
+}
+
+function atomicWriteYaml(path: string, obj: unknown): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, yaml.dump(obj, { lineWidth: -1, noRefs: true }), 'utf8');
+  renameSync(tmp, path);
 }

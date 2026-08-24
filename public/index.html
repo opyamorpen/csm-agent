@@ -61,14 +61,40 @@
   <div id="settingsModal" class="modal hidden">
     <div class="modal-box">
       <div class="modal-head">
-        <h2>MCP 服务器配置</h2>
+        <h2>设置</h2>
         <button id="settingsClose" class="icon-btn">✕</button>
       </div>
-      <p class="hint">添加任意数量的 MCP 服务器——每个只需填「名称 + 地址 + Token」即可（Token 可留空或用 <code>${ENV_VAR}</code> 引用环境变量）。配置保存在 <code>config/mcp.user.yaml</code>（不入库）。</p>
-      <div id="serverList"></div>
-      <div class="modal-actions">
+
+      <div class="settings-section">
+        <div class="section-title">大模型</div>
+        <div class="llm-editor">
+          <div class="row">
+            <div class="field">
+              <label>服务商</label>
+              <select id="llmProvider"></select>
+            </div>
+            <div class="field">
+              <label>模型</label>
+              <input id="llmModel" placeholder="例如 deepseek-v4-flash" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>API Key（留空则不修改，可用 ${ENV_VAR}）</label>
+              <input id="llmKey" type="password" placeholder="sk-..." autocomplete="off" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="section-title">MCP 服务器 <span class="hint-inline">每个只需「名称 + 地址 + Token」</span></div>
+        <div id="serverList"></div>
         <button id="addServer" class="ghost">＋ 添加服务器</button>
-        <button id="saveConfig" class="primary">保存并重连</button>
+      </div>
+
+      <div class="modal-actions">
+        <button id="saveConfig" class="primary">保存全部</button>
       </div>
       <div id="configResult"></div>
     </div>
