@@ -58,39 +58,52 @@ export class McpHub {
   private servers = new Map<string, ConnectedServer>();
   private toolIndex = new Map<string, { server: string; rawName: string; client: Client }>();
 
+  /** Servers that failed to connect, keyed by server name. */
+  readonly failures = new Map<string, string>();
+
   async connect(configs: McpServerConfig[]): Promise<void> {
     for (const cfg of configs) {
-      const client = new Client({ name: 'csm-agent', version: '0.1.0' }, { capabilities: {} });
-      if (cfg.transport === 'stdio') {
-        if (!cfg.command) throw new Error(`MCP server "${cfg.name}": stdio transport requires "command"`);
-        const transport = new StdioClientTransport({
-          command: cfg.command,
-          args: cfg.args,
-          env: cfg.env,
-          stderr: 'inherit',
-        });
-        await client.connect(transport);
-      } else {
-        if (!cfg.url) throw new Error(`MCP server "${cfg.name}": streamable-http transport requires "url"`);
-        const transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
-          requestInit: cfg.headers ? { headers: cfg.headers } : undefined,
-        });
-        await client.connect(transport);
+      try {
+        await this.connectOne(cfg);
+      } catch (err) {
+        const message = (err as Error).message;
+        this.failures.set(cfg.name, message);
+        console.warn(`[mcp] 连接 "${cfg.name}" 失败（已跳过）: ${message}`);
       }
+    }
+  }
 
-      const listed = await client.listTools();
-      const specs: McpToolSpec[] = (listed.tools ?? []).map((t) => ({
-        publicName: toPublicName(cfg.name, t.name),
-        server: cfg.name,
-        rawName: t.name,
-        description: t.description ?? '',
-        inputSchema: t.inputSchema,
-      }));
+  private async connectOne(cfg: McpServerConfig): Promise<void> {
+    const client = new Client({ name: 'csm-agent', version: '0.1.0' }, { capabilities: {} });
+    if (cfg.transport === 'stdio') {
+      if (!cfg.command) throw new Error(`MCP server "${cfg.name}": stdio transport requires "command"`);
+      const transport = new StdioClientTransport({
+        command: cfg.command,
+        args: cfg.args,
+        env: cfg.env,
+        stderr: 'inherit',
+      });
+      await client.connect(transport);
+    } else {
+      if (!cfg.url) throw new Error(`MCP server "${cfg.name}": streamable-http transport requires "url"`);
+      const transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
+        requestInit: cfg.headers ? { headers: cfg.headers } : undefined,
+      });
+      await client.connect(transport);
+    }
 
-      this.servers.set(cfg.name, { config: cfg, client, tools: specs });
-      for (const spec of specs) {
-        this.toolIndex.set(spec.publicName, { server: cfg.name, rawName: spec.rawName, client });
-      }
+    const listed = await client.listTools();
+    const specs: McpToolSpec[] = (listed.tools ?? []).map((t) => ({
+      publicName: toPublicName(cfg.name, t.name),
+      server: cfg.name,
+      rawName: t.name,
+      description: t.description ?? '',
+      inputSchema: t.inputSchema,
+    }));
+
+    this.servers.set(cfg.name, { config: cfg, client, tools: specs });
+    for (const spec of specs) {
+      this.toolIndex.set(spec.publicName, { server: cfg.name, rawName: spec.rawName, client });
     }
   }
 

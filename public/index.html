@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CSM Agent</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">CSM Agent <span class="sub">客户成功助手</span></div>
+    <div id="status" class="status"><span class="dot"></span>连接中…</div>
+  </header>
+
+  <main id="chat">
+    <div id="messages"></div>
+  </main>
+
+  <footer>
+    <form id="composer">
+      <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
+      <button id="send" type="submit">发送</button>
+    </form>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

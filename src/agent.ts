@@ -23,17 +23,6 @@ export interface AgentHooks {
   requestConfirm: (draft: ConfirmDraft) => Promise<boolean>;
 }
 
-export interface RunParams {
-  models: Models;
-  model: Model<any>;
-  mcp: McpGateway;
-  tools: Tool[];
-  systemPrompt: string;
-  userInput: string;
-  hooks: AgentHooks;
-  maxIterations?: number;
-}
-
 export function extractText(content: readonly { type: string }[]): string {
   return content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof (b as { text?: unknown }).text === 'string')
@@ -42,14 +31,21 @@ export function extractText(content: readonly { type: string }[]): string {
     .trim();
 }
 
-export async function runAgent(params: RunParams): Promise<string> {
-  const { models, model, mcp, tools, systemPrompt, userInput, hooks, maxIterations = 20 } = params;
+export interface LoopParams {
+  models: Models;
+  model: Model<any>;
+  mcp: McpGateway;
+  context: Context;
+  hooks: AgentHooks;
+  maxIterations?: number;
+}
 
-  const context: Context = {
-    systemPrompt,
-    messages: [{ role: 'user', content: userInput, timestamp: Date.now() }],
-    tools,
-  };
+/**
+ * Run one tool-calling loop over an existing context (mutates it in place).
+ * Returns the final assistant text.
+ */
+export async function runLoop(params: LoopParams): Promise<string> {
+  const { models, model, mcp, context, hooks, maxIterations = 20 } = params;
 
   let approvedWrite = false;
   let lastText = '';
@@ -119,4 +115,44 @@ export async function runAgent(params: RunParams): Promise<string> {
 
   hooks.onEvent({ type: 'done', text: lastText });
   return lastText || '（达到最大迭代次数，仍未得到最终答复）';
+}
+
+export interface SessionConfig {
+  models: Models;
+  model: Model<any>;
+  mcp: McpGateway;
+  tools: Tool[];
+  systemPrompt: string;
+  maxIterations?: number;
+}
+
+/** A multi-turn agent session that keeps conversation history in its context. */
+export class AgentSession {
+  readonly context: Context;
+
+  constructor(private readonly cfg: SessionConfig) {
+    this.context = {
+      systemPrompt: cfg.systemPrompt,
+      messages: [],
+      tools: cfg.tools,
+    };
+  }
+
+  /** Append a user message and run the loop. Returns the final assistant text. */
+  async send(userInput: string, hooks: AgentHooks): Promise<string> {
+    this.context.messages.push({ role: 'user', content: userInput, timestamp: Date.now() });
+    return runLoop({ ...this.cfg, context: this.context, hooks });
+  }
+}
+
+export interface RunParams extends SessionConfig {
+  userInput: string;
+  hooks: AgentHooks;
+}
+
+/** One-shot convenience wrapper (used by the CLI and tests). */
+export async function runAgent(params: RunParams): Promise<string> {
+  const { userInput, hooks, ...cfg } = params;
+  const session = new AgentSession(cfg);
+  return session.send(userInput, hooks);
 }
