@@ -48,6 +48,7 @@ const CLI_CAPABILITIES = [
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
+  { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -100,6 +101,7 @@ function help(): void {
   csm-agent customers [搜索词] [--json]
   csm-agent customer <客户ID或名称> [--json]
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
+  csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
   csm-agent action update <行动ID> <JSON>
   csm-agent action complete <行动ID> [实际结果]
@@ -198,6 +200,27 @@ async function showTimeline(customerInput: string, sourceType?: string): Promise
     externalId: event.externalId,
   })));
   console.log(`共 ${events.length} 条事件${sourceType ? `，类型 ${sourceType}` : ''}`);
+}
+
+async function showWorkhours(customerInput: string): Promise<void> {
+  const customer = await resolveCustomer(customerInput);
+  const body = await request<{ issueId: string | null; totalHours: number | null; remainingHours: number | null; records: any[] }>(
+    `/api/customers/${encodeURIComponent(customer.id)}/workhours`,
+  );
+  const records = [...(body.records ?? [])].sort((left, right) => {
+    const leftTime = Date.parse(left.startTime);
+    const rightTime = Date.parse(right.startTime);
+    return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime) || String(right.id ?? '').localeCompare(String(left.id ?? ''));
+  });
+  if (jsonOutput) return print({ ...body, records });
+  console.log(`${customer.name} · 已登记总工时 ${body.totalHours == null ? 'unknown' : `${Number(body.totalHours).toFixed(1)} 小时`} · 剩余工时 ${body.remainingHours == null ? 'unknown' : `${Number(body.remainingHours).toFixed(1)} 小时`}`);
+  console.table(records.map((record) => ({
+    owner: record.owner?.name ?? 'unknown',
+    date: record.startTime ?? 'unknown',
+    hours: `${Number(record.hours ?? 0).toFixed(1)} 小时`,
+    description: record.description || '无描述',
+  })));
+  console.log(`共 ${records.length} 条工时登记，按工时日期倒序`);
 }
 
 async function showActions(customerInput?: string): Promise<void> {
@@ -514,6 +537,7 @@ async function main(): Promise<void> {
     const customer = args.shift() ?? '';
     return showTimeline(customer, args.shift());
   }
+  if (command === 'workhours') return showWorkhours(args.join(' '));
   if (command === 'actions') return showActions(args.join(' ') || undefined);
   if (command === 'action') return actionCommand(args.shift() ?? '', args);
   if (command === 'cases') return showCases(args.join(' ') || undefined);

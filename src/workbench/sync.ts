@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
 import { assessRisk } from './risk.js';
-import type { Customer, SourceEvent, SyncRun } from './types.js';
+import type { Customer, SourceEvent, SyncRun, WorkhourRecord } from './types.js';
 
 const CRM_FIELDS = {
   id: '_id',
@@ -59,6 +59,12 @@ interface OnesIssuePage {
   endCursor?: string;
 }
 
+export interface OnesManhourPage {
+  records: WorkhourRecord[];
+  hasNextPage: boolean;
+  endCursor?: string;
+}
+
 export function parseOnesIssuePage(text: string): OnesIssuePage {
   const value = parseJson(text);
   const raw = Array.isArray(value?.data) ? value.data : [];
@@ -72,6 +78,44 @@ export function parseOnesIssuePage(text: string): OnesIssuePage {
     records,
     hasNextPage: pageInfo.has_next_page === true || pageInfo.hasNextPage === true,
     endCursor: asText(pageInfo.end_cursor ?? pageInfo.endCursor) ?? undefined,
+  };
+}
+
+function workhourDate(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim() && !/^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const date = new Date(number < 10_000_000_000 ? number * 1000 : number);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+export function parseOnesManhourPage(text: string): OnesManhourPage {
+  const value = parseJson(text);
+  const data = value?.data ?? value?.result?.data ?? {};
+  const raw: unknown[] = Array.isArray(data?.list) ? data.list : recordsIn(data);
+  const records = raw
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => {
+      const owner = item.owner && typeof item.owner === 'object' && !Array.isArray(item.owner)
+        ? item.owner as Record<string, unknown>
+        : null;
+      return {
+        id: asText(item.id) ?? '',
+        owner: owner ? { id: asText(owner.id) ?? undefined, name: asText(owner.name) ?? undefined } : null,
+        startTime: workhourDate(item.startTime) ?? '',
+        hours: Number(item.hours ?? 0),
+        description: asText(item.description) ?? '',
+      } satisfies WorkhourRecord;
+    })
+    .filter((item) => item.id && item.startTime);
+  const pageInfo = data?.pageInfo ?? data?.page_info ?? {};
+  return {
+    records,
+    hasNextPage: pageInfo.hasNextPage === true || pageInfo.has_next_page === true,
+    endCursor: asText(pageInfo.endCursor ?? pageInfo.end_cursor) ?? undefined,
   };
 }
 
@@ -277,6 +321,78 @@ export class PortfolioSyncService {
     const run = this.db.createSyncRun('customer', customerId);
     void this.executeCustomer(run, customerId);
     return run;
+  }
+
+  /** Read the current customer's ONES work-hour registrations for the UI/CLI. */
+  async listCustomerWorkhours(customerId: string): Promise<{
+    issueId: string | null;
+    totalHours: number | null;
+    remainingHours: number | null;
+    records: WorkhourRecord[];
+  }> {
+    const issue = this.db.listTimeline(customerId, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+    if (!issue) return { issueId: null, totalHours: null, remainingHours: null, records: [] };
+    const payload = issue.payload ?? {};
+    const totalHours = Number(payload.field019) / 100000;
+    const remainingHours = Number(payload.field020) / 100000;
+    const stored = Array.isArray(payload.workhourRecords) ? this.normalizeStoredWorkhours(payload.workhourRecords) : null;
+    if (stored) {
+      stored.sort((left, right) => Date.parse(right.startTime) - Date.parse(left.startTime) || right.id.localeCompare(left.id));
+      return {
+        issueId: issue.externalId,
+        totalHours: Number.isFinite(totalHours) ? totalHours : null,
+        remainingHours: Number.isFinite(remainingHours) ? remainingHours : null,
+        records: stored,
+      };
+    }
+    const records = await this.fetchWorkhourRecords(issue.externalId);
+    records.sort((left, right) => Date.parse(right.startTime) - Date.parse(left.startTime) || right.id.localeCompare(left.id));
+    return {
+      issueId: issue.externalId,
+      totalHours: Number.isFinite(totalHours) ? totalHours : null,
+      remainingHours: Number.isFinite(remainingHours) ? remainingHours : null,
+      records,
+    };
+  }
+
+  private normalizeStoredWorkhours(value: unknown[]): WorkhourRecord[] {
+    return value
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+      .map((item) => {
+        const owner = item.owner && typeof item.owner === 'object' && !Array.isArray(item.owner)
+          ? item.owner as Record<string, unknown>
+          : null;
+        return {
+          id: asText(item.id) ?? '',
+          owner: owner ? { id: asText(owner.id) ?? undefined, name: asText(owner.name) ?? undefined } : null,
+          startTime: workhourDate(item.startTime) ?? '',
+          hours: Number(item.hours ?? 0),
+          description: asText(item.description) ?? '',
+        };
+      })
+      .filter((item) => item.id && item.startTime);
+  }
+
+  private async fetchWorkhourRecords(issueId: string): Promise<WorkhourRecord[]> {
+    const modeResult = await this.mcp.call('mcp__ones__get_manhour_mode', {});
+    if (modeResult.isError) return [];
+    const mode = asText(parseJson(modeResult.text)?.result) ?? 'summary';
+    const tool = mode === 'simple'
+      ? 'mcp__ones__get_manhour_list_in_simple_mode'
+      : 'mcp__ones__get_manhour_list_in_summary_mode';
+    const records: WorkhourRecord[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const args: Record<string, unknown> = { issueID: issueId };
+      if (cursor) args.cursor = cursor;
+      const result = await this.mcp.call(tool, args);
+      if (result.isError) return records;
+      const parsed = parseOnesManhourPage(result.text);
+      records.push(...parsed.records);
+      if (!parsed.hasNextPage || !parsed.endCursor) break;
+      cursor = parsed.endCursor;
+    }
+    return records;
   }
 
   refreshPortfolioSources(): SyncRun {
@@ -519,6 +635,12 @@ export class PortfolioSyncService {
           url: onesIssueUrl(id, displayId), confidence: 0.2, attributionStatus: 'ambiguous' });
         continue;
       }
+      const workhourRecords = sourceType === 'customer_manhour'
+        ? await this.fetchWorkhourRecords(id)
+        : [];
+      const payload = sourceType === 'customer_manhour' && workhourRecords.length
+        ? { ...item, workhourRecords }
+        : item;
       const event = this.db.upsertSourceEvent({
         customerId: customer.id,
         sourceSystem: 'ones',
@@ -527,7 +649,7 @@ export class PortfolioSyncService {
         displayId,
         title,
         occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(),
-        payload: item,
+        payload,
         url: onesIssueUrl(id, displayId),
         confidence: 1,
         attributionStatus: 'confirmed',

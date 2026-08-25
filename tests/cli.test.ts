@@ -26,7 +26,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'customers', 'customer', 'timeline', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'api']) {
+  for (const command of ['serve', 'doctor', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/:id/complete')));

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { classifyDraftTypes, HemoryDraftService } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -87,6 +87,26 @@ test('workbench: ONESQL page parser unwraps item records and keeps the cursor', 
     page_info: { has_next_page: true, end_cursor: 'next-page' },
   }));
   assert.deepEqual(page.records, [{ uuid: 'issue-1', display_id: 'SUP-1', field001: '测试工单' }]);
+  assert.equal(page.hasNextPage, true);
+  assert.equal(page.endCursor, 'next-page');
+});
+
+test('workbench: ONES manhour parser normalizes detail records and pagination', () => {
+  const page = parseOnesManhourPage(JSON.stringify({
+    result: 'SUCCESS',
+    data: {
+      list: [
+        { id: 'log-1', description: '客户会议', hours: 1.5, startTime: 1785373200, owner: { id: 'user-1', name: '登记人' } },
+        { id: 'log-2', description: '缓存记录', hours: 0.5, startTime: '2026-07-30T01:00:00.000Z', owner: { id: 'user-2', name: '缓存登记人' } },
+      ],
+      pageInfo: { hasNextPage: true, endCursor: 'next-page' },
+    },
+  }));
+  assert.equal(page.records[0].id, 'log-1');
+  assert.equal(page.records[0].owner?.name, '登记人');
+  assert.equal(page.records[0].hours, 1.5);
+  assert.equal(page.records[0].startTime, '2026-07-30T01:00:00.000Z');
+  assert.equal(page.records[1].startTime, '2026-07-30T01:00:00.000Z');
   assert.equal(page.hasNextPage, true);
   assert.equal(page.endCursor, 'next-page');
 });

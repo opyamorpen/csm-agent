@@ -1023,6 +1023,50 @@
     return list;
   }
 
+  function renderWorkhours(events, workhours) {
+    const issue = events.find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+    const total = workhours?.totalHours ?? (issue ? Number(issue.payload?.field019 || 0) / 100000 : null);
+    const remaining = workhours?.remainingHours ?? (issue ? Number(issue.payload?.field020 || 0) / 100000 : null);
+    const records = [...(workhours?.records || [])].sort((left, right) => {
+      const leftTime = new Date(left.startTime).getTime();
+      const rightTime = new Date(right.startTime).getTime();
+      return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime) || String(right.id || '').localeCompare(String(left.id || ''));
+    });
+    const wrap = el('div', 'workhour-panel');
+    const summary = el('div', 'workhour-summary');
+    summary.append(definition('已登记总工时', total == null || !Number.isFinite(Number(total)) ? '未知' : `${Number(total).toFixed(1)} 小时`),
+      definition('剩余工时', remaining == null || !Number.isFinite(Number(remaining)) ? '未知' : `${Number(remaining).toFixed(1)} 小时`));
+    wrap.append(summary);
+    if (!records.length) {
+      wrap.append(el('div', 'workspace-empty', issue ? '暂无工时登记详情' : '暂无客户工时记录'));
+      return wrap;
+    }
+    const tableWrap = el('div', 'workhour-table-wrap');
+    const table = el('table', 'workhour-table');
+    table.setAttribute('aria-label', '工时登记详情');
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    for (const label of ['登记人', '工时日期', '登记小时', '工时描述']) {
+      const cell = el('th', null, label);
+      cell.scope = 'col';
+      headRow.append(cell);
+    }
+    head.append(headRow);
+    const body = document.createElement('tbody');
+    for (const record of records) {
+      const owner = record.owner?.name || '未知';
+      const row = document.createElement('tr');
+      row.append(el('td', null, owner), el('td', null, formatDateTime(record.startTime)),
+        el('td', 'workhour-hours', `${Number(record.hours || 0).toFixed(1)} 小时`),
+        el('td', 'workhour-description', record.description || '无描述'));
+      body.append(row);
+    }
+    table.append(head, body);
+    tableWrap.append(table);
+    wrap.append(tableWrap);
+    return wrap;
+  }
+
   function renderOnesWorkItems(events, sourceType) {
     const createdAt = (event) => event.payload?.field009 || event.occurredAt;
     const timestamp = (event) => {
@@ -1179,9 +1223,10 @@
     activeView = 'customer';
     workbench.classList.remove('hidden'); chatView.classList.add('hidden'); document.getElementById('records').classList.add('hidden'); footerEl.classList.add('hidden'); agentSessions.classList.add('hidden');
     for (const [name, section] of Object.entries(viewSections)) section.classList.toggle('hidden', name !== 'customer');
-    const [data, timelineData] = await Promise.all([
+    const [data, timelineData, workhoursData] = await Promise.all([
       api(`/api/customers/${encodeURIComponent(customerId)}/overview`),
       api(`/api/customers/${encodeURIComponent(customerId)}/timeline?limit=500`),
+      api(`/api/customers/${encodeURIComponent(customerId)}/workhours`),
     ]);
     const c = data.customer;
     const timeline = timelineData.events || [];
@@ -1248,7 +1293,7 @@
     addTab('suggestion_feedback', '建议', renderOnesWorkItems(timeline, 'suggestion_feedback'), draftCommand(c, 'suggestion_feedback', timeline, data.identities));
     addTab('support_ticket', '工单', renderOnesWorkItems(timeline, 'support_ticket'), draftCommand(c, 'support_ticket', timeline, data.identities));
     addTab('operations_ticket', '运维', renderOnesWorkItems(timeline, 'operations_ticket'), draftCommand(c, 'operations_ticket', timeline, data.identities));
-    addTab('customer_manhour', '工时', renderBusinessRecords(timeline, 'customer_manhour'), draftCommand(c, 'customer_manhour', timeline, data.identities));
+    addTab('customer_manhour', '工时', renderWorkhours(timeline, workhoursData), draftCommand(c, 'customer_manhour', timeline, data.identities));
     addTab('private_cloud_instance', '私有云实例', renderBusinessRecords(timeline, 'private_cloud_instance'), draftCommand(c, 'private_cloud_instance', timeline, data.identities));
     addTab('followup', '跟进记录', renderFollowups(c, timeline), draftCommand(c, 'followup', timeline, data.identities));
     addTab('meetings', '会议沟通', renderMeetings(timeline));

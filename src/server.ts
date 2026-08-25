@@ -312,6 +312,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 100)));
           return json(res, 200, { events: workbench.db.listTimeline(customerId, limit) });
         }
+        if (req.method === 'GET' && sub === '/workhours') {
+          if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
+          return json(res, 200, await workbench.sync.listCustomerWorkhours(customerId));
+        }
         if (req.method === 'POST' && sub === '/refresh') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
           return json(res, 202, workbench.sync.refreshCustomer(customerId));

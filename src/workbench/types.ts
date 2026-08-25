@@ -64,6 +64,14 @@ export interface SourceEvent extends SourceEventInput {
   attributionStatus: AttributionStatus;
 }
 
+export interface WorkhourRecord {
+  id: string;
+  owner?: { id?: string; name?: string } | null;
+  startTime: string;
+  hours: number;
+  description: string;
+}
+
 export interface HemoryAttributionOverride {
   eventId: string;
   customerId: string | null;
