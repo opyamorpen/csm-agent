@@ -12,6 +12,8 @@ const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
 const ONES_DESK_ISSUE_TYPE_IDS: Record<OnesDeskDraftType, string> = { suggestion: 'A99xMfkg', ticket: '7sxvwZMY', operations: '943qpMX7' };
 const ONES_DESK_TARGET_OBJECTS: Record<OnesDeskDraftType, string> = { suggestion: 'ONES Desk / 建议和反馈', ticket: 'ONES Desk / 工单', operations: 'ONES Desk / 运维工单' };
+// CRM 跟进记录（销售记录）必须关联的 CSM 售后客户对象；其 _id 是工作台唯一客户主键。
+const CRM_AFTER_SALES_OBJECT = 'object_Umwnn__c';
 const MAX_DRAFT_ITEMS = 12;
 
 function onesDeskTypeId(type: DraftItemType): OnesDeskDraftType | null {
@@ -241,7 +243,9 @@ export class HemoryDraftService {
 
   private findWriteTool(serverHint: string, pattern: RegExp): string | null {
     const candidates = this.mcp.listTools().filter((tool) => (tool.server.toLowerCase().includes(serverHint) || tool.publicName.toLowerCase().includes(serverHint))
-      && pattern.test(`${tool.rawName} ${tool.description}`) && this.mcp.isWrite(tool.server, tool.rawName));
+      && pattern.test(`${tool.rawName} ${tool.description}`) && this.mcp.isWrite(tool.server, tool.rawName)
+      // describe/query 类工具名字里可能带 create（如 get-create-form），只描述表单不写数据，必须排除。
+      && !/^(data_)?(describe|query|get|search|list|approval)/i.test(tool.rawName));
     return candidates[0]?.publicName ?? null;
   }
 
@@ -258,10 +262,34 @@ export class HemoryDraftService {
         dueAt: fields.due_at === 'unknown' ? null : fields.due_at, expectedOutcome: fields.expected_outcome === 'unknown' ? null : fields.expected_outcome ?? null,
         evidenceRefs: events.map((event) => event.id), sourceMeetingId: events[0]?.payload?.recordingId ?? null }, validationErrors };
     if (type === 'followup') {
-      const tool = this.findWriteTool('crm', /(follow|跟进|interaction|activity|record)/i);
+      // CRM 跟进记录的真实写路径是通用记录创建工具 data_record_create（执行标识 CreateRecordsByData），
+      // 写入销售记录对象 ActiveRecordObj；关联业务对象必须是 CSM 售后客户（object_Umwnn__c）。
+      const exact = this.mcp.listTools().find((tool) => tool.server === 'crm' && tool.rawName === 'data_record_create');
+      const tool = exact?.publicName ?? this.findWriteTool('crm', /(record.*create|create.*record|跟进)/i);
       if (!tool) validationErrors.push('未找到 CRM 跟进记录写工具');
-      return { system: 'crm' as const, object: 'CRM / CSM售后客户跟进', tool,
-        arguments: { customerId: customer.id, title: proposal.title, summary: proposal.summary, fields }, validationErrors };
+      // 客户主键就是售后客户对象的 _id；历史客户可能来自 AccountObj，按名称唯一解析同名售后客户后使用其 _id。
+      let afterSales: { id: string; name: string } | undefined
+        = customer.sourceObject === CRM_AFTER_SALES_OBJECT ? { id: customer.id, name: customer.name } : undefined;
+      if (!afterSales) {
+        // listCustomers 只返回售后客户对象（object_Umwnn__c）且已排除流失；同名唯一时复用其 _id。
+        const matches = this.db.listCustomers().filter((item) => item.id !== customer.id && item.name === customer.name);
+        if (matches.length === 1) afterSales = { id: matches[0].id, name: matches[0].name };
+      }
+      if (!afterSales) validationErrors.push('客户未解析到 CRM 售后客户（object_Umwnn__c）记录，无法绑定跟进关联');
+      // ActiveRecordObj 必填：服务开始/结束时间、渠道（线上）、关联业务对象、跟进类型（常规客情维护）。
+      const occurredAt = String(fields.occurred_at ?? events[0]?.occurredAt ?? new Date().toISOString());
+      const objectData: Record<string, unknown> = {
+        active_record_content: `${proposal.title}\n${proposal.summary}`,
+        field_oUaZx__c: occurredAt,
+        field_wYlhw__c: occurredAt,
+        field_MIe19__c: 'option1',
+        related_api_names: [CRM_AFTER_SALES_OBJECT],
+        active_record_type: '1cbaf4b4110c4a9d836867492e833d9e',
+        related_object_data: afterSales ? [{ describe_api_name: CRM_AFTER_SALES_OBJECT, id: afterSales.id, name: afterSales.name }] : [],
+      };
+      if (fields.next_steps && fields.next_steps !== 'unknown') objectData.field_9qb16__c = String(fields.next_steps);
+      return { system: 'crm' as const, object: 'CRM / 销售记录（跟进）', tool,
+        arguments: { apiName: 'CreateRecordsByData', object_api_name: 'ActiveRecordObj', object_data: objectData }, validationErrors };
     }
     if (type === 'workhour') {
       const manhour = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
@@ -298,7 +326,15 @@ export class HemoryDraftService {
       const target = this.mcp.resolve(item.targetTool);
       if (!target || !this.mcp.isWrite(target.server, target.rawName)) errors.push('目标工具不是当前已连接的写工具');
     }
-    if (item.type === 'followup' && item.targetArguments.customerId !== customer.id) errors.push('CRM 回写参数未绑定当前客户 ID');
+    if (item.type === 'followup') {
+      const objectData = item.targetArguments.object_data as Record<string, unknown> | undefined;
+      const related = Array.isArray(objectData?.related_object_data) ? objectData.related_object_data as Array<Record<string, unknown>> : [];
+      const binding = related.find((entry) => entry?.describe_api_name === CRM_AFTER_SALES_OBJECT);
+      const boundCustomer = binding ? this.db.getCustomer(String(binding.id)) : undefined;
+      if (!binding || !boundCustomer || boundCustomer.sourceObject !== CRM_AFTER_SALES_OBJECT || boundCustomer.name !== customer.name) {
+        errors.push('CRM 回写必须关联当前客户的 CRM 售后客户（object_Umwnn__c）记录');
+      }
+    }
     if (item.type === 'workhour') {
       const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
       if (!issue || item.targetArguments.issueID !== issue.externalId) errors.push('工时参数未绑定当前客户售后工时工作项');
@@ -389,6 +425,23 @@ export class HemoryDraftService {
       } else {
         const response = await this.mcp.call(item.targetTool!, item.targetArguments);
         if (response.isError) throw new Error(response.text);
+        // CRM 的 MCP 层不把业务失败标为 isError，resultCode/save_status 藏在 payload 里
+        //（如 USER_TOOL_NOT_EXIST、VALIDATION_BLOCKED 且 write_db=false）。
+        if (item.targetSystem === 'crm') {
+          const parsed = cleanJson(response.text) as { resultCode?: unknown; data?: { message?: unknown; error?: unknown; save_status?: unknown; failure_reason?: unknown; feedback?: { items?: Array<{ message?: unknown; code?: unknown }> } } } | null;
+          if (parsed?.resultCode && parsed.resultCode !== 'SUCCESS') {
+            throw new Error(`CRM 回写业务失败 ${parsed.resultCode}: ${String(parsed.data?.message ?? parsed.data?.error ?? '').slice(0, 200)}`);
+          }
+          // SAVED 表示已落库（feedback 里可能带 FIELD_NOT_IN_LAYOUT 等非阻断警告）；只有明确未写库的失败态才报错。
+          const data = parsed?.data;
+          const saveStatus = data?.save_status;
+          if (saveStatus && saveStatus !== 'SUCCESS' && saveStatus !== 'SAVED') {
+            const fieldErrors = (data?.feedback?.items ?? [])
+              .filter((entry) => entry.code !== 'FIELD_NOT_IN_LAYOUT')
+              .map((entry) => `${entry.code}: ${entry.message ?? ''}`).join('；');
+            throw new Error(`CRM 校验未通过（${saveStatus}，${data?.failure_reason ?? ''}）${fieldErrors.slice(0, 300)}`);
+          }
+        }
         result = { response: response.text.slice(0, 2000) };
       }
       this.db.audit('csm', 'execute_hemory_draft', 'draft_item', item.id, { approvalHash, targetSystem: item.targetSystem, targetTool: item.targetTool, result });

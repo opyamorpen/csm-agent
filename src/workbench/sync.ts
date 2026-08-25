@@ -527,6 +527,35 @@ export class PortfolioSyncService {
       this.recompute(customer.id);
       count++;
     }
+    await this.syncCrmFollowupRecords();
+    return count;
+  }
+
+  // 跟进记录（销售记录 ActiveRecordObj）通过 related_object_data 关联售后客户；what_list_data 不支持服务端过滤，
+  // 按创建时间倒序取最近一批后本地归属。销售记录量大且历史久远，全量分页拉取代价高且只用于回显近期跟进。
+  private async syncCrmFollowupRecords(limit = 200): Promise<number> {
+    const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+      apiName: 'QueryRecordsByFields', object_api_name: 'ActiveRecordObj', need_count: false,
+      select_fields: ['_id', 'active_record_content', 'active_record_type__r', 'field_MIe19__c__r', 'related_object_data', 'create_time', 'field_oUaZx__c'],
+      search_template_query: { limit, filters: [], orders: [{ fieldName: 'create_time', isAsc: false }] },
+    });
+    if (result.isError) throw new Error(result.text);
+    const parsed = parseJson(result.text);
+    if (parsed?.resultCode === 'FAIL' || parsed?.data?.error) throw new Error(parsed?.data?.error ?? result.text);
+    const records = recordsIn(parsed);
+    let count = 0;
+    for (const record of records) {
+      const related = Array.isArray(record.related_object_data) ? record.related_object_data as Array<Record<string, unknown>> : [];
+      const bound = related.find((entry) => entry?.describe_api_name === CRM_OBJECT && typeof entry.id === 'string');
+      if (!bound?.id || !this.db.getCustomer(String(bound.id))) continue;
+      const content = asText(record.active_record_content) ?? '';
+      const occurredAt = asDate(record.field_oUaZx__c) ?? asDate(record.create_time) ?? new Date().toISOString();
+      this.db.upsertSourceEvent({ customerId: String(bound.id), sourceSystem: 'crm', sourceType: 'crm_followup',
+        externalId: String(record._id ?? ''), title: content.split('\n')[0]?.slice(0, 120) || 'CRM 跟进记录',
+        occurredAt, payload: { recordId: record._id, content, type: record.active_record_type__r ?? null,
+          channel: record.field_MIe19__c__r ?? null, relatedCustomers: related }, confidence: 1, attributionStatus: 'confirmed' });
+      count++;
+    }
     return count;
   }
 
@@ -575,6 +604,7 @@ export class PortfolioSyncService {
     const input = crmCustomer(record);
     if (input) this.db.upsertCustomer(input);
     this.addCrmEvidence(customer, record);
+    await this.syncCrmFollowupRecords();
     return 1;
   }
 

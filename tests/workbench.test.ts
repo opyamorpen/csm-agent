@@ -357,3 +357,103 @@ function fakeMcpForDrafts(): any {
   return { listTools: () => [], isWrite: () => false, resolve: () => undefined,
     call: async () => ({ text: '', isError: false }) } as any;
 }
+
+// 模拟纷享 CRM MCP 的最小工具面：describe 工具名带 create 但只读表单；data_record_create 才是写。
+function fakeCrmMcp(responseText: string): any {
+  const tools = [
+    { publicName: 'mcp__crm__data_describe_get-create-form', server: 'crm', rawName: 'data_describe_get-create-form', description: '获取新建表单布局字段信息' },
+    { publicName: 'mcp__crm__data_record_create', server: 'crm', rawName: 'data_record_create', description: '创建生成指定对象的一条新记录' },
+  ];
+  return {
+    listTools: () => tools,
+    isWrite: (_server: string, rawName: string) => /create/.test(rawName) && !/describe|query|get|search|list/.test(rawName),
+    resolve: (publicName: string) => tools.find((tool) => tool.publicName === publicName),
+    call: async (publicName: string, args: unknown) => {
+      calls.push({ publicName, args });
+      return { text: responseText, isError: false };
+    },
+  } as any;
+}
+const calls: Array<{ publicName: string; args: unknown }> = [];
+
+test('workbench: followup drafts write to CRM data_record_create with customer binding and surface business errors', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-f', name: '客户福', sourceObject: 'object_Umwnn__c' });
+    const event = db.upsertSourceEvent({ customerId: 'crm-f', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r7:t1:x',
+      title: '沟通了报表需求', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r7', speaker: 'CSM', transcript: '沟通了报表需求，客户希望支持导出' }, attributionStatus: 'confirmed' });
+    calls.length = 0;
+    const mcp = fakeCrmMcp('{"resultCode":"SUCCESS","data":{"id":"rec-1"}}');
+    const service = new HemoryDraftService(db, mcp);
+    const queued = service.enqueue('crm-f', [event.id]);
+    for (let i = 0; i < 40 && db.getDraftJob(queued!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const batch = db.listDraftBatches('crm-f')[0];
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    // 绑定到真正的写工具，而不是描述表单的只读工具。
+    assert.equal(followup.targetTool, 'mcp__crm__data_record_create');
+    assert.equal(followup.targetArguments.object_api_name, 'ActiveRecordObj');
+    assert.equal(followup.targetArguments.apiName, 'CreateRecordsByData');
+    assert.deepEqual(followup.targetArguments.object_data.related_object_data,
+      [{ describe_api_name: 'object_Umwnn__c', id: 'crm-f', name: '客户福' }]);
+    assert.deepEqual(followup.targetArguments.object_data.related_api_names, ['object_Umwnn__c']);
+    assert.ok(!followup.validationErrors.length);
+    // 预览→确认→执行成功。
+    const preview = await service.preview(batch.id, [followup.id]);
+    assert.equal(preview.items[0].validationErrors.length, 0);
+    const written = await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    assert.equal(written.items[0].status, 'written');
+    assert.equal(calls[0]?.publicName, 'mcp__crm__data_record_create');
+    // 业务失败（resultCode != SUCCESS）必须转成失败状态而不是假成功。
+    db.upsertCustomer({ id: 'crm-g', name: '客户贵', sourceObject: 'object_Umwnn__c' });
+    const event2 = db.upsertSourceEvent({ customerId: 'crm-g', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r8:t1:x',
+      title: '又沟通了一次', occurredAt: '2026-08-25T06:00:00Z',
+      payload: { recordingId: 'r8', speaker: 'CSM', transcript: '又沟通了一次需求' }, attributionStatus: 'confirmed' });
+    calls.length = 0;
+    const failing = new HemoryDraftService(db, fakeCrmMcp('{"resultCode":"USER_TOOL_NOT_EXIST"}'));
+    const queued2 = failing.enqueue('crm-g', [event2.id]);
+    for (let i = 0; i < 40 && db.getDraftJob(queued2!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const batch2 = db.listDraftBatches('crm-g')[0];
+    const followup2 = batch2.items!.find((item) => item.type === 'followup')!;
+    const preview2 = await failing.preview(batch2.id, [followup2.id]);
+    const result2 = await failing.confirm(batch2.id, preview2.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    assert.equal(result2.items[0].status, 'failed');
+    assert.match(result2.items[0].error ?? '', /USER_TOOL_NOT_EXIST/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: followup drafts bind the after-sales object for legacy AccountObj customers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 历史客户来自 AccountObj（source_object 为 NULL），本地存在同名售后客户记录。
+    db.upsertCustomer({ id: 'crm-after', name: '客户夏', sourceObject: 'object_Umwnn__c' });
+    db.upsertCustomer({ id: 'crm-legacy', name: '客户夏', sourceObject: 'object_Umwnn__c' });
+    (db as any).db.prepare("UPDATE customers SET source_object=NULL WHERE id='crm-legacy'").run();
+    const event = db.upsertSourceEvent({ customerId: 'crm-legacy', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r10:t1:x',
+      title: '沟通续约', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r10', speaker: 'CSM', transcript: '沟通了续约和报价' }, attributionStatus: 'confirmed' });
+    const service = new HemoryDraftService(db, fakeCrmMcp('{"resultCode":"SUCCESS","data":{"id":"rec-2"}}'));
+    const queued = service.enqueue('crm-legacy', [event.id]);
+    for (let i = 0; i < 40 && db.getDraftJob(queued!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const batch = db.listDraftBatches('crm-legacy')[0];
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    // 关联到同名售后客户的 _id，而不是 AccountObj 老客户自身的 id。
+    assert.deepEqual(followup.targetArguments.object_data.related_object_data,
+      [{ describe_api_name: 'object_Umwnn__c', id: 'crm-after', name: '客户夏' }]);
+    assert.ok(!followup.validationErrors.length);
+    // 无同名售后客户时必须报校验错误，不允许静默关联错误对象。
+    db.upsertCustomer({ id: 'crm-orphan', name: '孤儿客户', sourceObject: 'object_Umwnn__c' });
+    (db as any).db.prepare("UPDATE customers SET source_object=NULL WHERE id='crm-orphan'").run();
+    const event2 = db.upsertSourceEvent({ customerId: 'crm-orphan', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r11:t1:x',
+      title: '孤儿沟通', occurredAt: '2026-08-25T06:00:00Z',
+      payload: { recordingId: 'r11', speaker: 'CSM', transcript: '一次无法归属对象的沟通' }, attributionStatus: 'confirmed' });
+    const queued2 = service.enqueue('crm-orphan', [event2.id]);
+    for (let i = 0; i < 40 && db.getDraftJob(queued2!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const batch2 = db.listDraftBatches('crm-orphan')[0];
+    const followup2 = batch2.items!.find((item) => item.type === 'followup')!;
+    assert.ok(followup2.validationErrors.some((message) => message.includes('object_Umwnn__c')));
+    assert.equal(followup2.status, 'draft');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});

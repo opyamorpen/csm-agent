@@ -134,6 +134,7 @@
   };
   const SOURCE_TYPE_LABEL = {
     customer_snapshot: 'CRM 客户资料',
+    crm_followup: 'CRM 跟进记录',
     suggestion_feedback: '建议与反馈',
     support_ticket: '工单',
     operations_ticket: '运维工单',
