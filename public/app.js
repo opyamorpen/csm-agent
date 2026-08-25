@@ -1011,13 +1011,16 @@
       if (event.url) { title.href = event.url; title.target = '_blank'; title.rel = 'noopener'; }
       const status = nestedName(event.payload?.field005) || '状态未知';
       head.append(title, badge(status, /完成|关闭|解决/.test(status) ? 'success' : 'warning'));
-      item.append(head, el('div', 'cell-sub', `发生 ${formatDateTime(event.occurredAt)} · 同步 ${formatDateTime(event.syncedAt)} · 置信度 ${Math.round((event.confidence || 0) * 100)}%`));
+      item.append(head);
+      if (sourceType !== 'private_cloud_instance') {
+        item.append(el('div', 'cell-sub', `发生 ${formatDateTime(event.occurredAt)} · 同步 ${formatDateTime(event.syncedAt)} · 置信度 ${Math.round((event.confidence || 0) * 100)}%`));
+      }
       if (sourceType === 'customer_manhour') {
         const registered = Number(event.payload?.field019 || 0) / 100000;
         const remaining = Number(event.payload?.field020 || 0) / 100000;
         item.append(el('div', 'record-facts', `已登记 ${registered.toFixed(1)} 小时 · 剩余 ${remaining.toFixed(1)} 小时`));
       }
-      item.append(el('div', 'evidence-id', `证据 ${event.id}`));
+      if (sourceType !== 'private_cloud_instance') item.append(el('div', 'evidence-id', `证据 ${event.id}`));
       list.append(item);
     }
     return list;

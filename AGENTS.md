@@ -30,10 +30,11 @@ Node.js must be `>=22.5`. The web service defaults to `http://127.0.0.1:3210`; C
 ## CLI Parity Is Mandatory
 
 - The HTTP API is the shared capability layer. Browser and CLI are clients of the same API, database, customer binding, permissions, and audit path.
-- Every user-facing feature addition or behavior change must update CLI capability in the same change. Core workflows require an ergonomic CLI command; `npm run cli -- api ...` remains the universal diagnostic fallback.
+- Every user-facing API or workflow addition or behavior change must update CLI capability in the same change. Pure presentation changes keep the existing API/CLI contract and require an automated display-contract check. Core workflows require an ergonomic CLI command; `npm run cli -- api ...` remains the universal diagnostic fallback.
 - `csm-agent` is the canonical global command. `npm run cli -- ...` is its repository-local development equivalent; both must execute the same implementation.
 - Update `csm-agent help`, `csm-agent capabilities`, README examples, and relevant tests whenever an API or workflow changes.
-- A feature is not accepted from browser testing alone. `npm run verify` and the matching global CLI command must pass. Browser acceptance remains additional UI evidence when available.
+- Acceptance uses the canonical global `csm-agent` command, not browser interaction. `npm run verify` and the matching global CLI command against the running service must pass before a feature is accepted.
+- If `csm-agent` is unavailable or does not point to the current checkout, run `npm run link:global` before acceptance. Pure UI changes must add or update an automated check for the display contract; use browser acceptance only when the user explicitly requests it.
 - CLI must not instantiate a second write path or bypass confirmation. CRM/ONES writes go through customer-bound server sessions and exact approved tool arguments.
 
 ### CLI Definition Of Done
@@ -41,7 +42,7 @@ Node.js must be `>=22.5`. The web service defaults to `http://127.0.0.1:3210`; C
 - New read API: add or update an ergonomic CLI command and its entry in `CLI_CAPABILITIES`.
 - New write API: expose the workflow through an explicit CLI command or the customer-bound `agent` flow; keep `api` only as a diagnostic fallback.
 - Changed parameters or response shape: update CLI parsing/output, help, capability metadata, README, and tests in the same change.
-- Verification: run `npm run verify`, then exercise the built/global command against the running service when the workflow depends on live data.
+- Verification: run `npm run verify`, then exercise the matching global `csm-agent` command against the running service. Repository-local `npm run cli -- ...` output is diagnostic evidence, not the final acceptance boundary.
 
 ## Customer And Write Boundaries
 
