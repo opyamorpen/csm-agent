@@ -124,6 +124,13 @@
   }
 
   const HEALTH_LABEL = { high: '高风险', medium: '中风险', low: '低风险', unknown: '待补数据' };
+  const RISK_DIMENSION_LABEL = {
+    renewal: '续约',
+    contract: '合同',
+    engagement: '互动',
+    delivery: '交付',
+    voice: '客户声音',
+  };
   const SOURCE_TYPE_LABEL = {
     customer_snapshot: 'CRM 客户资料',
     suggestion_feedback: '建议与反馈',
@@ -921,7 +928,7 @@
     const grid = el('div', 'risk-grid');
     for (const [key, item] of Object.entries(risk.dimensions || {})) {
       const card = el('div', `risk-dimension ${item.known ? '' : 'unknown'}`);
-      card.append(el('span', null, key), el('strong', null, item.known ? `${item.score}/${item.weight}` : 'unknown'), el('small', null, item.reason));
+      card.append(el('span', null, RISK_DIMENSION_LABEL[key] || key), el('strong', null, item.known ? `${item.score}/${item.weight}` : 'unknown'), el('small', null, item.reason));
       grid.append(card);
     }
     wrap.append(grid);
