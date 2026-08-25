@@ -6,7 +6,7 @@ let nodeBin = "__NODE_BIN__"
 let repoDir = "__REPO_DIR__"
 let npxDir = "__NPX_DIR__"
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow?
     var webView: WKWebView?
     var server: Process?
@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let config = WKWebViewConfiguration()
         let wv = WKWebView(frame: rect, configuration: config)
         wv.navigationDelegate = self
+        wv.uiDelegate = self
         win.contentView = wv
 
         win.makeKeyAndOrderFront(nil)
@@ -93,6 +94,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     func loadApp() {
         guard let url = URL(string: "http://127.0.0.1:3210") else { return }
         webView?.load(URLRequest(url: url))
+    }
+
+    // Links opened with target="_blank" do not navigate unless WKWebView has
+    // a UI delegate. Send ONES detail links to the user's default browser.
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil,
+              let url = navigationAction.request.url else { return nil }
+        NSWorkspace.shared.open(url)
+        return nil
     }
 
     // Retry until the Node server is up (it takes a moment to boot).

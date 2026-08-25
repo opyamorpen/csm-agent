@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, nextHemorySlot, onesSourceType, parseOnesIssuePage, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { classifyDraftTypes, HemoryDraftService } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -33,11 +33,13 @@ test('workbench: explicit nonrenewal overrides incomplete coverage', () => withD
 
 test('workbench: source events are idempotent by source identity', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-3', name: '客户丙' });
-  const first = db.upsertSourceEvent({ customerId: 'crm-3', sourceSystem: 'ones', sourceType: 'issue', externalId: 'T-1', title: '旧标题', occurredAt: '2026-01-01T00:00:00Z' });
-  const second = db.upsertSourceEvent({ customerId: 'crm-3', sourceSystem: 'ones', sourceType: 'issue', externalId: 'T-1', title: '新标题', occurredAt: '2026-01-02T00:00:00Z' });
+  const first = db.upsertSourceEvent({ customerId: 'crm-3', sourceSystem: 'ones', sourceType: 'issue', externalId: 'internal-uuid', displayId: 'PROJ-1', title: '旧标题', occurredAt: '2026-01-01T00:00:00Z' });
+  const second = db.upsertSourceEvent({ customerId: 'crm-3', sourceSystem: 'ones', sourceType: 'issue', externalId: 'internal-uuid', displayId: 'PROJ-1', title: '新标题', occurredAt: '2026-01-02T00:00:00Z' });
   assert.equal(first.id, second.id);
   assert.equal(db.listTimeline('crm-3').length, 1);
   assert.equal(db.listTimeline('crm-3')[0].title, '新标题');
+  assert.equal(db.listTimeline('crm-3')[0].externalId, 'internal-uuid');
+  assert.equal(db.listTimeline('crm-3')[0].displayId, 'PROJ-1');
 }));
 
 test('workbench: ONES CSM sources are selected by customer option and exact issue types', () => {
@@ -48,17 +50,43 @@ test('workbench: ONES CSM sources are selected by customer option and exact issu
   assert.match(query, /943qpMX7/);
   assert.match(query, /5DMbQXvd/);
   assert.match(query, /GvyPHeW5/);
+  assert.match(query, /SELECT uuid, display_id,/);
+  assert.match(query, /ORDER BY field009 DESC/);
+  assert.doesNotMatch(query, /ORDER BY field010 DESC/);
   assert.equal(onesSourceType({ field007: { name: '建议和反馈' } }), 'suggestion_feedback');
   assert.equal(onesSourceType({ field007: { name: '运维工单' } }), 'operations_ticket');
   assert.equal(onesSourceType({ field007: { name: '其他类型' } }), null);
+  assert.match(onesIssueUrl('internal-uuid', 'DESK-123'), /\/issue\/DESK-123$/);
+  assert.doesNotMatch(onesIssueUrl('internal-uuid', 'DESK-123'), /internal-uuid/);
+});
+
+test('workbench: existing ONES work items migrate to creation time ordering', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workbench-'));
+  let db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-created-at', name: '创建时间客户' });
+    db.upsertSourceEvent({ customerId: 'crm-created-at', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 'uuid-old', title: '较早创建',
+      occurredAt: '2026-08-25T12:00:00Z', payload: { display_id: 'SUP-1', field009: '2026-08-20T08:00:00Z', field010: '2026-08-25T12:00:00Z' } });
+    db.upsertSourceEvent({ customerId: 'crm-created-at', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 'uuid-new', displayId: 'SUP-2', title: '较晚创建',
+      occurredAt: '2026-08-24T12:00:00Z', payload: { field009: '2026-08-22T08:00:00Z', field010: '2026-08-24T12:00:00Z' } });
+    db.close();
+    db = new WorkbenchDatabase(dir);
+    assert.deepEqual(db.listTimeline('crm-created-at').map((event) => [event.externalId, event.displayId, event.occurredAt]), [
+      ['uuid-new', 'SUP-2', '2026-08-22T08:00:00Z'],
+      ['uuid-old', 'SUP-1', '2026-08-20T08:00:00Z'],
+    ]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('workbench: ONESQL page parser unwraps item records and keeps the cursor', () => {
   const page = parseOnesIssuePage(JSON.stringify({
-    data: [{ type: 'item', item: { uuid: 'issue-1', field001: '测试工单' } }],
+    data: [{ type: 'item', item: { uuid: 'issue-1', display_id: 'SUP-1', field001: '测试工单' } }],
     page_info: { has_next_page: true, end_cursor: 'next-page' },
   }));
-  assert.deepEqual(page.records, [{ uuid: 'issue-1', field001: '测试工单' }]);
+  assert.deepEqual(page.records, [{ uuid: 'issue-1', display_id: 'SUP-1', field001: '测试工单' }]);
   assert.equal(page.hasNextPage, true);
   assert.equal(page.endCursor, 'next-page');
 });

@@ -47,6 +47,7 @@ export interface SourceEventInput {
   sourceSystem: 'crm' | 'ones' | 'hemory' | 'wecom' | string;
   sourceType: string;
   externalId: string;
+  displayId?: string | null;
   title: string;
   occurredAt: string;
   syncedAt?: string;

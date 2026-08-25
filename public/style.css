@@ -547,6 +547,19 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .business-record p { margin: 7px 0; color: #3f4a57; }
 .record-facts { margin-top: 8px; color: #245d40; font-size: 12px; }
 .evidence-id { margin-top: 6px; color: #77818d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.ones-work-item-table-wrap { overflow-x: auto; border: 1px solid var(--border); background: #fff; }
+.ones-work-item-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; }
+.ones-work-item-table th { height: 36px; padding: 0 12px; border-bottom: 1px solid var(--border); background: #f0f2f4; color: #596473; font-size: 12px; font-weight: 600; text-align: left; }
+.ones-work-item-table td { min-width: 0; height: 52px; padding: 8px 12px; border-bottom: 1px solid #e7eaee; color: #34404d; vertical-align: middle; overflow-wrap: anywhere; }
+.ones-work-item-table tbody tr:last-child td { border-bottom: 0; }
+.ones-work-item-table tbody tr:hover { background: #f8fafc; }
+.ones-work-item-table th:nth-child(1) { width: 22%; }
+.ones-work-item-table th:nth-child(2) { width: 46%; }
+.ones-work-item-table th:nth-child(3) { width: 14%; }
+.ones-work-item-table th:nth-child(4) { width: 18%; }
+.ones-work-item-table a, .ones-work-item-table td:nth-child(2) span { color: #26313e; font-weight: 600; }
+.ones-work-item-table a:hover { color: #2457c5; }
+.ones-work-item-id { color: #66717e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 
 .timeline-list { border-left: 1px solid #cbd2d9; margin-left: 24px; }
 .timeline-item { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; margin: 0 0 12px -25px; }

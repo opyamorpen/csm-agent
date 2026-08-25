@@ -24,6 +24,24 @@ interface CustomerSummary {
   supportBlockedCount?: number | null;
 }
 
+const ONES_WORK_ITEM_TYPES = new Set(['suggestion_feedback', 'support_ticket', 'operations_ticket']);
+
+function nestedSourceValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const record = value as Record<string, unknown>;
+  return String(record.name ?? record.value ?? record.label ?? '');
+}
+
+function onesWorkItemRow(event: any): { id: string; title: string; status: string; createdAt: string } {
+  return {
+    id: event.displayId ?? 'unknown',
+    title: event.title ?? '',
+    status: nestedSourceValue(event.payload?.field005) || 'unknown',
+    createdAt: event.payload?.field009 || event.occurredAt || 'unknown',
+  };
+}
+
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/wecom/status'] },
@@ -159,6 +177,17 @@ async function showTimeline(customerInput: string, sourceType?: string): Promise
   const customer = await resolveCustomer(customerInput);
   const body = await request<{ events: any[] }>(`/api/customers/${encodeURIComponent(customer.id)}/timeline?limit=500`);
   const events = sourceType ? body.events.filter((event) => event.sourceType === sourceType) : body.events;
+  if (sourceType && ONES_WORK_ITEM_TYPES.has(sourceType)) {
+    const records = events.map(onesWorkItemRow).sort((left, right) => {
+      const leftTime = Date.parse(left.createdAt);
+      const rightTime = Date.parse(right.createdAt);
+      return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime) || right.id.localeCompare(left.id);
+    });
+    if (jsonOutput) return print(records);
+    console.table(records);
+    console.log(`共 ${records.length} 条 ONES 工作项，按创建时间倒序`);
+    return;
+  }
   if (jsonOutput) return print(events);
   console.table(events.map((event) => ({
     occurredAt: event.occurredAt,

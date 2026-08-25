@@ -11,7 +11,7 @@
 - 客户案例：固定模板成稿，CSM 编辑并确认后写入 ONES Wiki。
 - 企业微信待办：CSM 确认行动后生成一次性 H5 意图，在企业微信原生面板完成平台确认并保存 `todoId`。
 - Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。
-- 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看。
+- 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看；建议/工单/运维三个 ONES 工作项列表只展示语义化 ID（`display_id`）、标题、状态、创建时间，标题可点击进入工作项详情，并默认按创建时间倒序。
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
 - Hemory 收件箱：每天中国时间 13:00/20:00 通过 MCP 拉取当天完整逐句转写，按录音持久化后由当前 Agent 大模型整理为话题、摘要和连续证据片段；唯一客户名称自动归属，其他片段由 CSM 在 Agent 页面批量标记。
 - 片段质量门槛：寒暄、环境音、零散的一两句话，以及少于 3 条有效发言或信息量不足的分段只保留在原始转写中，不进入待归属；模型不得合并不相关短句来绕过门槛。
@@ -46,7 +46,7 @@ csm-agent serve 3210
 csm-agent doctor
 csm-agent customers 青岛高测
 csm-agent customer <CRM客户ID>
-csm-agent timeline <CRM客户ID> support_ticket
+csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent actions [CRM客户ID]
 csm-agent action update <行动ID> '{"status":"in_progress"}'
 csm-agent action complete <行动ID> "已与客户确认下一步"

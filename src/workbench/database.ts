@@ -98,7 +98,7 @@ function actionFromRow(row: Row): ActionItem {
 function sourceEventFromRow(row: Row): SourceEvent {
   return {
     id: String(row.id), customerId: row.customer_id as string | null, sourceSystem: String(row.source_system),
-    sourceType: String(row.source_type), externalId: String(row.external_id), title: String(row.title),
+    sourceType: String(row.source_type), externalId: String(row.external_id), displayId: row.display_id as string | null, title: String(row.title),
     occurredAt: String(row.occurred_at), syncedAt: String(row.synced_at), confidence: Number(row.confidence),
     url: row.url as string | null, payload: parseJson<Record<string, unknown>>(row.payload_json, {}), payloadHash: String(row.payload_hash),
     attributionStatus: String(row.attribution_status) as SourceEvent['attributionStatus'],
@@ -190,6 +190,7 @@ export class WorkbenchDatabase {
         source_system TEXT NOT NULL,
         source_type TEXT NOT NULL,
         external_id TEXT NOT NULL,
+        display_id TEXT,
         title TEXT NOT NULL,
         occurred_at TEXT NOT NULL,
         synced_at TEXT NOT NULL,
@@ -417,6 +418,25 @@ export class WorkbenchDatabase {
         created_at TEXT NOT NULL
       );
     `);
+    const sourceEventColumns = this.db.prepare('PRAGMA table_info(source_events)').all() as Row[];
+    if (!sourceEventColumns.some((column) => String(column.name) === 'display_id')) {
+      this.db.exec('ALTER TABLE source_events ADD COLUMN display_id TEXT;');
+    }
+    this.db.exec(`
+      UPDATE source_events
+      SET occurred_at = json_extract(payload_json, '$.field009')
+      WHERE source_system = 'ones'
+        AND source_type IN ('suggestion_feedback', 'support_ticket', 'operations_ticket')
+        AND json_type(payload_json, '$.field009') = 'text';
+      UPDATE source_events
+      SET display_id = CASE
+        WHEN json_type(payload_json, '$.display_id') = 'text' THEN json_extract(payload_json, '$.display_id')
+        WHEN json_type(payload_json, '$.issue_number') = 'text' THEN json_extract(payload_json, '$.issue_number')
+        ELSE display_id
+      END
+      WHERE source_system = 'ones'
+        AND display_id IS NULL;
+    `);
   }
 
   upsertCustomer(input: CustomerInput): Customer {
@@ -513,12 +533,12 @@ export class WorkbenchDatabase {
     const syncedAt = input.syncedAt ?? nowIso();
     const attribution = input.attributionStatus ?? (input.customerId ? 'confirmed' : 'unattributed');
     this.db.prepare(`
-      INSERT INTO source_events(id,customer_id,source_system,source_type,external_id,title,occurred_at,synced_at,confidence,url,payload_json,payload_hash,attribution_status)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO source_events(id,customer_id,source_system,source_type,external_id,display_id,title,occurred_at,synced_at,confidence,url,payload_json,payload_hash,attribution_status)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(source_system,source_type,external_id) DO UPDATE SET
-        customer_id=excluded.customer_id,title=excluded.title,occurred_at=excluded.occurred_at,synced_at=excluded.synced_at,
+        customer_id=excluded.customer_id,display_id=COALESCE(excluded.display_id,source_events.display_id),title=excluded.title,occurred_at=excluded.occurred_at,synced_at=excluded.synced_at,
         confidence=excluded.confidence,url=excluded.url,payload_json=excluded.payload_json,payload_hash=excluded.payload_hash,attribution_status=excluded.attribution_status
-    `).run(id, input.customerId ?? null, input.sourceSystem, input.sourceType, input.externalId, input.title, input.occurredAt,
+    `).run(id, input.customerId ?? null, input.sourceSystem, input.sourceType, input.externalId, input.displayId ?? null, input.title, input.occurredAt,
       syncedAt, input.confidence ?? 1, input.url ?? null, json(payload), payloadHash, attribution);
     const row = this.db.prepare('SELECT * FROM source_events WHERE source_system=? AND source_type=? AND external_id=?')
       .get(input.sourceSystem, input.sourceType, input.externalId) as Row;
@@ -546,7 +566,7 @@ export class WorkbenchDatabase {
   }
 
   listTimeline(customerId: string, limit = 100): SourceEvent[] {
-    const rows = this.db.prepare('SELECT * FROM source_events WHERE customer_id=? ORDER BY occurred_at DESC LIMIT ?').all(customerId, limit) as Row[];
+    const rows = this.db.prepare('SELECT * FROM source_events WHERE customer_id=? ORDER BY occurred_at DESC, external_id DESC LIMIT ?').all(customerId, limit) as Row[];
     return rows.map(sourceEventFromRow);
   }
 

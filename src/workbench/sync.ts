@@ -218,18 +218,22 @@ export function buildOnesCustomerQuery(optionId: string, cursor = ''): string {
     .map((source) => `'${source.issueTypeId}'`).join(', ');
   const hours = ONES_CSM_SOURCES.find((source) => source.sourceType === 'customer_manhour')!;
   const privateCloud = ONES_CSM_SOURCES.find((source) => source.sourceType === 'private_cloud_instance')!;
-  return `SELECT uuid, field001, field005.name, field006.name, field007.name, ${ONES_CUSTOMER_FIELD_ID}.name, `
+  return `SELECT uuid, display_id, field001, field005.name, field006.name, field007.name, ${ONES_CUSTOMER_FIELD_ID}.name, `
     + `TODATE(field009, 'YYYY-MM-DD HH:mm:ss'), TODATE(field010, 'YYYY-MM-DD HH:mm:ss'), field019, field020 `
     + `FROM issue WHERE v$cursor > '${onesqlLiteral(cursor)}' AND ${ONES_CUSTOMER_FIELD_ID} = '${onesqlLiteral(optionId)}' AND (`
     + `(field006 = 'GL3ysesFPdnAQNIU' AND field007 IN (${deskTypes})) OR `
     + `(field006 = '${hours.projectId}' AND field007 = '${hours.issueTypeId}') OR `
     + `(field006 = '${privateCloud.projectId}' AND field007 = '${privateCloud.issueTypeId}')) `
-    + 'ORDER BY field010 DESC LIMIT 1000, 50';
+    + 'ORDER BY field009 DESC LIMIT 1000, 50';
 }
 
 export function onesSourceType(issue: Record<string, unknown>): string | null {
   const issueType = asText(issue.field007);
   return issueType ? ONES_SOURCE_BY_ISSUE_TYPE.get(issueType)?.sourceType ?? null : null;
+}
+
+export function onesIssueUrl(issueUuid: string, displayId?: string | null): string {
+  return `${ONES_WEB_BASE_URL}/project/#/team/${ONES_TEAM_ID}/issue/${encodeURIComponent(displayId || issueUuid)}`;
 }
 
 interface TranscriptLine {
@@ -505,13 +509,14 @@ export class PortfolioSyncService {
       if (!sourceType) continue;
       const id = asText(item.uuid ?? item.id);
       if (!id) continue;
+      const displayId = asText(item.display_id ?? item.issue_number);
       const title = asText(item.field001) ?? 'ONES 工作项';
       const status = asText(item.field005);
       const customerName = asText(item[ONES_CUSTOMER_FIELD_ID]);
       if (customerName !== customer.name) {
-        this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType, externalId: id, title,
-          occurredAt: asOnesDate(item.field010 ?? item.field009) ?? new Date().toISOString(), payload: item,
-          url: `${ONES_WEB_BASE_URL}/project/#/team/${ONES_TEAM_ID}/issue/${id}`, confidence: 0.2, attributionStatus: 'ambiguous' });
+        this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType, externalId: id, displayId, title,
+          occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(), payload: item,
+          url: onesIssueUrl(id, displayId), confidence: 0.2, attributionStatus: 'ambiguous' });
         continue;
       }
       const event = this.db.upsertSourceEvent({
@@ -519,10 +524,11 @@ export class PortfolioSyncService {
         sourceSystem: 'ones',
         sourceType,
         externalId: id,
+        displayId,
         title,
-        occurredAt: asOnesDate(item.field010 ?? item.field009) ?? new Date().toISOString(),
+        occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(),
         payload: item,
-        url: `${ONES_WEB_BASE_URL}/project/#/team/${ONES_TEAM_ID}/issue/${id}`,
+        url: onesIssueUrl(id, displayId),
         confidence: 1,
         attributionStatus: 'confirmed',
       });

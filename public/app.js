@@ -1023,6 +1023,48 @@
     return list;
   }
 
+  function renderOnesWorkItems(events, sourceType) {
+    const createdAt = (event) => event.payload?.field009 || event.occurredAt;
+    const timestamp = (event) => {
+      const value = new Date(createdAt(event)).getTime();
+      return Number.isNaN(value) ? 0 : value;
+    };
+    const records = events
+      .filter((event) => event.sourceSystem === 'ones' && event.sourceType === sourceType)
+      .sort((left, right) => timestamp(right) - timestamp(left) || String(right.displayId || '').localeCompare(String(left.displayId || '')));
+    if (!records.length) return el('div', 'workspace-empty', `暂无${SOURCE_TYPE_LABEL[sourceType] || '相关'}记录`);
+
+    const wrap = el('div', 'ones-work-item-table-wrap');
+    const table = el('table', 'ones-work-item-table');
+    table.setAttribute('aria-label', `${SOURCE_TYPE_LABEL[sourceType] || 'ONES'}工作项`);
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    for (const label of ['ID', '标题', '状态', '创建时间']) {
+      const cell = el('th', null, label);
+      cell.scope = 'col';
+      headRow.append(cell);
+    }
+    head.append(headRow);
+
+    const body = document.createElement('tbody');
+    for (const event of records) {
+      const row = document.createElement('tr');
+      row.append(el('td', 'ones-work-item-id', event.displayId || '未知'));
+      const titleCell = document.createElement('td');
+      const title = event.url ? el('a', null, event.title) : el('span', null, event.title);
+      if (event.url) { title.href = event.url; title.target = '_blank'; title.rel = 'noopener'; }
+      titleCell.append(title);
+      const statusCell = document.createElement('td');
+      const status = nestedName(event.payload?.field005) || '状态未知';
+      statusCell.append(badge(status, /完成|关闭|解决/.test(status) ? 'success' : 'warning'));
+      row.append(titleCell, statusCell, el('td', null, formatDateTime(createdAt(event))));
+      body.append(row);
+    }
+    table.append(head, body);
+    wrap.append(table);
+    return wrap;
+  }
+
   function renderFollowups(customer, events) {
     const records = events.filter((event) => event.sourceSystem === 'crm' && event.sourceType === 'followup');
     const list = el('div', 'business-record-list');
@@ -1137,9 +1179,12 @@
     activeView = 'customer';
     workbench.classList.remove('hidden'); chatView.classList.add('hidden'); document.getElementById('records').classList.add('hidden'); footerEl.classList.add('hidden'); agentSessions.classList.add('hidden');
     for (const [name, section] of Object.entries(viewSections)) section.classList.toggle('hidden', name !== 'customer');
-    const data = await api(`/api/customers/${encodeURIComponent(customerId)}/overview`);
+    const [data, timelineData] = await Promise.all([
+      api(`/api/customers/${encodeURIComponent(customerId)}/overview`),
+      api(`/api/customers/${encodeURIComponent(customerId)}/timeline?limit=500`),
+    ]);
     const c = data.customer;
-    const timeline = data.timeline || [];
+    const timeline = timelineData.events || [];
     customerOverview.innerHTML = '';
     const head = el('div', 'customer-detail-head');
     const title = el('div'); title.append(el('h1', null, c.name), el('p', null, [c.shortName, c.industry, c.csmName && `CSM ${c.csmName}`].filter(Boolean).join(' · ')));
@@ -1200,9 +1245,9 @@
     const overview = el('div');
     overview.append(sectionBlock('续约风险', renderRisk(data.risk)), sectionBlock('增购机会', opportunities), sectionBlock('数据概览', renderOnesSources(timeline)));
     addTab('overview', '概览', overview);
-    addTab('suggestion_feedback', '建议', renderBusinessRecords(timeline, 'suggestion_feedback'), draftCommand(c, 'suggestion_feedback', timeline, data.identities));
-    addTab('support_ticket', '工单', renderBusinessRecords(timeline, 'support_ticket'), draftCommand(c, 'support_ticket', timeline, data.identities));
-    addTab('operations_ticket', '运维', renderBusinessRecords(timeline, 'operations_ticket'), draftCommand(c, 'operations_ticket', timeline, data.identities));
+    addTab('suggestion_feedback', '建议', renderOnesWorkItems(timeline, 'suggestion_feedback'), draftCommand(c, 'suggestion_feedback', timeline, data.identities));
+    addTab('support_ticket', '工单', renderOnesWorkItems(timeline, 'support_ticket'), draftCommand(c, 'support_ticket', timeline, data.identities));
+    addTab('operations_ticket', '运维', renderOnesWorkItems(timeline, 'operations_ticket'), draftCommand(c, 'operations_ticket', timeline, data.identities));
     addTab('customer_manhour', '工时', renderBusinessRecords(timeline, 'customer_manhour'), draftCommand(c, 'customer_manhour', timeline, data.identities));
     addTab('private_cloud_instance', '私有云实例', renderBusinessRecords(timeline, 'private_cloud_instance'), draftCommand(c, 'private_cloud_instance', timeline, data.identities));
     addTab('followup', '跟进记录', renderFollowups(c, timeline), draftCommand(c, 'followup', timeline, data.identities));
