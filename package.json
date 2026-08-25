@@ -1,20 +1,26 @@
 {
   "name": "csm-agent",
-  "version": "0.1.0",
-  "description": "CSM (Customer Success Manager) agent: reads CRM / ONES / call-recording systems over MCP, synthesizes follow-up records, customer profiles and case studies, and writes them back after human confirmation.",
+  "version": "0.2.0",
+  "description": "Customer-centered CSM workbench with CRM-authoritative identities, ONES/Hemory evidence, renewal and expansion analysis, case publishing, and approved WeCom todo handoff.",
   "type": "module",
   "private": true,
   "license": "UNLICENSED",
+  "bin": {
+    "csm-agent": "dist/cli.js"
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
     "cli": "tsx src/cli.ts",
+    "cli:smoke": "node dist/cli.js capabilities --json",
+    "link:global": "npm run build && npm link",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm test && npm run build && npm run cli:smoke"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",

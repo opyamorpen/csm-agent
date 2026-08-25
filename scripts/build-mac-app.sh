@@ -30,7 +30,7 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR"
 cp "$ROOT/scripts/mac-app/Info.plist" "$APP_DIR/Contents/Info.plist"
 
 echo "==> 生成应用图标（AppIcon.icns）"
-if [ ! -f "$ROOT/assets/AppIcon.icns" ]; then
+if [ ! -f "$ROOT/assets/AppIcon.icns" ] || [ "$ROOT/assets/icon.svg" -nt "$ROOT/assets/AppIcon.icns" ]; then
   "$ROOT/scripts/build-icon.sh" >/dev/null
 fi
 cp "$ROOT/assets/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"

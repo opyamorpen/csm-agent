@@ -1,0 +1,47 @@
+{
+  "record_types": {
+    "internal_todo": {
+      "target": "CSM Agent / 本地待办",
+      "write_rule": "经 CSM 批准后创建 action_items，不调用企业微信"
+    },
+    "suggestion": {
+      "target": "ONES Desk / 建议和反馈",
+      "projectID": "GL3ysesFPdnAQNIU",
+      "issueTypeID": "A99xMfkg"
+    },
+    "ticket": {
+      "target": "ONES Desk / 工单",
+      "projectID": "GL3ysesFPdnAQNIU",
+      "issueTypeID": "7sxvwZMY"
+    },
+    "operations": {
+      "target": "ONES Desk / 运维工单",
+      "projectID": "GL3ysesFPdnAQNIU",
+      "issueTypeID": "943qpMX7"
+    },
+    "private_cloud_instance": {
+      "target": "私有云实例管理 / 私有云实例",
+      "projectID": "GL3ysesF59l5lRH9",
+      "issueTypeID": "GvyPHeW5"
+    },
+    "workhour": {
+      "target": "客户工时管理 / 售后客户",
+      "write_rule": "只向已绑定 customer_manhour_issue_id 登记工时"
+    },
+    "followup": {
+      "target": "CRM / CSM售后客户跟进",
+      "write_rule": "写参数必须包含 crm_customer_id"
+    }
+  },
+  "required_fields": {
+    "customer_id": "CRM CSM售后客户 _id",
+    "customer_name": "CRM CSM售后客户的客户名称",
+    "evidence_refs": ["Hemory 转写事件 ID"],
+    "evidence_quotes": ["支持草稿的原始沟通文字"],
+    "unknowns": ["仍需 CSM 确认的信息"]
+  },
+  "ones_customer_binding": {
+    "fieldID": "JrvswW8P",
+    "value": "当前客户的 ones_customer_option_id"
+  }
+}

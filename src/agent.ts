@@ -1,6 +1,7 @@
 import type { AssistantMessage, Context, Model, Models, Tool, ToolCall } from '@earendil-works/pi-ai';
 import { CONFIRM_TOOL_NAME, type ConfirmDraft } from './tools/confirm.js';
 import type { CustomerContext } from './tools/customer.js';
+import { argumentsHash } from './approval.js';
 
 /** Structural gateway so the loop can be unit-tested with a fake. */
 export interface McpGateway {
@@ -21,8 +22,8 @@ export interface AgentEvent {
 
 export interface AgentHooks {
   onEvent: (e: AgentEvent) => void;
-  /** Ask the human to approve/reject a draft. Resolve true = approve. */
-  requestConfirm: (draft: ConfirmDraft) => Promise<boolean>;
+  /** Resolve true for the original draft, an edited draft, or false to reject. */
+  requestConfirm: (draft: ConfirmDraft) => Promise<boolean | ConfirmDraft>;
 }
 
 /** A non-interactive local tool handler (e.g. resolve_customer). */
@@ -56,12 +57,15 @@ export interface LoopParams {
 export async function runLoop(params: LoopParams): Promise<string> {
   const { models, model, mcp, context, hooks, localTools = {}, maxIterations = 20 } = params;
 
-  let approvedWrite = false;
+  let approvedWrite: { tool: string; argsHash: string } | null = null;
   let lastText = '';
 
   for (let i = 0; i < maxIterations; i++) {
     const msg: AssistantMessage = await models.complete(model, context);
     context.messages.push(msg);
+    if (msg.stopReason === 'error') {
+      throw new Error((msg as AssistantMessage & { errorMessage?: string }).errorMessage || '模型调用失败');
+    }
 
     const text = extractText(msg.content);
     if (text) {
@@ -84,10 +88,13 @@ export async function runLoop(params: LoopParams): Promise<string> {
       if (call.name === CONFIRM_TOOL_NAME) {
         const draft = call.arguments as unknown as ConfirmDraft;
         hooks.onEvent({ type: 'confirm', draft });
-        const ok = await hooks.requestConfirm(draft);
-        approvedWrite = ok;
-        resultText = ok
-          ? 'APPROVED — 本次写操作已获批准，可以调用对应写工具。'
+        const decision = await hooks.requestConfirm(draft);
+        const approvedDraft = decision === true ? draft : decision && typeof decision === 'object' ? decision : null;
+        approvedWrite = approvedDraft
+          ? { tool: approvedDraft.target_tool, argsHash: argumentsHash(approvedDraft.target_arguments ?? {}) }
+          : null;
+        resultText = approvedDraft
+          ? `APPROVED — 仅允许调用 ${approvedDraft.target_tool}，参数为 ${JSON.stringify(approvedDraft.target_arguments ?? {})}`
           : 'REJECTED — 已拒绝，不要写入；请询问用户需要修改什么。';
       } else if (localTools[call.name]) {
         try {
@@ -103,15 +110,32 @@ export async function runLoop(params: LoopParams): Promise<string> {
         if (!target) {
           resultText = `未知工具: ${call.name}`;
           isError = true;
-        } else if (mcp.isWrite(target.server, target.rawName) && !approvedWrite) {
-          resultText = `拒绝执行: ${call.name} 是写操作。必须先调用 ${CONFIRM_TOOL_NAME} 并获得 APPROVED。`;
-          isError = true;
+        } else if (mcp.isWrite(target.server, target.rawName)) {
+          const actualArgs = (call.arguments ?? {}) as Record<string, unknown>;
+          if (!approvedWrite) {
+            resultText = `拒绝执行: ${call.name} 是写操作。必须先调用 ${CONFIRM_TOOL_NAME} 并获得 APPROVED。`;
+            isError = true;
+          } else if (approvedWrite.tool !== call.name || approvedWrite.argsHash !== argumentsHash(actualArgs)) {
+            resultText = `拒绝执行: 实际工具或参数与已批准草稿不一致，请重新提交 ${CONFIRM_TOOL_NAME}。`;
+            approvedWrite = null;
+            isError = true;
+          } else {
+            try {
+              const r = await mcp.call(call.name, actualArgs);
+              resultText = r.text;
+              isError = r.isError;
+            } catch (err) {
+              resultText = `MCP 调用失败: ${(err as Error).message}`;
+              isError = true;
+            } finally {
+              approvedWrite = null;
+            }
+          }
         } else {
           try {
             const r = await mcp.call(call.name, (call.arguments ?? {}) as Record<string, unknown>);
             resultText = r.text;
             isError = r.isError;
-            approvedWrite = false; // 一次性批准，用完即失效
           } catch (err) {
             resultText = `MCP 调用失败: ${(err as Error).message}`;
             isError = true;

@@ -49,7 +49,10 @@ export function mcpResultToText(result: unknown): string {
     }
   }
   if (r.structuredContent !== undefined) {
-    parts.push(JSON.stringify(r.structuredContent));
+    const structured = JSON.stringify(r.structuredContent);
+    // Some servers return the same JSON in a text block and structuredContent.
+    // Keeping both makes the otherwise valid JSON impossible to parse downstream.
+    if (!parts.includes(structured)) parts.push(structured);
   }
   return parts.join('\n') || '(empty result)';
 }
@@ -135,6 +138,8 @@ export class McpHub {
 
   isWrite(server: string, rawName: string): boolean {
     const cfg = this.servers.get(server)?.config;
+    if (cfg?.readTools?.includes(rawName)) return false;
+    if (cfg?.writeTools?.includes(rawName)) return true;
     const patterns = cfg?.writeToolPatterns ?? DEFAULT_WRITE_PATTERNS;
     return isWriteToolName(rawName, patterns);
   }

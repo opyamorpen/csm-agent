@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
@@ -12,14 +13,31 @@ export interface McpServerConfig {
   url?: string;
   headers?: Record<string, string>;
   toolCallTimeoutMs?: number;
+  /** Explicit capability policy. Exact names win over legacy patterns. */
+  writeTools?: string[];
+  readTools?: string[];
   writeToolPatterns?: string[];
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
-const configDir = join(here, '..', 'config');
+const packageRoot = join(here, '..');
+const packagedConfigDir = join(packageRoot, 'config');
 
-const USER_CONFIG = join(configDir, 'mcp.user.yaml');
-const LLM_CONFIG = join(configDir, 'llm.user.yaml');
+export function userConfigDir(): string {
+  return process.env.CSM_CONFIG_DIR ?? join(process.env.CSM_DATA_DIR ?? join(homedir(), '.csm-agent'), 'config');
+}
+
+function userConfigPath(name: string): string {
+  return join(userConfigDir(), name);
+}
+
+function legacyConfigPath(name: string): string {
+  return join(packagedConfigDir, name);
+}
+
+function firstExisting(paths: string[]): string | undefined {
+  return paths.find((path) => existsSync(path));
+}
 
 /** Expand ${ENV_VAR} placeholders inside a config tree using process.env. */
 export function expandEnv(value: unknown): unknown {
@@ -46,21 +64,22 @@ export function loadMcpConfig(path: string): { servers: McpServerConfig[] } {
 
 /**
  * Load the effective MCP server list:
- * 1. config/mcp.user.yaml if the user has saved one through the UI (gitignored);
- * 2. otherwise CSM_MCP_CONFIG if set;
- * 3. otherwise the shipped seed config/mcp.yaml.
+ * 1. writable user config under ~/.csm-agent/config (or CSM_CONFIG_DIR);
+ * 2. legacy project config/mcp.user.yaml for a non-breaking migration;
+ * 3. CSM_MCP_CONFIG when set;
+ * 4. the shipped seed config/mcp.yaml.
  */
 export function loadMcpServers(): McpServerConfig[] {
-  if (existsSync(USER_CONFIG)) {
-    return loadMcpConfig(USER_CONFIG).servers;
-  }
-  const seed = process.env.CSM_MCP_CONFIG ?? join(configDir, 'mcp.yaml');
+  const saved = firstExisting([userConfigPath('mcp.user.yaml'), legacyConfigPath('mcp.user.yaml')]);
+  if (saved) return loadMcpConfig(saved).servers;
+  const seed = process.env.CSM_MCP_CONFIG ?? join(packagedConfigDir, 'mcp.yaml');
   return loadMcpConfig(seed).servers;
 }
 
-/** Persist the user's MCP server list (gitignored; never committed). */
+/** Persist MCP settings outside the package installation so a global CLI stays writable. */
 export function saveMcpServers(servers: McpServerConfig[]): void {
-  writeFileSync(USER_CONFIG, yaml.dump({ servers }, { lineWidth: -1, noRefs: true }), 'utf8');
+  mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
+  atomicWriteYaml(userConfigPath('mcp.user.yaml'), { servers });
 }
 
 /**
@@ -70,7 +89,14 @@ export function saveMcpServers(servers: McpServerConfig[]): void {
  * from `.env` (which is gitignored).
  */
 export function loadDotEnv(): void {
-  const envPath = join(configDir, '..', '.env');
+  const candidates = [
+    process.env.CSM_ENV_FILE ? resolve(process.env.CSM_ENV_FILE) : '',
+    resolve(process.cwd(), '.env'),
+    join(process.env.CSM_DATA_DIR ?? join(homedir(), '.csm-agent'), '.env'),
+    join(packageRoot, '.env'),
+  ].filter(Boolean);
+  const envPath = firstExisting([...new Set(candidates)]);
+  if (!envPath) return;
   try {
     const text = readFileSync(envPath, 'utf8');
     for (const line of text.split('\n')) {
@@ -116,7 +142,11 @@ export function providerFor(id: string) {
 
 export function loadLlmConfig(): LlmConfig {
   try {
-    const raw = yaml.load(readFileSync(LLM_CONFIG, 'utf8')) as Partial<LlmConfig>;
+    const path = firstExisting([userConfigPath('llm.user.yaml'), legacyConfigPath('llm.user.yaml')]);
+    if (!path) throw new Error('LLM config not found');
+    const parsed = yaml.load(readFileSync(path, 'utf8')) as Partial<LlmConfig> & { llm?: Partial<LlmConfig> };
+    // v0.1 briefly wrote `{ llm: ... }`; accept it so existing local config survives.
+    const raw = parsed?.llm && typeof parsed.llm === 'object' ? parsed.llm : parsed;
     const provider = typeof raw?.provider === 'string' ? raw.provider : 'deepseek';
     const p = providerFor(provider) ?? providerFor('deepseek')!;
     return {
@@ -139,11 +169,12 @@ export function saveLlmConfig(cfg: LlmConfig): void {
     apiKeyEnv: p.apiKeyEnv,
   };
   if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
-  atomicWriteYaml(LLM_CONFIG, { llm: out });
+  mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
+  atomicWriteYaml(userConfigPath('llm.user.yaml'), out);
 }
 
 function atomicWriteYaml(path: string, obj: unknown): void {
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, yaml.dump(obj, { lineWidth: -1, noRefs: true }), 'utf8');
+  writeFileSync(tmp, yaml.dump(obj, { lineWidth: -1, noRefs: true }), { encoding: 'utf8', mode: 0o600 });
   renameSync(tmp, path);
 }

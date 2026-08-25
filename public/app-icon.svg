@@ -5,26 +5,16 @@
       <stop offset="1" stop-color="#12383f"/>
     </linearGradient>
   </defs>
-
-  <!-- Quiet workbench foundation. -->
   <rect x="64" y="64" width="896" height="896" rx="210" fill="url(#bg)"/>
   <rect x="82" y="82" width="860" height="860" rx="192" fill="none" stroke="#3d7479" stroke-width="8"/>
-
-  <!-- A customer-centered relationship loop that continues upward. -->
   <path d="M 706 318 C 634 250 526 224 426 250 C 276 289 194 441 239 587 C 281 725 427 807 568 777 C 661 757 735 699 773 620"
         fill="none" stroke="#f7f4eb" stroke-width="62" stroke-linecap="round"/>
   <path d="M 738 616 L 789 565 L 813 646 Z" fill="#f7f4eb"/>
-
-  <!-- Relationship signals around the customer. -->
   <circle cx="286" cy="349" r="47" fill="#72d6bd"/>
   <circle cx="752" cy="546" r="43" fill="#f3c85b"/>
-
-  <!-- The customer remains the visual center. -->
   <circle cx="502" cy="434" r="82" fill="#ff7c6b"/>
   <path d="M 337 675 C 356 558 421 506 502 506 C 583 506 648 558 667 675 C 620 716 565 737 502 737 C 439 737 384 716 337 675 Z"
         fill="#ff7c6b"/>
-
-  <!-- Agent intelligence: present, but secondary to the customer. -->
   <path d="M 731 238 C 742 277 757 292 796 303 C 757 314 742 329 731 368 C 720 329 705 314 666 303 C 705 292 720 277 731 238 Z"
         fill="#f3c85b"/>
 </svg>

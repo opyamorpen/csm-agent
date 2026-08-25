@@ -37,6 +37,8 @@ const draft: ConfirmDraft = {
   title: '跟进记录草稿',
   summary: '测试草稿',
   fields: { customer_name: '测试客户' },
+  target_tool: WRITE_TOOL_NAME,
+  target_arguments: {},
 };
 
 function buildContext() {
@@ -96,6 +98,40 @@ test('runAgent: approve lets the write tool through (one-shot)', async () => {
 
   assert.equal(writeCalls(), 1, '批准后应调用一次写工具');
   assert.equal(result, '已写入');
+});
+
+test('runAgent: approval is bound to exact tool arguments', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('confirm_write', { ...draft, target_arguments: { customer: 'A' } })]),
+    fauxAssistantMessage([fauxToolCall(WRITE_TOOL_NAME, { customer: 'B' })]),
+    fauxAssistantMessage('未写入'),
+  ]);
+  const result = await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '写入',
+    hooks: { onEvent() {}, requestConfirm: async () => true },
+  });
+  assert.equal(writeCalls(), 0);
+  assert.equal(result, '未写入');
+});
+
+test('runAgent: CSM-edited arguments replace the original approval binding', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+  const original = { ...draft, target_arguments: { customer: 'A' } };
+  const edited = { ...original, title: 'CSM 修改后', target_arguments: { customer: 'B' } };
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('confirm_write', original)]),
+    fauxAssistantMessage([fauxToolCall(WRITE_TOOL_NAME, { customer: 'B' })]),
+    fauxAssistantMessage('已按修改稿写入'),
+  ]);
+  const result = await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '写入',
+    hooks: { onEvent() {}, requestConfirm: async () => edited },
+  });
+  assert.equal(writeCalls(), 1);
+  assert.equal(result, '已按修改稿写入');
 });
 
 test('runAgent: local tool (resolve_customer) emits customer_context and bypasses MCP', async () => {

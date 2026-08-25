@@ -1,6 +1,6 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Model, Models, Tool } from '@earendil-works/pi-ai';
-import { loadDotEnv, loadLlmConfig, saveLlmConfig, type McpServerConfig, type LlmConfig } from './config.js';
+import { loadDotEnv, loadLlmConfig, saveLlmConfig, providerFor, type McpServerConfig, type LlmConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
@@ -75,11 +75,12 @@ export async function createRuntime(): Promise<Runtime> {
       runtime.systemPrompt = buildSystemPrompt(toolSummaries(mcp));
     },
     setLlm: (cfg) => {
-      saveLlmConfig(cfg);
-      if (cfg.apiKey) process.env[cfg.apiKeyEnv] = cfg.apiKey;
-      const next = resolveModel(models, cfg);
+      const normalized = { ...cfg, apiKeyEnv: providerFor(cfg.provider)?.apiKeyEnv ?? cfg.apiKeyEnv };
+      saveLlmConfig(normalized);
+      if (normalized.apiKey) process.env[normalized.apiKeyEnv] = normalized.apiKey;
+      const next = resolveModel(models, normalized);
       runtime.model = next;
-      runtime.llm = { ...cfg };
+      runtime.llm = normalized;
       return next;
     },
   };
