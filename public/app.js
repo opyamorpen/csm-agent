@@ -333,27 +333,29 @@
     if (placeholder) t.placeholder = placeholder; return t;
   }
 
-  // Two auth modes the UI supports:
+  // Three auth modes the UI supports:
   //  - bearer: streamable-http + Authorization: Bearer <token> (CRM/Hemory style)
-  //  - oauth:  stdio + npx mcp-remote <url> (ONES style, browser OAuth flow)
+  //  - custom: streamable-http + arbitrary header, e.g. X-ONES-MCP-Token
+  //  - oauth:  stdio + npx mcp-remote <url> (browser OAuth flow)
   function normalizeServer(s) {
     const args = s.args ?? [];
     const isOAuth = s.transport === 'stdio' && s.command === 'npx' && args.some((a) => String(a).includes('mcp-remote'));
-    let url = s.url ?? '';
-    let token = '';
     if (isOAuth) {
-      url = String(args[args.length - 1] ?? '');
-    } else {
-      const auth = (s.headers && s.headers.Authorization) || '';
-      const bearer = /^Bearer\s+(.+)$/i.exec(auth);
-      token = bearer ? bearer[1] : auth;
+      return { name: s.name ?? '', authType: 'oauth', url: String(args[args.length - 1] ?? ''), headerName: '', token: '' };
     }
-    return {
-      name: s.name ?? '',
-      authType: isOAuth ? 'oauth' : 'bearer',
-      url,
-      token,
-    };
+    const headers = s.headers ?? {};
+    const auth = headers.Authorization;
+    if (auth && /^Bearer\s+/i.test(auth)) {
+      return { name: s.name ?? '', authType: 'bearer', url: s.url ?? '', headerName: '', token: auth.replace(/^Bearer\s+/i, '') };
+    }
+    const customKey = Object.keys(headers).find((k) => k.toLowerCase() !== 'authorization');
+    if (customKey) {
+      return { name: s.name ?? '', authType: 'custom', url: s.url ?? '', headerName: customKey, token: headers[customKey] ?? '' };
+    }
+    if (auth) {
+      return { name: s.name ?? '', authType: 'custom', url: s.url ?? '', headerName: 'Authorization', token: auth };
+    }
+    return { name: s.name ?? '', authType: 'bearer', url: s.url ?? '', headerName: '', token: '' };
   }
 
   function autoName(url) {
@@ -377,7 +379,7 @@
     const row1 = el('div', 'row');
     const nameF = field('名称（留空自动生成）'); nameF.append(makeInput('js-name', server.name, '如 crm / ones / recording'));
     const authF = field('连接方式'); authF.append(makeSelect('js-authType',
-      [{ value: 'bearer', label: 'Token 鉴权' }, { value: 'oauth', label: 'OAuth 授权（如 ONES）' }], server.authType));
+      [{ value: 'bearer', label: 'Token 鉴权' }, { value: 'custom', label: '自定义 Header' }, { value: 'oauth', label: 'OAuth 授权' }], server.authType));
     row1.append(nameF, authF);
     box.append(row1);
 
@@ -386,10 +388,21 @@
     urlRow.append(urlF);
     box.append(urlRow);
 
+    // bearer / custom 共用的 Token 行
     const tokenRow = el('div', 'row js-token-row');
-    const tokenF = field('Token（Token 鉴权时填，可用 ${ENV_VAR}）'); tokenF.append(makeInput('js-token', server.token, 'Bearer token 值'));
+    const tokenF = field('Token'); tokenF.append(makeInput('js-token', server.token, 'token 值，可用 ${ENV_VAR}'));
     tokenRow.append(tokenF);
     box.append(tokenRow);
+
+    // 自定义 Header 的 header 名
+    const headerRow = el('div', 'row js-header-row');
+    const headerF = field('Header 名'); headerF.append(makeInput('js-header', server.headerName, '如 X-ONES-MCP-Token'));
+    headerRow.append(headerF);
+    box.append(headerRow);
+
+    // OAuth 提示
+    const oauthHint = el('div', 'oauth-hint hidden', 'OAuth 方式无需填 token，首次连接会自动打开浏览器授权。');
+    box.append(oauthHint);
 
     const statusLine = el('div', 'status-line');
     const failure = failures.find(([n]) => n === server.name);
@@ -398,8 +411,11 @@
     box.append(statusLine);
 
     const sync = () => {
-      const isOAuth = authF.querySelector('select').value === 'oauth';
-      tokenRow.style.display = isOAuth ? 'none' : '';
+      const mode = authF.querySelector('select').value;
+      tokenRow.style.display = (mode === 'bearer' || mode === 'custom') ? '' : 'none';
+      headerRow.style.display = mode === 'custom' ? '' : 'none';
+      oauthHint.classList.toggle('hidden', mode !== 'oauth');
+      tokenF.querySelector('label').textContent = mode === 'custom' ? 'Token（header 的值）' : 'Token';
       const n = nameF.querySelector('input').value.trim();
       title.textContent = n || autoName(urlF.querySelector('input').value) || '(新服务器)';
     };
@@ -422,6 +438,11 @@
 
       if (authType === 'oauth') {
         out.push({ name, transport: 'stdio', command: 'npx', args: ['-y', 'mcp-remote@0.1.18', url] });
+      } else if (authType === 'custom') {
+        const headerName = box.querySelector('.js-header').value.trim();
+        const server = { name, transport: 'streamable-http', url };
+        if (headerName && token) server.headers = { [headerName]: token };
+        out.push(server);
       } else {
         const server = { name, transport: 'streamable-http', url };
         if (token) server.headers = { Authorization: token.startsWith('Bearer ') ? token : 'Bearer ' + token };
