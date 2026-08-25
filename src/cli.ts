@@ -18,8 +18,10 @@ interface CustomerSummary {
   name: string;
   shortName?: string | null;
   csmName?: string | null;
+  afterSalesStage?: string | null;
   health: string;
   renewalDate?: string | null;
+  contractValue?: number | null;
   supportOpenCount?: number | null;
   supportBlockedCount?: number | null;
 }
@@ -45,7 +47,7 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/wecom/status'] },
-  { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'] },
+  { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
@@ -72,8 +74,8 @@ async function request<T = any>(path: string, options?: RequestInit): Promise<T>
   return body as T;
 }
 
-async function customers(query = ''): Promise<CustomerSummary[]> {
-  const body = await request<{ customers: CustomerSummary[] }>(`/api/customers?q=${encodeURIComponent(query)}`);
+async function customers(query = '', sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default'): Promise<CustomerSummary[]> {
+  const body = await request<{ customers: CustomerSummary[] }>(`/api/customers?q=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}`);
   return body.customers ?? [];
 }
 
@@ -98,7 +100,7 @@ function help(): void {
 用法:
   csm-agent serve [端口]
   csm-agent doctor
-  csm-agent customers [搜索词] [--json]
+  csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
   csm-agent customer <客户ID或名称> [--json]
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
@@ -145,15 +147,27 @@ async function serve(portInput?: string): Promise<void> {
   await import('./index.js');
 }
 
-async function showCustomers(query: string): Promise<void> {
-  const list = await customers(query);
+async function showCustomers(input: string[]): Promise<void> {
+  const values = [...input];
+  let sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default';
+  const sortIndex = values.findIndex((value) => value === '--sort' || value.startsWith('--sort='));
+  if (sortIndex >= 0) {
+    const inline = values[sortIndex].startsWith('--sort=');
+    const raw = inline ? values[sortIndex].slice('--sort='.length) : values[sortIndex + 1];
+    if (raw !== 'default' && raw !== 'renewal_date' && raw !== 'renewal_amount') throw new Error('排序必须是 default、renewal_date 或 renewal_amount');
+    sort = raw;
+    values.splice(sortIndex, inline ? 1 : 2);
+  }
+  const list = await customers(values.join(' '), sort);
   if (jsonOutput) return print(list);
   console.table(list.map((customer) => ({
     id: customer.id,
     customer: customer.name,
     csm: customer.csmName ?? 'unknown',
+    stage: customer.afterSalesStage ?? 'unknown',
     health: customer.health,
     renewal: customer.renewalDate?.slice(0, 10) ?? 'unknown',
+    renewalAmount: customer.contractValue ?? 'unknown',
     openTickets: customer.supportOpenCount ?? 'unknown',
     blocked: customer.supportBlockedCount ?? 'unknown',
   })));
@@ -531,7 +545,7 @@ async function main(): Promise<void> {
   if (command === 'capabilities') return print(CLI_CAPABILITIES);
   if (command === 'serve') return serve(args.shift());
   if (command === 'doctor') return doctor();
-  if (command === 'customers') return showCustomers(args.join(' '));
+  if (command === 'customers') return showCustomers(args);
   if (command === 'customer') return showCustomer(args.join(' '));
   if (command === 'timeline') {
     const customer = args.shift() ?? '';

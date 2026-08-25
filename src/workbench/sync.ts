@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
 import { assessRisk } from './risk.js';
-import type { Customer, SourceEvent, SyncRun, WorkhourRecord } from './types.js';
+import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SyncRun, type WorkhourRecord } from './types.js';
 
 const CRM_FIELDS = {
   id: '_id',
@@ -224,7 +224,7 @@ function hasCsm(record: Record<string, unknown>): boolean {
   return !!csm || /是|已交接|true|1/i.test(handed ?? '');
 }
 
-function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatabase['upsertCustomer']>[0] | null {
+export function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatabase['upsertCustomer']>[0] | null {
   const id = asText(record[CRM_FIELDS.id]) ?? asText(record.id);
   const name = asText(record[CRM_FIELDS.name]);
   if (!id || !name) return null;
@@ -239,6 +239,7 @@ function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatab
     csmName: relatedName(record, CRM_FIELDS.csm),
     renewalDate: asDate(record[CRM_FIELDS.renewalDate]),
     contractValue: asNumber(record[CRM_FIELDS.contractValue]),
+    afterSalesStage: normalizeAfterSalesStage(asText(record[CRM_FIELDS.stage])),
     contractStatus: lost ? '已流失' : lifeStatus,
     products: asList(record[CRM_FIELDS.products]),
     lastContactAt: asDate(record[CRM_FIELDS.lastContactAt]),

@@ -250,7 +250,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
 
       // ── customer-centered workbench ──
       if (req.method === 'GET' && path === '/api/customers') {
-        return json(res, 200, { customers: workbench.db.listCustomers(url.searchParams.get('q') ?? '') });
+        const requestedSort = url.searchParams.get('sort');
+        const sort = requestedSort === 'renewal_date' || requestedSort === 'renewal_amount' ? requestedSort : 'default';
+        return json(res, 200, { customers: workbench.db.listCustomers(url.searchParams.get('q') ?? '', sort) });
       }
       if (req.method === 'POST' && path === '/api/sync') {
         return json(res, 202, workbench.sync.refreshAll());

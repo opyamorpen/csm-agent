@@ -45,6 +45,8 @@ csm-agent capabilities --json
 csm-agent serve 3210
 csm-agent doctor
 csm-agent customers 青岛高测
+csm-agent customers --sort renewal_date
+csm-agent customers --sort renewal_amount
 csm-agent customer <CRM客户ID>
 csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent workhours <CRM客户ID> # 总工时和登记明细，按工时日期倒序
@@ -123,7 +125,9 @@ ONES_TEAM_ID=RDjYMhKq
 
 ## 关键接口
 
-- `GET /api/customers`、`GET /api/customers/:id/overview`、`GET /api/customers/:id/timeline`
+- `GET /api/customers?q=搜索词&sort=default|renewal_date|renewal_amount`、`GET /api/customers/:id/overview`、`GET /api/customers/:id/timeline`
+
+客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
 - `POST /api/hemory/sync`、`GET /api/hemory/fragments`、`PUT /api/hemory/fragments/attribution`
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`

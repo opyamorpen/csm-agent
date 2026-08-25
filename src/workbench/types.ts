@@ -13,6 +13,7 @@ export interface CustomerInput {
   industry?: string | null;
   csmName?: string | null;
   csmWecomUserid?: string | null;
+  afterSalesStage?: string | null;
   renewalDate?: string | null;
   contractValue?: number | null;
   contractStatus?: string | null;
@@ -39,6 +40,15 @@ export interface Customer extends CustomerInput {
   opportunityCount?: number;
   caseCandidate?: boolean;
   stale?: boolean;
+}
+
+export function normalizeAfterSalesStage(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized || null;
+}
+
+export function isLostAfterSalesStage(value: string | null | undefined): boolean {
+  return normalizeAfterSalesStage(value) === '流失';
 }
 
 export interface SourceEventInput {

@@ -53,6 +53,7 @@
   const draftBatchList = document.getElementById('draftBatchList');
   const globalSync = document.getElementById('globalSync');
   const customerSearch = document.getElementById('customerSearch');
+  const customerSort = document.getElementById('customerSort');
   const refreshPortfolio = document.getElementById('refreshPortfolio');
   const customerRows = document.getElementById('customerRows');
   const portfolioMetrics = document.getElementById('portfolioMetrics');
@@ -868,7 +869,7 @@
   }
 
   async function loadPortfolio() {
-    const data = await api(`/api/customers?q=${encodeURIComponent(customerSearch.value.trim())}`);
+    const data = await api(`/api/customers?q=${encodeURIComponent(customerSearch.value.trim())}&sort=${encodeURIComponent(customerSort.value)}`);
     customersCache = data.customers || [];
     const high = customersCache.filter((c) => c.health === 'high').length;
     const renewal = customersCache.filter((c) => c.renewalWithin120Days).length;
@@ -1409,6 +1410,7 @@
 
   globalSync.onclick = startGlobalSync;
   refreshPortfolio.onclick = loadPortfolio;
+  customerSort.onchange = () => { void loadPortfolio(); };
   let searchTimer;
   customerSearch.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadPortfolio, 250); };
 

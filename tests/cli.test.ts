@@ -40,6 +40,7 @@ test('CLI provides standard global help and version commands', () => {
   const help = runCli('help');
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /csm-agent serve/);
+  assert.match(help.stdout, /csm-agent customers .*--sort default\|renewal_date\|renewal_amount/);
   assert.match(help.stdout, /csm-agent capabilities/);
   assert.match(help.stdout, /csm-agent action complete/);
   assert.match(help.stdout, /csm-agent case publish/);
@@ -50,4 +51,13 @@ test('CLI provides standard global help and version commands', () => {
   const version = runCli('--version');
   assert.equal(version.status, 0, version.stderr);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
+});
+
+test('customer portfolio display contract exposes the supported sort controls', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(html, /id="customerSort"/);
+  assert.match(html, /value="renewal_date"/);
+  assert.match(html, /value="renewal_amount"/);
+  assert.match(app, /sort=\$\{encodeURIComponent\(customerSort\.value\)\}/);
 });

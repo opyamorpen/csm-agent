@@ -464,6 +464,8 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 
 .table-wrap { overflow: auto; border: 1px solid var(--border); background: var(--panel); }
 .customer-table { width: 100%; min-width: 1020px; border-collapse: collapse; table-layout: fixed; }
+.sort-control { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.sort-control select { min-height: 32px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel-2); color: var(--text); font: inherit; }
 .customer-table th { height: 38px; padding: 0 12px; background: #f0f2f4; color: #596473; font-size: 12px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border); }
 .customer-table td { height: 64px; padding: 8px 12px; vertical-align: middle; border-bottom: 1px solid #e7eaee; overflow: hidden; }
 .customer-table tr:last-child td { border-bottom: 0; }

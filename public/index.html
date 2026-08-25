@@ -37,7 +37,7 @@
       <section id="portfolioView" class="workbench-view">
         <div class="view-head">
           <div><h1>客户组合</h1><p id="portfolioSubtitle">续约窗口与高价值客户优先</p></div>
-          <div class="toolbar"><input id="customerSearch" type="search" placeholder="搜索客户或 CSM" /><button id="refreshPortfolio" class="quiet-command">刷新</button></div>
+          <div class="toolbar"><input id="customerSearch" type="search" placeholder="搜索客户或 CSM" /><label class="sort-control"><span>排序</span><select id="customerSort"><option value="default">当前优先级</option><option value="renewal_date">合同到期时间</option><option value="renewal_amount">应续约金额</option></select></label><button id="refreshPortfolio" class="quiet-command">刷新</button></div>
         </div>
         <div id="portfolioMetrics" class="metric-strip"></div>
         <div class="table-wrap">

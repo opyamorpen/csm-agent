@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, crmCustomer, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { classifyDraftTypes, HemoryDraftService } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -30,6 +30,28 @@ test('workbench: explicit nonrenewal overrides incomplete coverage', () => withD
   const risk = assessRisk(customer, []);
   assert.equal(risk.level, 'high');
 }));
+
+test('workbench: customer portfolio excludes lost after-sales stage but keeps direct detail access', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-active', name: '活跃客户', afterSalesStage: '服务中', renewalDate: '2026-12-01T00:00:00.000Z', contractValue: 100 });
+  db.upsertCustomer({ id: 'crm-lost', name: '流失客户', afterSalesStage: '流失', renewalDate: '2026-09-01T00:00:00.000Z', contractValue: 999 });
+  db.upsertCustomer({ id: 'crm-legacy-lost', name: '历史流失客户', contractStatus: '已流失' });
+  assert.deepEqual(db.listCustomers().map((customer) => customer.id), ['crm-active']);
+  assert.equal(db.getCustomer('crm-lost')?.name, '流失客户');
+}));
+
+test('workbench: customer portfolio supports renewal date and amount sorting with unknowns last', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-late', name: '较晚到期', renewalDate: '2027-01-01T00:00:00.000Z', contractValue: 300 });
+  db.upsertCustomer({ id: 'crm-early', name: '较早到期', renewalDate: '2026-09-01T00:00:00.000Z', contractValue: 100 });
+  db.upsertCustomer({ id: 'crm-unknown', name: '缺失数据', renewalDate: null, contractValue: null });
+  assert.deepEqual(db.listCustomers('', 'renewal_date').map((customer) => customer.id), ['crm-early', 'crm-late', 'crm-unknown']);
+  assert.deepEqual(db.listCustomers('', 'renewal_amount').map((customer) => customer.id), ['crm-late', 'crm-early', 'crm-unknown']);
+}));
+
+test('workbench: CRM stage is persisted separately from contract lifecycle status', () => {
+  const input = crmCustomer({ _id: 'crm-stage', name: '阶段客户', field_Kt9bI__c: '续约中', life_status: '正常' });
+  assert.equal(input?.afterSalesStage, '续约中');
+  assert.equal(input?.contractStatus, '正常');
+});
 
 test('workbench: source events are idempotent by source identity', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-3', name: '客户丙' });
