@@ -428,6 +428,31 @@ async function reviewDraftBatch(batchId: string): Promise<void> {
   } finally { rl.close(); }
 }
 
+async function waitForRegeneratedBatch(customerId: string, fingerprint: string): Promise<any | null> {
+  for (let i = 0; i < 30; i++) {
+    const body = await request<any>(`/api/draft-batches?customer_id=${encodeURIComponent(customerId)}`);
+    const batch = (body.batches ?? []).find((item: any) => item.fingerprint === fingerprint);
+    if (batch) return batch;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return null;
+}
+
+async function regenerateDraftBatch(batchId: string): Promise<void> {
+  const original = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}`);
+  const job = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}/regenerate`, { method: 'POST' });
+  if (jsonOutput) return print({ job, supersededBatchId: original.id, customerId: original.customerId });
+  console.log(`已提交重新生成任务 ${job.jobId}（旧批次 ${original.id} 的未写入草稿已作废），等待新批次生成…`);
+  const batch = await waitForRegeneratedBatch(original.customerId, job.fingerprint);
+  if (!batch) {
+    console.log('60 秒内未生成新批次，可稍后运行 csm-agent drafts 查看。');
+    return print(job);
+  }
+  console.log(`新批次 ${batch.id} 已生成（${batch.items?.length ?? 0} 条草稿）：`);
+  console.table((batch.items ?? []).map((item: any) => ({ type: item.type, status: item.status, title: item.title })));
+  console.log(`下一步：csm-agent draft review ${batch.id}`);
+}
+
 async function draftCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'review') {
     const id = values.shift() ?? '';
@@ -442,7 +467,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
   if (subcommand === 'regenerate') {
     const id = values.shift() ?? '';
     if (!id) throw new Error('draft regenerate 缺少批次 ID');
-    return print(await request(`/api/draft-batches/${encodeURIComponent(id)}/regenerate`, { method: 'POST' }));
+    return regenerateDraftBatch(id);
   }
   throw new Error('draft 子命令只允许 review/retry/regenerate');
 }

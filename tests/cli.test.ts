@@ -55,6 +55,16 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
 });
 
+test('draft regenerate waits for the new batch and points to the review step', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const handler = source.match(/async function regenerateDraftBatch[\s\S]*?\n}\n\nasync function draftCommand/)?.[0];
+
+  assert.ok(handler, 'regenerateDraftBatch source was not found');
+  assert.match(handler, /waitForRegeneratedBatch/);
+  assert.match(handler, /draft review/);
+  assert.match(handler, /已作废/);
+});
+
 test('customer portfolio display contract exposes the supported sort controls', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
