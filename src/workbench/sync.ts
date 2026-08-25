@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
 import { assessRisk } from './risk.js';
-import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SyncRun, type WorkhourRecord } from './types.js';
+import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceEventInput, type SyncRun, type WorkhourRecord } from './types.js';
 
 const CRM_FIELDS = {
   id: '_id',
@@ -226,6 +226,20 @@ function relatedName(record: Record<string, unknown>, field: string): string | n
     if (names.length) return names.join('、');
   }
   return asText(record[field]);
+}
+
+export function crmFollowupEvent(record: Record<string, unknown>): SourceEventInput | null {
+  const related = Array.isArray(record.related_object_data) ? record.related_object_data as Array<Record<string, unknown>> : [];
+  const bound = related.find((entry) => entry?.describe_api_name === CRM_OBJECT && typeof entry.id === 'string');
+  if (!bound?.id) return null;
+  const content = asText(record.active_record_content) ?? '';
+  const createdAt = asDate(record.create_time);
+  const occurredAt = asDate(record.field_oUaZx__c) ?? createdAt ?? new Date().toISOString();
+  return { customerId: String(bound.id), sourceSystem: 'crm', sourceType: 'crm_followup',
+    externalId: String(record._id ?? ''), title: content.split('\n')[0]?.slice(0, 120) || 'CRM 跟进记录',
+    occurredAt, payload: { recordId: record._id, content, type: record.active_record_type__r ?? null,
+      channel: record.field_MIe19__c__r ?? null, relatedCustomers: related, createTime: createdAt },
+    confidence: 1, attributionStatus: 'confirmed' };
 }
 
 export function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatabase['upsertCustomer']>[0] | null {
@@ -545,15 +559,9 @@ export class PortfolioSyncService {
     const records = recordsIn(parsed);
     let count = 0;
     for (const record of records) {
-      const related = Array.isArray(record.related_object_data) ? record.related_object_data as Array<Record<string, unknown>> : [];
-      const bound = related.find((entry) => entry?.describe_api_name === CRM_OBJECT && typeof entry.id === 'string');
-      if (!bound?.id || !this.db.getCustomer(String(bound.id))) continue;
-      const content = asText(record.active_record_content) ?? '';
-      const occurredAt = asDate(record.field_oUaZx__c) ?? asDate(record.create_time) ?? new Date().toISOString();
-      this.db.upsertSourceEvent({ customerId: String(bound.id), sourceSystem: 'crm', sourceType: 'crm_followup',
-        externalId: String(record._id ?? ''), title: content.split('\n')[0]?.slice(0, 120) || 'CRM 跟进记录',
-        occurredAt, payload: { recordId: record._id, content, type: record.active_record_type__r ?? null,
-          channel: record.field_MIe19__c__r ?? null, relatedCustomers: related }, confidence: 1, attributionStatus: 'confirmed' });
+      const input = crmFollowupEvent(record);
+      if (!input || !this.db.getCustomer(String(input.customerId))) continue;
+      this.db.upsertSourceEvent(input);
       count++;
     }
     return count;

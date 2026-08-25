@@ -1006,19 +1006,6 @@
     return grid;
   }
 
-  function renderMeetings(events) {
-    const meetings = events.filter((event) => event.sourceSystem === 'hemory' && event.sourceType === 'ai_topic_segment');
-    if (!meetings.length) return el('div', 'workspace-empty', '暂无已确认归属的会议沟通记录');
-    const list = el('div', 'meeting-list');
-    for (const event of meetings.slice(0, 12)) {
-      const item = el('article', 'meeting-record');
-      item.append(el('strong', null, event.title), el('p', null, event.payload?.summary || ''),
-        el('div', 'cell-sub', `${formatDateTime(event.payload?.startAt || event.occurredAt)} · ${(event.payload?.speakers || []).join('、') || '发言人未知'}`));
-      list.append(item);
-    }
-    return list;
-  }
-
   function renderBusinessRecords(events, sourceType) {
     const records = events.filter((event) => event.sourceSystem === 'ones' && event.sourceType === sourceType);
     if (!records.length) return el('div', 'workspace-empty', `暂无${SOURCE_TYPE_LABEL[sourceType] || '相关'}记录`);
@@ -1131,20 +1118,26 @@
     return wrap;
   }
 
-  function renderFollowups(customer, events) {
-    const records = events.filter((event) => event.sourceSystem === 'crm' && event.sourceType === 'followup');
+  function renderFollowups(events) {
+    // 跟进记录 = CRM「csm售后客户」对象关联的销售记录（crm_followup），按销售记录创建时间倒序展示。
+    const createdAt = (event) => {
+      const value = new Date(event.payload?.createTime || event.occurredAt).getTime();
+      return Number.isNaN(value) ? 0 : value;
+    };
+    const records = events
+      .filter((event) => event.sourceSystem === 'crm' && event.sourceType === 'crm_followup')
+      .sort((left, right) => createdAt(right) - createdAt(left) || String(right.externalId || '').localeCompare(String(left.externalId || '')));
+    if (!records.length) return el('div', 'workspace-empty', '暂无已同步的销售记录');
     const list = el('div', 'business-record-list');
-    if (customer.nextAction) {
-      const current = el('article', 'business-record');
-      current.append(el('strong', null, '当前跟进'), el('p', null, customer.nextAction), el('div', 'cell-sub', `最后互动 ${formatDateTime(customer.lastContactAt)}`));
-      list.append(current);
-    }
     for (const event of records) {
       const item = el('article', 'business-record');
-      item.append(el('strong', null, event.title), el('div', 'cell-sub', formatDateTime(event.occurredAt)));
+      item.append(el('strong', null, event.title));
+      const meta = [event.payload?.type, event.payload?.channel].filter(Boolean).map(nestedName).filter(Boolean).join(' · ');
+      item.append(el('div', 'cell-sub', `创建 ${formatDateTime(event.payload?.createTime || event.occurredAt)}${meta ? ` · ${meta}` : ''}`));
+      if (event.payload?.content && event.payload.content !== event.title) item.append(el('p', null, event.payload.content));
       list.append(item);
     }
-    return list.childElementCount ? list : el('div', 'workspace-empty', '暂无已同步跟进记录');
+    return list;
   }
 
   async function startAgentDraft(customer, targetKey, timeline, identities) {
@@ -1317,8 +1310,7 @@
     addTab('operations_ticket', '运维', renderOnesWorkItems(timeline, 'operations_ticket'), draftCommand(c, 'operations_ticket', timeline, data.identities));
     addTab('customer_manhour', '工时', renderWorkhours(timeline, workhoursData), draftCommand(c, 'customer_manhour', timeline, data.identities));
     addTab('private_cloud_instance', '私有云实例', renderBusinessRecords(timeline, 'private_cloud_instance'), draftCommand(c, 'private_cloud_instance', timeline, data.identities));
-    addTab('followup', '跟进记录', renderFollowups(c, timeline), draftCommand(c, 'followup', timeline, data.identities));
-    addTab('meetings', '会议沟通', renderMeetings(timeline));
+    addTab('followup', '跟进记录', renderFollowups(timeline), draftCommand(c, 'followup', timeline, data.identities));
     const casePanel = el('div');
     const caseCommands = el('div', 'row-actions');
     caseCommands.append(draftCommand(c, 'case', timeline, data.identities));

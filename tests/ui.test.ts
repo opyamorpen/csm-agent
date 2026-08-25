@@ -35,3 +35,20 @@ test('draft inbox exposes regenerate control and operations label', () => {
   assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/regenerate/);
   assert.match(source, /operations: '运维工单'/);
 });
+
+test('customer detail tabs drop meetings and followups list CRM sales records by create time', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const tabStrip = source.match(/const overview = el\('div'\);[\s\S]*?tabs\[0\]\.button\.click\(\);/)?.[0];
+
+  assert.ok(tabStrip, 'customer detail tab strip source was not found');
+  assert.doesNotMatch(tabStrip, /addTab\('meetings'/);
+  assert.doesNotMatch(source, /function renderMeetings/);
+  assert.match(tabStrip, /addTab\('followup', '跟进记录', renderFollowups\(timeline\)/);
+
+  const renderer = source.match(/function renderFollowups[\s\S]*?\n  }\n\n  async function startAgentDraft/)?.[0];
+  assert.ok(renderer, 'renderFollowups source was not found');
+  assert.match(renderer, /event\.sourceType === 'crm_followup'/);
+  assert.match(renderer, /payload\?\.createTime/);
+  assert.match(renderer, /createdAt\(right\) - createdAt\(left\)/);
+  assert.doesNotMatch(renderer, /nextAction/);
+});

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, crmCustomer, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { classifyDraftTypes, HemoryDraftService } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -52,6 +52,24 @@ test('workbench: CRM stage is persisted separately from contract lifecycle statu
   assert.equal(input?.afterSalesStage, '续约中');
   assert.equal(input?.contractStatus, '正常');
   assert.equal(input?.sourceObject, 'object_Umwnn__c');
+});
+
+test('workbench: CRM followup event binds after-sales customer and keeps record create time', () => {
+  const input = crmFollowupEvent({
+    _id: 'rec-1', active_record_content: '首次跟进\n沟通了续约意向', active_record_type__r: '常规客情维护',
+    field_MIe19__c__r: '线上', create_time: 1755500000000, field_oUaZx__c: 1755600000000,
+    related_object_data: [{ describe_api_name: 'object_Umwnn__c', id: 'crm-f', name: '客户福' }, { describe_api_name: 'AccountObj', id: 'acc-1' }],
+  });
+  assert.equal(input?.customerId, 'crm-f');
+  assert.equal(input?.sourceType, 'crm_followup');
+  assert.equal(input?.externalId, 'rec-1');
+  assert.equal(input?.title, '首次跟进');
+  assert.equal(input?.occurredAt, new Date(1755600000000).toISOString());
+  assert.equal(input?.payload?.createTime, new Date(1755500000000).toISOString());
+  assert.equal(input?.payload?.content, '首次跟进\n沟通了续约意向');
+
+  // 未关联售后客户（object_Umwnn__c）的销售记录不归属任何客户。
+  assert.equal(crmFollowupEvent({ _id: 'rec-2', related_object_data: [{ describe_api_name: 'AccountObj', id: 'acc-1' }] }), null);
 });
 
 test('workbench: source events are idempotent by source identity', () => withDb((db) => {
