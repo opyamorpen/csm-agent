@@ -333,77 +333,63 @@
     if (placeholder) t.placeholder = placeholder; return t;
   }
 
-  // Store schema: Authorization header is either "Bearer <token>" (simple) or
-  // an arbitrary override (advanced). Normalize accordingly.
+  // Two auth modes the UI supports:
+  //  - bearer: streamable-http + Authorization: Bearer <token> (CRM/Hemory style)
+  //  - oauth:  stdio + npx mcp-remote <url> (ONES style, browser OAuth flow)
   function normalizeServer(s) {
-    const auth = (s.headers && s.headers.Authorization) || '';
-    const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+    const args = s.args ?? [];
+    const isOAuth = s.transport === 'stdio' && s.command === 'npx' && args.some((a) => String(a).includes('mcp-remote'));
+    let url = s.url ?? '';
+    let token = '';
+    if (isOAuth) {
+      url = String(args[args.length - 1] ?? '');
+    } else {
+      const auth = (s.headers && s.headers.Authorization) || '';
+      const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+      token = bearer ? bearer[1] : auth;
+    }
     return {
       name: s.name ?? '',
-      transport: s.transport === 'stdio' ? 'stdio' : 'streamable-http',
-      url: s.url ?? '',
-      token: bearer ? bearer[1] : '',
-      authOverride: bearer ? '' : auth,
-      command: s.command ?? '',
-      args: (s.args ?? []).join(' '),
-      env: Object.entries(s.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'),
-      writeToolPatterns: (s.writeToolPatterns ?? []).join(', '),
+      authType: isOAuth ? 'oauth' : 'bearer',
+      url,
+      token,
     };
+  }
+
+  function autoName(url) {
+    try {
+      const parts = new URL(url).hostname.split('.');
+      const skip = new Set(['www', 'api', 'app', 'open', 'us', 'cn', 'com', 'net', 'org', 'pro', 'io', 'dev', 'cloud', 'my']);
+      return parts.filter((p) => !skip.has(p.toLowerCase()))[0] || parts[0] || 'mcp';
+    } catch {
+      return 'mcp';
+    }
   }
 
   function renderServerEditor(server, failures) {
     const box = el('div', 'server-editor');
     const head = el('div', 'ed-head');
-    const title = el('div', 'title', server.name || '(未命名)');
+    const title = el('div', 'title', server.name || '(新服务器)');
     const remove = el('button', 'remove', '删除');
     head.append(title, remove);
     box.append(head);
 
-    // ── 简单字段：名称 + 地址 + Token ──
     const row1 = el('div', 'row');
-    const nameF = field('名称'); nameF.append(makeInput('js-name', server.name, '例如 crm'));
-    const urlF = field('MCP 地址'); urlF.append(makeInput('js-url', server.url, 'https://.../mcp'));
-    row1.append(nameF, urlF);
+    const nameF = field('名称（留空自动生成）'); nameF.append(makeInput('js-name', server.name, '如 crm / ones / recording'));
+    const authF = field('连接方式'); authF.append(makeSelect('js-authType',
+      [{ value: 'bearer', label: 'Token 鉴权' }, { value: 'oauth', label: 'OAuth 授权（如 ONES）' }], server.authType));
+    row1.append(nameF, authF);
     box.append(row1);
 
-    const tokenRow = el('div', 'row');
-    const tokenF = field('Token（可选，可用 ${ENV_VAR}）'); tokenF.append(makeInput('js-token', server.token, '留空则无需鉴权'));
+    const urlRow = el('div', 'row');
+    const urlF = field('MCP 地址'); urlF.append(makeInput('js-url', server.url, 'https://.../mcp'));
+    urlRow.append(urlF);
+    box.append(urlRow);
+
+    const tokenRow = el('div', 'row js-token-row');
+    const tokenF = field('Token（Token 鉴权时填，可用 ${ENV_VAR}）'); tokenF.append(makeInput('js-token', server.token, 'Bearer token 值'));
     tokenRow.append(tokenF);
     box.append(tokenRow);
-
-    // ── 高级（折叠）──
-    const advToggle = el('button', 'adv-toggle', '▸ 高级设置');
-    const advBody = el('div', 'adv-body hidden');
-    const transF = field('传输方式'); transF.append(makeSelect('js-transport',
-      [{ value: 'streamable-http', label: 'streamable-http（远程地址）' }, { value: 'stdio', label: 'stdio（本地命令/npx）' }], server.transport));
-    advBody.append(transF);
-
-    const httpAdv = el('div', 'js-http');
-    const authF = field('自定义 Authorization（覆盖 Bearer token）'); authF.append(makeInput('js-auth', server.authOverride, 'Bearer ${CRM_MCP_TOKEN}'));
-    httpAdv.append(authF);
-    advBody.append(httpAdv);
-
-    const stdioAdv = el('div', 'js-stdio');
-    const cmdRow = el('div', 'row');
-    const cmdF = field('命令'); cmdF.append(makeInput('js-command', server.command, 'npx'));
-    const argsF = field('参数（空格分隔）'); argsF.append(makeInput('js-args', server.args, '-y mcp-remote https://...'));
-    cmdRow.append(cmdF, argsF);
-    const envRow = el('div', 'row');
-    const envF = field('环境变量（每行 KEY=VALUE）'); envF.append(makeTextarea('js-env', server.env, 'TOKEN=${TOKEN}'));
-    envRow.append(envF);
-    stdioAdv.append(cmdRow, envRow);
-    advBody.append(stdioAdv);
-
-    const wpRow = el('div', 'row');
-    const wpF = field('写操作关键词（留空用默认）'); wpF.append(makeInput('js-write', server.writeToolPatterns, ''));
-    wpRow.append(wpF);
-    advBody.append(wpRow);
-
-    advToggle.addEventListener('click', () => {
-      const open = advBody.classList.toggle('hidden') === false;
-      advToggle.textContent = (open ? '▾ ' : '▸ ') + '高级设置';
-    });
-    box.append(advToggle, advBody);
 
     const statusLine = el('div', 'status-line');
     const failure = failures.find(([n]) => n === server.name);
@@ -411,15 +397,16 @@
     else { statusLine.classList.add('ok'); statusLine.textContent = '已连接'; }
     box.append(statusLine);
 
-    const syncVisibility = () => {
-      const isHttp = transF.querySelector('select').value === 'streamable-http';
-      httpAdv.style.display = isHttp ? '' : 'none';
-      stdioAdv.style.display = isHttp ? 'none' : '';
-      title.textContent = nameF.querySelector('input').value.trim() || '(未命名)';
+    const sync = () => {
+      const isOAuth = authF.querySelector('select').value === 'oauth';
+      tokenRow.style.display = isOAuth ? 'none' : '';
+      const n = nameF.querySelector('input').value.trim();
+      title.textContent = n || autoName(urlF.querySelector('input').value) || '(新服务器)';
     };
-    transF.querySelector('select').addEventListener('change', syncVisibility);
-    nameF.querySelector('input').addEventListener('input', syncVisibility);
-    syncVisibility();
+    authF.querySelector('select').addEventListener('change', sync);
+    nameF.querySelector('input').addEventListener('input', sync);
+    urlF.querySelector('input').addEventListener('input', sync);
+    sync();
     remove.addEventListener('click', () => box.remove());
     return box;
   }
@@ -427,35 +414,19 @@
   function collectServers() {
     const out = [];
     for (const box of serverList.querySelectorAll('.server-editor')) {
-      const name = box.querySelector('.js-name').value.trim();
-      if (!name) continue;
-      const transport = box.querySelector('.js-transport').value;
       const url = box.querySelector('.js-url').value.trim();
+      if (!url) continue;
+      const name = box.querySelector('.js-name').value.trim() || autoName(url);
+      const authType = box.querySelector('.js-authType').value;
       const token = box.querySelector('.js-token').value.trim();
-      const authOverride = box.querySelector('.js-auth').value.trim();
-      const command = box.querySelector('.js-command').value.trim();
-      const args = box.querySelector('.js-args').value.trim().split(/\s+/).filter(Boolean);
-      const envText = box.querySelector('.js-env').value;
-      const write = box.querySelector('.js-write').value.split(',').map((s) => s.trim()).filter(Boolean);
 
-      const env = {};
-      for (const line of envText.split('\n')) {
-        const idx = line.indexOf('=');
-        if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-      }
-
-      const server = { name, transport };
-      if (write.length) server.writeToolPatterns = write;
-      if (transport === 'stdio') {
-        server.command = command;
-        if (args.length) server.args = args;
-        if (Object.keys(env).length) server.env = env;
+      if (authType === 'oauth') {
+        out.push({ name, transport: 'stdio', command: 'npx', args: ['-y', 'mcp-remote@0.1.18', url] });
       } else {
-        server.url = url;
-        const auth = authOverride || (token ? 'Bearer ' + token : '');
-        if (auth) server.headers = { Authorization: auth };
+        const server = { name, transport: 'streamable-http', url };
+        if (token) server.headers = { Authorization: token.startsWith('Bearer ') ? token : 'Bearer ' + token };
+        out.push(server);
       }
-      out.push(server);
     }
     return out;
   }

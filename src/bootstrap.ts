@@ -1,6 +1,6 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Model, Models, Tool } from '@earendil-works/pi-ai';
-import { loadMcpServers, loadDotEnv, loadLlmConfig, saveLlmConfig, type McpServerConfig, type LlmConfig } from './config.js';
+import { loadDotEnv, loadLlmConfig, saveLlmConfig, type McpServerConfig, type LlmConfig } from './config.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
@@ -58,7 +58,9 @@ export async function createRuntime(): Promise<Runtime> {
   const model = resolveModel(models, llm);
 
   const mcp = new McpHub();
-  await mcp.connect(loadMcpServers());
+  // Note: MCP servers are connected asynchronously AFTER the HTTP server
+  // starts (see index.ts), so the UI is available immediately instead of
+  // blocking on slow connections (e.g. ONES's OAuth via mcp-remote).
 
   const runtime: Runtime = {
     models,
