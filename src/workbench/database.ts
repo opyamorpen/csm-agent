@@ -55,6 +55,7 @@ function customerFromRow(row: Row): Customer {
     industry: row.industry as string | null,
     csmName: row.csm_name as string | null,
     csmWecomUserid: row.csm_wecom_userid as string | null,
+    sourceObject: row.source_object as string | null,
     afterSalesStage: normalizeAfterSalesStage(row.after_sales_stage as string | null),
     renewalDate: row.renewal_date as string | null,
     contractValue: row.contract_value == null ? null : Number(row.contract_value),
@@ -153,6 +154,7 @@ export class WorkbenchDatabase {
         industry TEXT,
         csm_name TEXT,
         csm_wecom_userid TEXT,
+        source_object TEXT,
         after_sales_stage TEXT,
         renewal_date TEXT,
         contract_value REAL,
@@ -429,6 +431,9 @@ export class WorkbenchDatabase {
     if (!customerColumns.some((column) => String(column.name) === 'after_sales_stage')) {
       this.db.exec('ALTER TABLE customers ADD COLUMN after_sales_stage TEXT;');
     }
+    if (!customerColumns.some((column) => String(column.name) === 'source_object')) {
+      this.db.exec('ALTER TABLE customers ADD COLUMN source_object TEXT;');
+    }
     this.db.exec(`
       UPDATE source_events
       SET occurred_at = json_extract(payload_json, '$.field009')
@@ -451,13 +456,14 @@ export class WorkbenchDatabase {
     const previous = this.getCustomer(input.id);
     this.db.prepare(`
       INSERT INTO customers (
-        id,name,short_name,industry,csm_name,csm_wecom_userid,after_sales_stage,renewal_date,contract_value,contract_status,
+        id,name,short_name,industry,csm_name,csm_wecom_userid,source_object,after_sales_stage,renewal_date,contract_value,contract_status,
         products_json,last_contact_at,support_open_count,support_blocked_count,voice_risk,explicit_nonrenewal,
         next_action,next_action_due,crm_url,health,synced_at,source_json,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         name=excluded.name, short_name=excluded.short_name, industry=excluded.industry,
         csm_name=excluded.csm_name, csm_wecom_userid=COALESCE(excluded.csm_wecom_userid,customers.csm_wecom_userid),
+        source_object=excluded.source_object,
         after_sales_stage=excluded.after_sales_stage,
         renewal_date=excluded.renewal_date, contract_value=excluded.contract_value, contract_status=excluded.contract_status,
         products_json=excluded.products_json, last_contact_at=excluded.last_contact_at,
@@ -470,7 +476,7 @@ export class WorkbenchDatabase {
         crm_url=excluded.crm_url, synced_at=excluded.synced_at, source_json=excluded.source_json, updated_at=excluded.updated_at
     `).run(
       input.id, input.name, input.shortName ?? null, input.industry ?? null, input.csmName ?? null,
-      input.csmWecomUserid ?? null, normalizeAfterSalesStage(input.afterSalesStage), input.renewalDate ?? null, input.contractValue ?? null, input.contractStatus ?? null,
+      input.csmWecomUserid ?? null, input.sourceObject ?? 'object_Umwnn__c', normalizeAfterSalesStage(input.afterSalesStage), input.renewalDate ?? null, input.contractValue ?? null, input.contractStatus ?? null,
       json(input.products ?? []), input.lastContactAt ?? null, input.supportOpenCount ?? null, input.supportBlockedCount ?? null,
       input.voiceRisk == null ? null : Number(input.voiceRisk), input.explicitNonrenewal == null ? null : Number(input.explicitNonrenewal),
       input.nextAction ?? null, input.nextActionDue ?? null, input.crmUrl ?? null, previous?.health ?? 'unknown',
@@ -490,7 +496,8 @@ export class WorkbenchDatabase {
         (SELECT COUNT(*) FROM opportunities o WHERE o.customer_id=c.id AND o.status!='dismissed') AS opportunity_count,
         COALESCE((SELECT eligible FROM case_candidates cc WHERE cc.customer_id=c.id),0) AS case_candidate
       FROM customers c
-      WHERE TRIM(COALESCE(c.after_sales_stage, '')) <> '流失'
+      WHERE COALESCE(c.source_object, '') = 'object_Umwnn__c'
+        AND TRIM(COALESCE(c.after_sales_stage, '')) <> '流失'
         AND COALESCE(c.contract_status, '') <> '已流失'
         AND (?='' OR c.name LIKE ? OR COALESCE(c.short_name,'') LIKE ? OR COALESCE(c.csm_name,'') LIKE ?)
     `).all(query, `%${query}%`, `%${query}%`, `%${query}%`) as Row[];

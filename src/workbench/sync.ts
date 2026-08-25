@@ -6,25 +6,35 @@ import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SyncRun
 
 const CRM_FIELDS = {
   id: '_id',
-  name: 'name',
-  shortName: 'field_BP043__c',
-  industry: 'field_zck4A__c',
-  csm: 'field_Gsp41__c',
-  handedToCsm: 'field_A71s2__c',
-  renewalDate: 'field_4TdWq__c',
-  contractValue: 'field_lb2Q1__c',
-  products: 'UDMSel1__c',
-  lastContactAt: 'last_followed_time',
-  lastFollowup: 'field_kz1Pi__c',
-  lost: 'field_6WC6d__c',
+  name: 'field_83f4l__c',
+  nameReference: 'field_n1qN0__c__r',
+  nameReferenceId: 'field_n1qN0__c',
+  shortName: 'field_83f4l__c',
+  industry: 'field_OL1jQ__c',
+  csm: 'field_M1uu5__c',
+  renewalDate: 'field_lh3L2__c',
+  contractValue: 'field_d0EqS__c',
+  contractValueFallback: 'field_yxgZ1__c',
+  products: 'field_f6iQS__c',
+  lastContactAt: 'field_ekp9X__c',
+  lastFollowup: 'field_Ni7Ud__c',
   lifeStatus: 'life_status',
-  stage: 'field_Kt9bI__c',
-  specialRenewalTerms: 'field_2JN6r__c',
-  customerNeeds: 'field_2Kdas__c',
+  stage: 'field_c0avd__c__r',
+  stageValue: 'field_c0avd__c',
+  specialRenewalTerms: 'field_xRnas__c',
+  customerNeeds: 'field_Rk0oz__c',
   updatedAt: 'last_modified_time',
+  pageCursor: 'create_time',
 } as const;
 
-const CRM_SELECT_FIELDS = Object.values(CRM_FIELDS);
+const CRM_SELECT_FIELDS = [
+  CRM_FIELDS.id, CRM_FIELDS.name, CRM_FIELDS.nameReferenceId, CRM_FIELDS.shortName, CRM_FIELDS.industry, CRM_FIELDS.csm,
+  CRM_FIELDS.renewalDate, CRM_FIELDS.contractValue, CRM_FIELDS.contractValueFallback, CRM_FIELDS.products,
+  CRM_FIELDS.lastContactAt, CRM_FIELDS.lastFollowup, CRM_FIELDS.lifeStatus, CRM_FIELDS.stageValue,
+  CRM_FIELDS.specialRenewalTerms, CRM_FIELDS.customerNeeds, CRM_FIELDS.updatedAt, CRM_FIELDS.pageCursor,
+];
+const CRM_OBJECT = 'object_Umwnn__c';
+const CRM_LOST_STAGE_VALUE = '052JwwdZ4';
 
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 const ONES_WEB_BASE_URL = (process.env.ONES_WEB_BASE_URL ?? 'https://our.ones.pro').replace(/\/$/, '');
@@ -218,32 +228,27 @@ function relatedName(record: Record<string, unknown>, field: string): string | n
   return asText(record[field]);
 }
 
-function hasCsm(record: Record<string, unknown>): boolean {
-  const csm = asText(record[CRM_FIELDS.csm]);
-  const handed = asText(record[CRM_FIELDS.handedToCsm]);
-  return !!csm || /是|已交接|true|1/i.test(handed ?? '');
-}
-
 export function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatabase['upsertCustomer']>[0] | null {
   const id = asText(record[CRM_FIELDS.id]) ?? asText(record.id);
-  const name = asText(record[CRM_FIELDS.name]);
+  const name = asText(record[CRM_FIELDS.name]) ?? asText(record[CRM_FIELDS.nameReference]);
   if (!id || !name) return null;
-  const lost = asBoolean(record[CRM_FIELDS.lost]);
-  const lifeStatus = asText(record[CRM_FIELDS.lifeStatus]);
+  const lifeStatus = asText(record[`${CRM_FIELDS.lifeStatus}__r`]) ?? asText(record[CRM_FIELDS.lifeStatus]);
   const special = asText(record[CRM_FIELDS.specialRenewalTerms]);
+  const stage = asText(record[CRM_FIELDS.stage]) ?? asText(record[CRM_FIELDS.stageValue]);
   return {
     id,
     name,
+    sourceObject: CRM_OBJECT,
     shortName: asText(record[CRM_FIELDS.shortName]),
     industry: asText(record[CRM_FIELDS.industry]),
-    csmName: relatedName(record, CRM_FIELDS.csm),
+    csmName: asText(record[CRM_FIELDS.csm]),
     renewalDate: asDate(record[CRM_FIELDS.renewalDate]),
-    contractValue: asNumber(record[CRM_FIELDS.contractValue]),
-    afterSalesStage: normalizeAfterSalesStage(asText(record[CRM_FIELDS.stage])),
-    contractStatus: lost ? '已流失' : lifeStatus,
+    contractValue: asNumber(record[CRM_FIELDS.contractValue] ?? record[CRM_FIELDS.contractValueFallback]),
+    afterSalesStage: normalizeAfterSalesStage(stage),
+    contractStatus: lifeStatus,
     products: asList(record[CRM_FIELDS.products]),
     lastContactAt: asDate(record[CRM_FIELDS.lastContactAt]),
-    explicitNonrenewal: lost === true || /不续约|终止|取消/.test(special ?? ''),
+    explicitNonrenewal: stage === '流失' || /不续约|终止|取消/.test(special ?? ''),
     nextAction: asText(record[CRM_FIELDS.lastFollowup]),
     syncedAt: new Date().toISOString(),
     source: record,
@@ -502,18 +507,15 @@ export class PortfolioSyncService {
   }
 
   private async syncCrmCustomers(): Promise<number> {
-    const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+    const baseArgs = {
       apiName: 'QueryRecordsByFields',
-      object_api_name: 'AccountObj',
+      object_api_name: CRM_OBJECT,
       select_fields: CRM_SELECT_FIELDS,
       need_count: true,
-      search_template_query: { limit: 2000, filters: [], orders: [{ fieldName: CRM_FIELDS.updatedAt, isAsc: false }] },
-    });
-    if (result.isError) throw new Error(result.text);
-    const records = recordsIn(parseJson(result.text));
+    };
+    const records = await this.fetchAllCrmRecords(baseArgs, [{ field_name: CRM_FIELDS.stageValue, field_values: [CRM_LOST_STAGE_VALUE], operator: 'ne', connector: 'AND', value_type: 0 }]);
     let count = 0;
     for (const record of records) {
-      if (!hasCsm(record)) continue;
       const input = crmCustomer(record);
       if (!input) continue;
       const customer = this.db.upsertCustomer(input);
@@ -528,8 +530,43 @@ export class PortfolioSyncService {
     return count;
   }
 
+  private async fetchAllCrmRecords(baseArgs: Record<string, unknown>, baseFilters: Record<string, unknown>[] = []): Promise<Record<string, unknown>[]> {
+    const query = async (filters: Record<string, unknown>[]) => {
+      const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+        ...baseArgs,
+        search_template_query: { limit: 50, filters, orders: [{ fieldName: CRM_FIELDS.pageCursor, isAsc: false }] },
+      });
+      if (result.isError) throw new Error(result.text);
+      const parsed = parseJson(result.text);
+      if (parsed?.resultCode === 'FAIL' || parsed?.data?.error) throw new Error(parsed?.data?.error ?? result.text);
+      const resultSet = parsed?.data?.recordResult ?? {};
+      return { records: recordsIn(resultSet), total: Number(resultSet.totalNumber ?? 0) };
+    };
+    const first = await query(baseFilters);
+    if (first.total <= first.records.length) return first.records;
+    const collected = new Map<string, Record<string, unknown>>();
+    const collect = (items: Record<string, unknown>[]) => items.forEach((item) => { const id = asText(item[CRM_FIELDS.id]); if (id) collected.set(id, item); });
+    let page = first;
+    let cursor: string | null = null;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      collect(page.records);
+      const lastValue = page.records.at(-1)?.[CRM_FIELDS.pageCursor];
+      if (lastValue == null) break;
+      cursor = new Date(Number(lastValue)).toISOString();
+      // Include all records sharing the boundary timestamp before moving below it.
+      collect((await query([...baseFilters, { field_name: CRM_FIELDS.pageCursor, field_values: [String(lastValue)], operator: 'eq', connector: 'AND', value_type: 0 }])).records);
+      page = await query([...baseFilters, { field_name: CRM_FIELDS.pageCursor, field_values: [cursor], operator: 'lt', connector: 'AND', value_type: 0 }]);
+      if (!page.records.length) break;
+    }
+    if (collected.size !== first.total) throw new Error(`CRM 售后客户同步不完整：期望 ${first.total} 条，实际 ${collected.size} 条`);
+    return [...collected.values()];
+  }
+
   private async syncSingleCrmCustomer(customer: Customer): Promise<number> {
-    const result = await this.mcp.call('mcp__crm__sales_account_query-account-by-name', { apiName: 'QueryAccountByName', name: customer.name });
+    const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+      apiName: 'QueryRecordsByFields', object_api_name: CRM_OBJECT, select_fields: CRM_SELECT_FIELDS, need_count: false,
+      search_template_query: { limit: 50, filters: [{ field_name: CRM_FIELDS.id, field_values: [customer.id], operator: 'eq', connector: 'AND', value_type: 0 }], orders: [] },
+    });
     if (result.isError) throw new Error(result.text);
     const records = recordsIn(parseJson(result.text));
     const record = records.find((item) => asText(item[CRM_FIELDS.id]) === customer.id)

@@ -48,9 +48,10 @@ test('workbench: customer portfolio supports renewal date and amount sorting wit
 }));
 
 test('workbench: CRM stage is persisted separately from contract lifecycle status', () => {
-  const input = crmCustomer({ _id: 'crm-stage', name: '阶段客户', field_Kt9bI__c: '续约中', life_status: '正常' });
+  const input = crmCustomer({ _id: 'crm-stage', field_83f4l__c: '阶段客户', field_c0avd__c__r: '续约中', life_status__r: '正常' });
   assert.equal(input?.afterSalesStage, '续约中');
   assert.equal(input?.contractStatus, '正常');
+  assert.equal(input?.sourceObject, 'object_Umwnn__c');
 });
 
 test('workbench: source events are idempotent by source identity', () => withDb((db) => {

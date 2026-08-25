@@ -13,6 +13,7 @@ export interface CustomerInput {
   industry?: string | null;
   csmName?: string | null;
   csmWecomUserid?: string | null;
+  sourceObject?: string | null;
   afterSalesStage?: string | null;
   renewalDate?: string | null;
   contractValue?: number | null;
