@@ -628,6 +628,23 @@ export class WorkbenchDatabase {
       attributedAt: String(row.attributed_at) } : undefined;
   }
 
+  listConfirmedHemorySegments(customerId: string): SourceEvent[] {
+    // hemory_fragment_generations 只由分段服务维护；测试与历史数据可能缺失登记，
+    // 因此对没有登记行的片段回退为直接按 source_events 过滤。
+    const registered = this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id
+      WHERE e.customer_id=? AND e.source_system='hemory' AND e.source_type='ai_topic_segment' AND e.attribution_status='confirmed' AND g.active=1`).all(customerId) as Row[];
+    const rows = registered.length
+      ? registered
+      : this.db.prepare(`SELECT * FROM source_events WHERE customer_id=? AND source_system='hemory' AND source_type='ai_topic_segment'
+          AND attribution_status='confirmed' AND id NOT IN (SELECT event_id FROM hemory_fragment_generations WHERE active=0)`).all(customerId) as Row[];
+    return rows.map(sourceEventFromRow).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  }
+
+  findDraftBatchByFingerprint(fingerprint: string): DraftBatch | undefined {
+    const row = this.db.prepare('SELECT * FROM draft_batches WHERE fingerprint=?').get(fingerprint) as Row | undefined;
+    return row ? { ...draftBatchFromRow(row), items: this.listDraftItems(String(row.id)) } : undefined;
+  }
+
   attributeHemoryFragments(eventIds: string[], customerId: string | null, expectedHashes: Record<string, string>, actor = 'csm'): SourceEvent[] {
     if (customerId && !this.getCustomer(customerId)) throw new Error('customer not found');
     const now = nowIso();
@@ -949,6 +966,11 @@ export class WorkbenchDatabase {
 
   getDraftJob(id: string): DraftGenerationJob | undefined {
     const row = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE id=?').get(id) as Row | undefined;
+    return row ? this.draftJobFromRow(row) : undefined;
+  }
+
+  findDraftJobByFingerprint(fingerprint: string): DraftGenerationJob | undefined {
+    const row = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     return row ? this.draftJobFromRow(row) : undefined;
   }
 

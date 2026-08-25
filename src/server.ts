@@ -402,6 +402,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           try { return json(res, 200, await workbench.drafts.preview(batchId, Array.isArray(body.itemIds) ? body.itemIds.map(String) : [])); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
+        if (req.method === 'POST' && sub === '/regenerate') {
+          try { return json(res, 200, workbench.drafts.regenerate(batchId)); }
+          catch (error) { return json(res, 400, { error: (error as Error).message }); }
+        }
         if (req.method === 'POST' && sub === '/confirm') {
           const body = await readBody(req);
           try { return json(res, 200, await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : [])); }

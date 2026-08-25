@@ -742,7 +742,7 @@
   }
 
   function draftTypeLabel(type) {
-    return { internal_todo: 'Agent 待办', workhour: '工时', followup: '沟通记录', suggestion: '需求', ticket: '工单' }[type] || type;
+    return { internal_todo: 'Agent 待办', workhour: '工时', followup: '沟通记录', suggestion: '需求', ticket: '工单', operations: '运维工单' }[type] || type;
   }
 
   function editableDraft(item) {
@@ -796,7 +796,17 @@
       const title = el('div'); title.append(el('strong', null, customer?.name || batch.customerId), el('div', 'cell-sub', `${formatDateTime(batch.updatedAt)} · ${batch.generator} · ${batch.status}`));
       const confirmButton = el('button', 'primary-command small', '确认所选草稿');
       confirmButton.onclick = () => confirmDraftBatch(batch, section);
-      head.append(title, confirmButton); section.append(head);
+      head.append(title, confirmButton);
+      if (['stale', 'partial', 'failed'].includes(batch.status)) {
+        const regenerate = el('button', 'quiet-command small', '重新生成');
+        regenerate.onclick = async () => {
+          if (!confirm('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
+          try { await api(`/api/draft-batches/${batch.id}/regenerate`, { method: 'POST' }); await loadDraftBatches(); }
+          catch (error) { alert(error.message); }
+        };
+        head.append(regenerate);
+      }
+      section.append(head);
       for (const item of batch.items || []) {
         const row = el('article', 'draft-item');
         const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id;

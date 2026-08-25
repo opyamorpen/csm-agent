@@ -34,6 +34,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
+  assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
 });
 
 test('CLI provides standard global help and version commands', () => {
@@ -46,6 +47,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent hemory assign/);
   assert.match(help.stdout, /csm-agent draft review/);
+  assert.match(help.stdout, /csm-agent draft regenerate/);
   assert.match(help.stdout, /csm-agent service install/);
 
   const version = runCli('--version');

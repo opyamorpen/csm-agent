@@ -25,3 +25,13 @@ test('renewal risk dimensions use Chinese business labels', () => {
   assert.ok(renderer, 'renderRisk source was not found');
   assert.match(renderer, /RISK_DIMENSION_LABEL\[key\] \|\| key/);
 });
+
+test('draft inbox exposes regenerate control and operations label', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  assert.match(renderer, /\['stale', 'partial', 'failed'\]\.includes\(batch\.status\)/);
+  assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/regenerate/);
+  assert.match(source, /operations: '运维工单'/);
+});

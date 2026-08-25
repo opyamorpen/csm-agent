@@ -271,3 +271,89 @@ test('workbench: relevant Hemory evidence creates drafts and approved local todo
     assert.equal(db.listActions('crm-d').length, 1);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+function fakeModelRuntime(drafts: unknown[]): any {
+  return {
+    llm: { provider: 'fake', model: 'fake-model' },
+    models: { complete: async () => ({ content: [{ type: 'text', text: JSON.stringify({ drafts }) }], stopReason: 'stop' }) },
+  };
+}
+
+function segment(db: WorkbenchDatabase, customerId: string, externalId: string, recordingId: string, title: string, occurredAt: string, transcript: string) {
+  return db.upsertSourceEvent({ customerId, sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId,
+    title, occurredAt, attributionStatus: 'confirmed', payload: { recordingId, speakers: ['CSM'], transcript } });
+}
+
+async function waitForJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
+  for (let i = 0; i < 200 && db.getDraftJob(jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
+}
+
+test('workbench: same-recording fragments merge into one batch and multiple drafts of one type survive', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-m', name: '客户马' });
+    const f1 = segment(db, 'crm-m', 'r9:a', 'r9', '话题A', '2026-08-25T01:00:00Z', '先聊聊上线部署的安排');
+    const first = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued1 = first.enqueue('crm-m', [f1.id]);
+    await waitForJob(db, queued1!.jobId);
+    // 分次归属：同录音第二个片段现在才绑定，应并入同一批次而不是新建一个。
+    const f2 = segment(db, 'crm-m', 'r9:b', 'r9', '话题B', '2026-08-25T02:00:00Z', '又出现了一个报错工单');
+    const queued2 = first.enqueue('crm-m', [f2.id]);
+    await waitForJob(db, queued2!.jobId);
+    const batches = db.listDraftBatches('crm-m');
+    assert.equal(batches.filter((batch) => batch.status !== 'stale').length, 1);
+    const merged = batches.find((batch) => batch.status !== 'stale')!;
+    assert.deepEqual(merged.sourceEventIds.sort(), [f1.id, f2.id].sort());
+    // LLM 返回同类型多条草稿时不能被折叠：两条 ticket 都要保留。
+    const third = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
+      { type: 'ticket', title: '工单一', summary: '第一个故障', evidence_refs: [f1.id] },
+      { type: 'ticket', title: '工单二', summary: '第二个故障', evidence_refs: [f2.id] },
+    ]));
+    const regenerated = third.regenerate(merged.id);
+    await waitForJob(db, regenerated.jobId);
+    const active = db.listDraftBatches('crm-m').filter((batch) => batch.status !== 'stale');
+    assert.equal(active.length, 1);
+    assert.equal(active[0].items?.filter((item) => item.type === 'ticket').length, 2);
+    // 每条草稿只引用自己的证据片段。
+    const tickets = active[0].items!.filter((item) => item.type === 'ticket');
+    assert.deepEqual(tickets[0].fields.evidence_refs, [tickets[0].title === '工单一' ? f1.id : f2.id]);
+    assert.deepEqual(tickets[1].fields.evidence_refs, [tickets[1].title === '工单一' ? f1.id : f2.id]);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: stale batch heals on re-enqueue and regenerate works from CLI route semantics', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-s', name: '客户斯' });
+    const f1 = segment(db, 'crm-s', 'r5:a', 'r5', '话题A', '2026-08-25T01:00:00Z', '客服反馈一个需求，希望支持批量导出');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued1 = service.enqueue('crm-s', [f1.id]);
+    await waitForJob(db, queued1!.jobId);
+    const original = db.listDraftBatches('crm-s')[0];
+    assert.equal(original.items?.length, 2);
+    // 重新归属（内容变化）后旧批次作废。
+    const changed = db.upsertSourceEvent({ customerId: 'crm-s', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r5:a',
+      title: '话题A', occurredAt: '2026-08-25T01:00:00Z', attributionStatus: 'confirmed',
+      payload: { recordingId: 'r5', speakers: ['CSM'], transcript: '客服反馈一个需求，希望支持批量导出，另外下个月要部署升级环境' } });
+    const queued2 = service.enqueue('crm-s', [changed.id]);
+    await waitForJob(db, queued2!.jobId);
+    const stale = db.getDraftBatch(original.id)!;
+    assert.equal(stale.status, 'stale');
+    const healed = db.listDraftBatches('crm-s').find((batch) => batch.status !== 'stale');
+    assert.ok(healed, '重新归属后应生成新批次');
+    // 运维关键词在新内容里应被识别。
+    assert.ok(healed!.items?.some((item) => item.type === 'operations'), '应生成运维工单草稿');
+    // regenerate 强制重新生成。
+    const forced = service.regenerate(healed!.id);
+    await waitForJob(db, forced.jobId);
+    assert.ok(db.listDraftBatches('crm-s').filter((batch) => batch.status !== 'stale').length >= 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+function fakeMcpForDrafts(): any {
+  return { listTools: () => [], isWrite: () => false, resolve: () => undefined,
+    call: async () => ({ text: '', isError: false }) } as any;
+}

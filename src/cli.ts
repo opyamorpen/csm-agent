@@ -55,7 +55,7 @@ const CLI_CAPABILITIES = [
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/fragments', '/api/hemory/fragments/attribution'] },
-  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-items/:id/retry'] },
+  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
   { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm'] },
@@ -121,6 +121,7 @@ function help(): void {
   csm-agent drafts [客户ID或名称] [--json]
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
+  csm-agent draft regenerate <批次ID>
   csm-agent service install [端口]
   csm-agent service status|restart|uninstall|logs
   csm-agent wecom
@@ -438,7 +439,12 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!id) throw new Error('draft retry 缺少草稿 ID');
     return print(await request(`/api/draft-items/${encodeURIComponent(id)}/retry`, { method: 'POST' }));
   }
-  throw new Error('draft 子命令只允许 review/retry');
+  if (subcommand === 'regenerate') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error('draft regenerate 缺少批次 ID');
+    return print(await request(`/api/draft-batches/${encodeURIComponent(id)}/regenerate`, { method: 'POST' }));
+  }
+  throw new Error('draft 子命令只允许 review/retry/regenerate');
 }
 
 function serviceCommand(subcommand: string, values: string[]): void {

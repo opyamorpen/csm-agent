@@ -67,6 +67,7 @@ csm-agent hemory clear <片段ID...>
 csm-agent drafts [客户ID或名称]
 csm-agent draft review <批次ID>
 csm-agent draft retry <草稿ID>
+csm-agent draft regenerate <批次ID>
 csm-agent service install 3210
 csm-agent service status
 csm-agent service logs
@@ -131,7 +132,7 @@ ONES_TEAM_ID=RDjYMhKq
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
 - `POST /api/hemory/sync`、`GET /api/hemory/fragments`、`PUT /api/hemory/fragments/attribution`
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
-- `POST /api/draft-batches/:id/confirm`、`POST /api/draft-items/:id/retry`
+- `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
 - `POST /api/action-items/:id/wecom-todo-intents`、`POST /api/wecom/todo-created`
 - `POST /api/case-drafts`、`PATCH /api/case-drafts/:id`、`POST /api/case-drafts/:id/publish`
