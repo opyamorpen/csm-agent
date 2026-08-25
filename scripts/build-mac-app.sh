@@ -47,7 +47,12 @@ with open(dst, 'w', encoding='utf-8') as f:
 PY
 
 echo "==> 编译 Swift 壳"
-swiftc -O "$BUILD_DIR/main.swift" -o "$APP_DIR/Contents/MacOS/$EXEC_NAME"
+mkdir -p "$BUILD_DIR/swift-module-cache"
+swiftc -O \
+  -module-cache-path "$BUILD_DIR/swift-module-cache" \
+  -sdk-module-cache-path "$BUILD_DIR/swift-module-cache" \
+  "$BUILD_DIR/main.swift" \
+  -o "$APP_DIR/Contents/MacOS/$EXEC_NAME"
 
 echo "==> 临时签名（个人使用；正式分发需 Developer ID 签名 + 公证）"
 codesign --force --deep -s - "$APP_DIR" 2>/dev/null || echo "（跳过签名）"
