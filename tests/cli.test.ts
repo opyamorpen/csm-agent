@@ -65,6 +65,25 @@ test('draft regenerate waits for the new batch and points to the review step', (
   assert.match(handler, /已作废/);
 });
 
+test('draft review prints structured display fields with raw JSON behind --json', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const printer = source.match(/function printDraftItems[\s\S]*?\n}\n\nfunction draftTypeLabel/)?.[0];
+  const handler = source.match(/async function reviewDraftBatch[\s\S]*?\n}\n\nasync function waitForRegeneratedBatch/)?.[0];
+  const listing = source.match(/async function showDrafts[\s\S]*?\n}\n\nasync function editBatchItems/)?.[0];
+
+  // CLI 与 Web 共用服务端 displayFields：逐行结构化输出，原始 JSON 仅在 --json 时输出。
+  assert.ok(printer, 'printDraftItems source was not found');
+  assert.match(printer, /item\.displayFields\?\.length/);
+  assert.match(printer, /\$\{field\.label\}: \$\{field\.value\}/);
+  assert.match(printer, /校验错误: \$\{item\.validationErrors\.join\('；'\)\}/);
+  assert.ok(handler, 'reviewDraftBatch source was not found');
+  assert.match(handler, /if \(jsonOutput\) print\(batch\)/);
+  assert.match(handler, /printDraftItems\(batch\.items \?\? \[\]\)/);
+  assert.match(handler, /printDraftItems\(\(confirmed as any\)\.items \?\? \[\]\)/);
+  assert.ok(listing, 'showDrafts source was not found');
+  assert.match(listing, /target: item\.targetObject \|\| ''/);
+});
+
 test('customer portfolio display contract exposes the supported sort controls', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');

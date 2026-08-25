@@ -556,6 +556,13 @@ export class WorkbenchDatabase {
     return this.db.prepare('SELECT * FROM external_identities WHERE customer_id=? ORDER BY system').all(customerId) as Row[];
   }
 
+  /** 候选事件的 payload 里带 crmCustomerId，但事件本身无客户归属，按前缀匹配取回。 */
+  listSourceEvents(sourceSystem: string, sourceType: string, customerId: string): Row[] {
+    return this.db.prepare(
+      'SELECT * FROM source_events WHERE source_system=? AND source_type=? AND external_id LIKE ? ORDER BY occurred_at DESC',
+    ).all(sourceSystem, sourceType, `${customerId}:%`) as Row[];
+  }
+
   upsertSourceEvent(input: SourceEventInput): SourceEvent {
     const payload = input.payload ?? {};
     const payloadHash = createHash('sha256').update(json(payload)).digest('hex');

@@ -182,6 +182,12 @@ export interface DraftBatch {
   updatedAt: string;
 }
 
+export interface DraftDisplayField {
+  key: string;
+  label: string;
+  value: string;
+}
+
 export interface DraftItem {
   id: string;
   batchId: string;
@@ -202,6 +208,7 @@ export interface DraftItem {
   approvalHash?: string | null;
   result?: Record<string, unknown> | null;
   error?: string | null;
+  displayFields?: DraftDisplayField[];
   createdAt: string;
   updatedAt: string;
 }

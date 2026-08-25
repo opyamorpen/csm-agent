@@ -10,10 +10,12 @@ import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { WorkbenchDatabase } from './workbench/database.js';
+import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { CaseService } from './workbench/cases.js';
 import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
-import { HemoryDraftService } from './workbench/drafts.js';
+import { HemoryDraftService, draftDisplayFields } from './workbench/drafts.js';
+import type { DraftBatch, DraftItem } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -147,6 +149,16 @@ interface WorkbenchServices {
 
 function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices): http.RequestListener {
   const sessions = new Map<string, Session>();
+
+  // 草稿确认视图共用最小必填项结构（displayFields），Web 卡片与 CLI 渲染同一份数据。
+  function decorateDraftBatch(batch: DraftBatch): DraftBatch {
+    if (!batch.items) return batch;
+    return { ...batch, items: batch.items.map((item) => decorateDraftItem(item)) };
+  }
+  function decorateDraftItem(item: DraftItem): DraftItem {
+    const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
+    return customer ? { ...item, displayFields: draftDisplayFields(workbench.db, item, customer) } : item;
+  }
 
   function makeAgent(session: Session): AgentSession {
     return new AgentSession({
@@ -387,7 +399,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
 
       if (req.method === 'GET' && path === '/api/draft-batches') {
-        return json(res, 200, { batches: workbench.db.listDraftBatches(url.searchParams.get('customer_id') ?? undefined) });
+        const batches = workbench.db.listDraftBatches(url.searchParams.get('customer_id') ?? undefined);
+        return json(res, 200, { batches: batches.map(decorateDraftBatch) });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);
       if (draftBatchMatch) {
@@ -395,7 +408,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const sub = draftBatchMatch[2] ?? '';
         if (req.method === 'GET' && sub === '') {
           const batch = workbench.db.getDraftBatch(batchId);
-          return batch ? json(res, 200, batch) : json(res, 404, { error: 'draft batch not found' });
+          return batch ? json(res, 200, decorateDraftBatch(batch)) : json(res, 404, { error: 'draft batch not found' });
         }
         if (req.method === 'POST' && sub === '/preview') {
           const body = await readBody(req);
@@ -408,8 +421,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
         if (req.method === 'POST' && sub === '/confirm') {
           const body = await readBody(req);
-          try { return json(res, 200, await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : [])); }
-          catch (error) { return json(res, 400, { error: (error as Error).message }); }
+          try {
+            const { items } = await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : []);
+            return json(res, 200, { items: items.map(decorateDraftItem) });
+          } catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
       }
       const draftItemMatch = path.match(/^\/api\/draft-items\/([0-9a-f-]+)(\/.*)?$/);
@@ -425,10 +440,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             unknowns: Array.isArray(body.unknowns) ? body.unknowns.map(String) : undefined,
             validationErrors: Array.isArray(body.validationErrors) ? body.validationErrors.map(String) : undefined,
           });
-          return item ? json(res, 200, item) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
+          return item ? json(res, 200, decorateDraftItem(item)) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
         }
         if (req.method === 'POST' && sub === '/retry') {
-          try { return json(res, 200, await workbench.drafts.retry(itemId)); }
+          try { return json(res, 200, decorateDraftItem(await workbench.drafts.retry(itemId))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
       }

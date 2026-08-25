@@ -46,8 +46,9 @@ Node.js must be `>=22.5`. The web service defaults to `http://127.0.0.1:3210`; C
 
 ## Customer And Write Boundaries
 
-- CRM customer name resolves ONES field `JrvswW8P` by exact, unique option match. Ambiguous or missing matches remain unattributed.
-- ONES suggestions, tickets, operations tickets, and private-cloud instances must include the current customer option ID in `fieldValues`.
+- CRM customer name resolves ONES field `JrvswW8P` by exact, unique option match: customer display name first, then the CRM related legal-entity name (`field_n1qN0__c__r`). Ambiguous or missing matches remain unattributed.
+- ONES suggestions, tickets, operations tickets, and private-cloud instances must include the current customer option ID in `fieldValues`. Draft generation and validation reuse the same resolution, including the unique same-name after-sales customer fallback for legacy AccountObj rows.
+- ONES work-item drafts carry only the minimal required arguments (project, issue type, title, customer field, Hemory summary as description); preview preflight checks remaining required fields via `get_issue_fields` and reports them as validation errors.
 - Work hours only target the bound `客户工时管理 / 售后客户` issue. CRM follow-ups must carry the current CRM customer `_id`.
 - AI produces drafts. CSM may edit and confirm; the edited tool and full argument hash become the only allowed write.
 - Missing data stays `unknown`; do not infer positive or negative signals from absence.

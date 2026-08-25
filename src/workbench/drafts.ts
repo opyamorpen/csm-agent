@@ -20,6 +20,19 @@ function onesDeskTypeId(type: DraftItemType): OnesDeskDraftType | null {
   return type === 'suggestion' || type === 'ticket' || type === 'operations' ? type : null;
 }
 
+// 生成与校验共用的客户 option 解析：本客户 confirmed 身份优先；
+// 历史草稿可能绑在 AccountObj 旧行上，按名称唯一复用同名售后客户的身份（与 followup 的 afterSales 回退同构）。
+function resolveOnesOption(db: WorkbenchDatabase, customer: Customer): { id: string; label: string } | undefined {
+  const find = (id: string) => {
+    const identity = db.listIdentities(id).find((item) => item.system === 'ones_customer_option' && item.status === 'confirmed');
+    return identity?.external_id ? { id: String(identity.external_id), label: String(identity.label ?? '') } : undefined;
+  };
+  const own = find(customer.id);
+  if (own) return own;
+  const sameName = db.listCustomers().filter((item) => item.id !== customer.id && item.name === customer.name);
+  return sameName.length === 1 ? find(sameName[0].id) : undefined;
+}
+
 interface DraftProposal {
   type: DraftItemType;
   title: string;
@@ -29,9 +42,115 @@ interface DraftProposal {
   unknowns?: string[];
 }
 
+export interface OnesIssueField {
+  uuid: string;
+  name: string;
+  required: boolean;
+  builtIn: boolean;
+  canBeCreated: boolean;
+  fieldTypeUuid: string;
+  options: Array<{ uuid: string; value: string }>;
+}
+
+// get_issue_fields 返回 {result:'SUCCESS', data:{list:[{uuid,name,required,built_in,can_be_created,field_type_uuid,options:[{uuid,value}]}]}}。
+// 解析失败返回 null，调用方保持原有“只看 isError”的行为，不因形状变化阻断预检。
+export function parseOnesIssueFields(text: string): OnesIssueField[] | null {
+  const value = cleanJson(text) as { result?: unknown; data?: { list?: unknown } } | null;
+  const list = Array.isArray(value?.data?.list) ? value.data.list : null;
+  if (!list) return null;
+  const fields: OnesIssueField[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const item = raw as Record<string, unknown>;
+    const uuid = typeof item.uuid === 'string' ? item.uuid : null;
+    const name = typeof item.name === 'string' ? item.name : null;
+    if (!uuid || !name) return null;
+    const options = Array.isArray(item.options)
+      ? item.options.flatMap((option) => {
+        const entry = option && typeof option === 'object' && !Array.isArray(option) ? option as Record<string, unknown> : null;
+        const optionUuid = typeof entry?.uuid === 'string' ? entry.uuid : null;
+        const optionValue = typeof entry?.value === 'string' ? entry.value : null;
+        return optionUuid && optionValue ? [{ uuid: optionUuid, value: optionValue }] : [];
+      })
+      : [];
+    fields.push({ uuid, name, required: item.required === true, builtIn: item.built_in === true,
+      canBeCreated: item.can_be_created !== false, fieldTypeUuid: typeof item.field_type_uuid === 'string' ? item.field_type_uuid : '', options });
+  }
+  return fields;
+}
+
+// 平台自动填充的字段（创建者/状态等）不必出现在写参数里。
+const ONES_AUTOFILLED_FIELD_TYPES = new Set(['creator', 'status', 'assign']);
+// 标题/所属项目/工作项类型由 create_new_issue 的顶层参数（summary/projectID/issueTypeID）满足，
+// 描述类必填字段由顶层 description（Hemory 摘要）满足，都不必出现在 fieldValues 中。
+const ONES_TOP_LEVEL_FIELD_UUIDS = new Set(['field001', 'field006', 'field007']);
+// 建议和反馈等类型上标了 required 但 can_be_created=false 的展示字段（如反馈类型），实际由 ONES 内部规则处理，跳过。
+export function missingOnesRequiredFields(fields: OnesIssueField[], fieldValues: Array<Record<string, unknown>>, described = true): OnesIssueField[] {
+  const provided = new Set(fieldValues.filter((value) => value.value != null && value.value !== '').map((value) => String(value.fieldID)));
+  return fields.filter((field) => field.required && field.canBeCreated
+    && !ONES_AUTOFILLED_FIELD_TYPES.has(field.fieldTypeUuid)
+    && !ONES_TOP_LEVEL_FIELD_UUIDS.has(field.uuid)
+    && !(described && /描述|desc/i.test(field.name))
+    && !provided.has(field.uuid));
+}
+
 export interface DraftPreview {
   batchId: string;
   items: Array<{ id: string; version: number; approvalHash: string; validationErrors: string[] }>;
+}
+
+export interface DraftDisplayField {
+  key: string;
+  label: string;
+  value: string;
+}
+
+const ONES_DESK_PROJECT_LABEL = 'ONES Desk';
+const ONES_DESK_TYPE_LABELS: Record<OnesDeskDraftType, string> = { suggestion: '建议和反馈', ticket: '工单', operations: '运维工单' };
+
+/**
+ * 草稿确认时的最小必填项展示：每种类型一组键值行，Web 卡片与 CLI 共用同一份结构。
+ * ONES 工作项按“所属项目 / 工作项类型 / 标题 / 客户信息 / 描述”展示，Hemory 摘要写入描述。
+ */
+export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, customer: Customer): DraftDisplayField[] {
+  const unknown = (value: unknown) => value == null || value === '' || value === 'unknown' ? '待补充' : String(value);
+  if (onesDeskTypeId(item.type)) {
+    const deskType = onesDeskTypeId(item.type)!;
+    const option = resolveOnesOption(db, customer);
+    return [
+      { key: 'project', label: '所属项目', value: `${ONES_DESK_PROJECT_LABEL}（${String(item.targetArguments.projectID ?? '')}）` },
+      { key: 'issueType', label: '工作项类型', value: `${ONES_DESK_TYPE_LABELS[deskType]}（${String(item.targetArguments.issueTypeID ?? '')}）` },
+      { key: 'title', label: '标题', value: item.title },
+      { key: 'customer', label: '客户信息', value: option ? `${customer.name} → ${option.label || option.id}` : `${customer.name}（ONES 客户信息未解析）` },
+      { key: 'description', label: '描述', value: String(item.targetArguments.description ?? item.summary) },
+    ];
+  }
+  if (item.type === 'workhour') {
+    return [
+      { key: 'target', label: '目标工作项', value: item.targetArguments.issueID ? `客户工时管理 / 售后客户（${String(item.targetArguments.issueID)}）` : '客户工时管理 / 售后客户（未绑定）' },
+      { key: 'hours', label: '工时时长', value: unknown(item.targetArguments.hours) },
+      { key: 'date', label: '日期', value: String(item.targetArguments.date ?? '') },
+      { key: 'description', label: '描述', value: String(item.targetArguments.description ?? item.summary) },
+    ];
+  }
+  if (item.type === 'followup') {
+    const objectData = item.targetArguments.object_data as Record<string, unknown> | undefined;
+    const related = Array.isArray(objectData?.related_object_data) ? objectData.related_object_data as Array<Record<string, unknown>> : [];
+    const bound = related.find((entry) => entry?.describe_api_name === CRM_AFTER_SALES_OBJECT);
+    return [
+      { key: 'target', label: '目标对象', value: 'CRM / 销售记录（跟进）' },
+      { key: 'customer', label: '关联客户', value: bound ? `${String(bound.name ?? '')}（${String(bound.id ?? '')}）` : '未绑定 CRM 售后客户' },
+      { key: 'title', label: '标题', value: item.title },
+      { key: 'content', label: '跟进内容', value: String(objectData?.active_record_content ?? item.summary) },
+    ];
+  }
+  return [
+    { key: 'target', label: '目标', value: item.targetObject },
+    { key: 'title', label: '标题', value: item.title },
+    { key: 'owner', label: '负责人', value: unknown(item.targetArguments.owner) },
+    { key: 'dueAt', label: '截止时间', value: unknown(item.targetArguments.dueAt) },
+    { key: 'whyNow', label: '待办背景', value: String(item.targetArguments.whyNow ?? item.summary) },
+  ];
 }
 
 function hash(value: string): string {
@@ -303,13 +422,18 @@ export class HemoryDraftService {
     }
     const deskType = onesDeskTypeId(type);
     if (!deskType) throw new Error(`未知的草稿目标类型: ${type}`);
-    const option = this.db.listIdentities(customer.id).find((item) => item.system === 'ones_customer_option' && item.status === 'confirmed');
+    const option = resolveOnesOption(this.db, customer);
     const tool = this.findWriteTool('ones', /(create.*issue|issue.*create|新建.*工作项)/i);
-    if (!option?.external_id) validationErrors.push('客户缺少已确认的 ONES 客户信息 option ID');
+    if (!option) {
+      const hint = this.db.listSourceEvents('ones', 'customer_option_candidate', customer.id).length
+        ? 'ONES 已有待确认的客户选项，请刷新客户同步以按关联主体名重新解析'
+        : '未在 ONES 客户信息选项中找到与客户名或关联主体名精确唯一的匹配，请刷新客户同步';
+      validationErrors.push(`客户缺少已确认的 ONES 客户信息 option ID（${hint}）`);
+    }
     if (!tool) validationErrors.push('未找到 ONES 新建工作项写工具');
     return { system: 'ones' as const, object: ONES_DESK_TARGET_OBJECTS[deskType], tool,
       arguments: { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[deskType], summary: proposal.title, description: proposal.summary,
-        fieldValues: [{ fieldID: ONES_CUSTOMER_FIELD_ID, value: option?.external_id ?? '' }] }, validationErrors };
+        fieldValues: option ? [{ fieldID: ONES_CUSTOMER_FIELD_ID, value: option.id }] : [] }, validationErrors };
   }
 
   private validate(item: DraftItem): string[] {
@@ -341,9 +465,9 @@ export class HemoryDraftService {
       if (item.targetArguments.hours === 'unknown' || item.targetArguments.hours == null) errors.push('请补充工时时长');
     }
     if (item.type === 'suggestion' || item.type === 'ticket' || item.type === 'operations') {
-      const option = this.db.listIdentities(customer.id).find((identity) => identity.system === 'ones_customer_option' && identity.status === 'confirmed');
+      const option = resolveOnesOption(this.db, customer);
       const values = Array.isArray(item.targetArguments.fieldValues) ? item.targetArguments.fieldValues as Array<Record<string, unknown>> : [];
-      if (!option || !values.some((value) => value.fieldID === ONES_CUSTOMER_FIELD_ID && value.value === option.external_id)) errors.push(`ONES 工作项必须包含当前客户字段 ${ONES_CUSTOMER_FIELD_ID}`);
+      if (!option || !values.some((value) => value.fieldID === ONES_CUSTOMER_FIELD_ID && value.value === option.id)) errors.push(`ONES 工作项必须包含当前客户字段 ${ONES_CUSTOMER_FIELD_ID}`);
     }
     return errors;
   }
@@ -355,6 +479,15 @@ export class HemoryDraftService {
       else {
         const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: onesDeskTypeId(item.type)! });
         if (response.isError) errors.push(`ONES 字段预检失败: ${response.text.slice(0, 300)}`);
+        else {
+          // 最小必填项校验：标题/项目/类型/描述由 create_new_issue 顶层参数满足，其余必填项必须出现在 fieldValues。
+          const fields = parseOnesIssueFields(response.text);
+          if (fields) {
+            const values = Array.isArray(item.targetArguments.fieldValues) ? item.targetArguments.fieldValues as Array<Record<string, unknown>> : [];
+            const missing = missingOnesRequiredFields(fields, values, String(item.targetArguments.description ?? '') !== '');
+            if (missing.length) errors.push(`ONES 必填字段未填写: ${missing.map((field) => `${field.name}(${field.uuid})`).join('、')}`);
+          }
+        }
       }
     }
     if (item.type === 'workhour') {

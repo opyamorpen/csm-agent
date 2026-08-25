@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { classifyDraftTypes, HemoryDraftService } from '../src/workbench/drafts.js';
+import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { classifyDraftTypes, draftDisplayFields, HemoryDraftService, missingOnesRequiredFields, parseOnesIssueFields } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 function withDb(fn: (db: WorkbenchDatabase) => void): void {
@@ -473,5 +473,209 @@ test('workbench: followup drafts bind the after-sales object for legacy AccountO
     const followup2 = batch2.items!.find((item) => item.type === 'followup')!;
     assert.ok(followup2.validationErrors.some((message) => message.includes('object_Umwnn__c')));
     assert.equal(followup2.status, 'draft');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// 模拟 ONES MCP 的最小工具面：get_issue_fields 只读字段契约，create_new_issue 才是写。
+function fakeOnesMcp(options: { fieldValues?: Array<Record<string, unknown>>; requiredExtra?: Array<{ uuid: string; name: string }> } = {}): any {
+  const tools = [
+    { publicName: 'mcp__ones__create_new_issue', server: 'ones', rawName: 'create_new_issue', description: 'Create a new issue' },
+    { publicName: 'mcp__ones__get_issue_fields', server: 'ones', rawName: 'get_issue_fields', description: 'Get issue fields of an issue type' },
+  ];
+  const calls: Array<{ publicName: string; args: unknown }> = [];
+  const requiredExtras = options.requiredExtra ?? [];
+  const mcp = {
+    listTools: () => tools,
+    isWrite: (_server: string, rawName: string) => /create_new_issue/.test(rawName),
+    resolve: (publicName: string) => tools.find((tool) => tool.publicName === publicName),
+    call: async (publicName: string, args: any) => {
+      calls.push({ publicName, args });
+      if (publicName === 'mcp__ones__get_issue_fields') {
+        const list = [
+          { uuid: 'field001', name: '标题', required: true, built_in: true, can_be_created: true, field_type_uuid: 'name' },
+          { uuid: 'field003', name: '创建者', required: true, built_in: true, can_be_created: true, field_type_uuid: 'creator' },
+          { uuid: 'field004', name: '负责人', required: true, built_in: true, can_be_created: true, field_type_uuid: 'assign' },
+          { uuid: 'field005', name: '状态', required: true, built_in: true, can_be_created: true, field_type_uuid: 'status' },
+          { uuid: 'field006', name: '所属项目', required: true, built_in: true, can_be_created: true, field_type_uuid: 'project' },
+          { uuid: 'field007', name: '工作项类型', required: true, built_in: true, can_be_created: true, field_type_uuid: 'issue_type' },
+          { uuid: 'JrvswW8P', name: '客户信息', required: true, built_in: false, can_be_created: true, field_type_uuid: 'single_option' },
+          { uuid: 'field016', name: '描述', required: true, built_in: true, can_be_created: true, field_type_uuid: 'rich_desc' },
+          ...requiredExtras.map((field) => ({ uuid: field.uuid, name: field.name, required: true, built_in: false, can_be_created: true, field_type_uuid: 'single_option' })),
+        ];
+        return { text: JSON.stringify({ result: 'SUCCESS', data: { list } }), isError: false };
+      }
+      return { text: JSON.stringify({ result: 'SUCCESS', data: { uuid: 'issue-new' } }), isError: false };
+    },
+    calls,
+  };
+  return mcp;
+}
+
+async function waitDraftJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
+  for (let i = 0; i < 100 && db.getDraftJob(jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
+}
+
+test('workbench: ONES work-item drafts carry minimal required arguments with option binding', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-ones-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-o', name: '客户欧', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-o', 'ones_customer_option', 'opt-77', '客户欧', 'confirmed');
+    const event = db.upsertSourceEvent({ customerId: 'crm-o', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r20:t1:x',
+      title: '客户反馈需求', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r20', speaker: 'CSM', transcript: '客户希望支持批量导出的需求' }, attributionStatus: 'confirmed' });
+    const mcp = fakeOnesMcp();
+    const service = new HemoryDraftService(db, mcp);
+    const queued = service.enqueue('crm-o', [event.id]);
+    await waitDraftJob(db, queued!.jobId);
+    const batch = db.listDraftBatches('crm-o')[0];
+    const suggestion = batch.items!.find((item) => item.type === 'suggestion')!;
+    // 最小必填参数集：项目/类型/标题/客户字段/描述（Hemory 摘要）。
+    assert.equal(suggestion.targetTool, 'mcp__ones__create_new_issue');
+    assert.equal(suggestion.targetArguments.projectID, 'GL3ysesFPdnAQNIU');
+    assert.equal(suggestion.targetArguments.issueTypeID, 'A99xMfkg');
+    assert.equal(suggestion.targetArguments.summary, suggestion.title);
+    assert.deepEqual(suggestion.targetArguments.fieldValues, [{ fieldID: 'JrvswW8P', value: 'opt-77' }]);
+    assert.ok(!suggestion.validationErrors.length);
+    // 预览触发 get_issue_fields 预检：必填项已覆盖时不报错。
+    const preview = await service.preview(batch.id, [suggestion.id]);
+    assert.equal(preview.items[0].validationErrors.length, 0);
+    // 确认后以最小参数精确调用写工具。
+    const written = await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    assert.equal(written.items[0].status, 'written');
+    const createCall = mcp.calls.find((call) => call.publicName === 'mcp__ones__create_new_issue')!;
+    assert.deepEqual(createCall.args, { projectID: 'GL3ysesFPdnAQNIU', issueTypeID: 'A99xMfkg',
+      summary: suggestion.title, description: suggestion.summary, fieldValues: [{ fieldID: 'JrvswW8P', value: 'opt-77' }] });
+    // displayFields：最小必填项结构化展示。
+    const customer = db.getCustomer('crm-o')!;
+    const fields = draftDisplayFields(db, suggestion, customer);
+    assert.deepEqual(fields.map((field) => field.label), ['所属项目', '工作项类型', '标题', '客户信息', '描述']);
+    assert.match(fields.find((field) => field.key === 'customer')!.value, /客户欧 → 客户欧/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: ONES drafts fall back to same-name after-sales customer option and preflight flags missing required fields', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-ones-fallback-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 草稿绑在历史旧行（source_object 为 NULL），同名售后客户有 confirmed option。
+    db.upsertCustomer({ id: 'crm-after-o', name: '客户安', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-after-o', 'ones_customer_option', 'opt-88', '客户安', 'confirmed');
+    db.upsertCustomer({ id: 'crm-legacy-o', name: '客户安', sourceObject: 'object_Umwnn__c' });
+    (db as any).db.prepare("UPDATE customers SET source_object=NULL WHERE id='crm-legacy-o'").run();
+    const event = db.upsertSourceEvent({ customerId: 'crm-legacy-o', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r21:t1:x',
+      title: '客户工单', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r21', speaker: 'CSM', transcript: '客户遇到一个报错工单无法使用' }, attributionStatus: 'confirmed' });
+    const mcp = fakeOnesMcp({ requiredExtra: [{ uuid: 'extra-1', name: '严重程度' }] });
+    const service = new HemoryDraftService(db, mcp);
+    const queued = service.enqueue('crm-legacy-o', [event.id]);
+    await waitDraftJob(db, queued!.jobId);
+    const batch = db.listDraftBatches('crm-legacy-o')[0];
+    const ticket = batch.items!.find((item) => item.type === 'ticket')!;
+    // 同名回退：fieldValues 使用同名售后客户的 option。
+    assert.deepEqual(ticket.targetArguments.fieldValues, [{ fieldID: 'JrvswW8P', value: 'opt-88' }]);
+    assert.ok(!ticket.validationErrors.length);
+    // 预检发现 get_issue_fields 的额外必填字段未填写。
+    const preview = await service.preview(batch.id, [ticket.id]);
+    assert.ok(preview.items[0].validationErrors.some((message) => /ONES 必填字段未填写: 严重程度\(extra-1\)/.test(message)));
+    // 未解析客户 option 的草稿报可操作错误。
+    db.upsertCustomer({ id: 'crm-no-opt', name: '客户宁', sourceObject: 'object_Umwnn__c' });
+    const event2 = db.upsertSourceEvent({ customerId: 'crm-no-opt', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r22:t1:x',
+      title: '另一个需求', occurredAt: '2026-08-25T06:00:00Z',
+      payload: { recordingId: 'r22', speaker: 'CSM', transcript: '客户提出了新功能需求' }, attributionStatus: 'confirmed' });
+    const queued2 = service.enqueue('crm-no-opt', [event2.id]);
+    await waitDraftJob(db, queued2!.jobId);
+    const batch2 = db.listDraftBatches('crm-no-opt')[0];
+    const suggestion2 = batch2.items!.find((item) => item.type === 'suggestion')!;
+    assert.ok(suggestion2.validationErrors.some((message) => /客户缺少已确认的 ONES 客户信息 option ID（.*请刷新客户同步.*）/.test(message)));
+    assert.equal(suggestion2.status, 'draft');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: parseOnesIssueFields tolerates unknown shapes and flags only caller-provided required fields', () => {
+  assert.equal(parseOnesIssueFields('not json'), null);
+  assert.equal(parseOnesIssueFields('{"result":"SUCCESS","data":{}}'), null);
+  const fields = parseOnesIssueFields(JSON.stringify({ result: 'SUCCESS', data: { list: [
+    { uuid: 'field001', name: '标题', required: true, built_in: true, can_be_created: true, field_type_uuid: 'name' },
+    { uuid: 'field003', name: '创建者', required: true, built_in: true, can_be_created: true, field_type_uuid: 'creator' },
+    { uuid: 'JrvswW8P', name: '客户信息', required: true, built_in: false, can_be_created: true, field_type_uuid: 'single_option',
+      options: [{ uuid: 'opt-1', value: '客户一' }] },
+    { uuid: 'PYbGEZmN', name: '建议类型', required: true, built_in: false, can_be_created: false, field_type_uuid: 'single_option' },
+  ] } }))!;
+  assert.equal(fields.length, 4);
+  assert.deepEqual(fields[2].options, [{ uuid: 'opt-1', value: '客户一' }]);
+  // 自动填充（创建者）与 can_be_created=false 的字段不算缺失；客户信息已提供不缺失。
+  const missing = missingOnesRequiredFields(fields, [{ fieldID: 'JrvswW8P', value: 'opt-1' }]);
+  assert.equal(missing.length, 0);
+  // 客户信息缺值时才报缺失。
+  const missing2 = missingOnesRequiredFields(fields, []);
+  assert.deepEqual(missing2.map((field) => field.uuid), ['JrvswW8P']);
+});
+
+// 模拟 ONES search_for_issue_field_options：按输入返回固定选项集，覆盖显示名/主体名两级解析。
+function fakeOnesOptionSearchMcp(optionsByInput: Record<string, Array<{ uuid: string; name: string }>>): any {
+  const calls: Array<{ publicName: string; args: any }> = [];
+  return {
+    listTools: () => [],
+    isWrite: () => false,
+    resolve: () => undefined,
+    call: async (publicName: string, args: any) => {
+      calls.push({ publicName, args });
+      const options = optionsByInput[String(args?.input ?? '')] ?? [];
+      return { text: JSON.stringify({ result: 'SUCCESS', data: options.map((option) => ({ uuid: option.uuid, name: option.name })) }), isError: false };
+    },
+    calls,
+  };
+}
+
+test('workbench: ONES customer option resolves by display name then CRM reference name, uniquely', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-option-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 场景一：显示名是简称，主体名与 ONES 选项全称精确一致（华大九天型）。
+    db.upsertCustomer({ id: 'crm-hd', name: '华大九天', sourceObject: 'object_Umwnn__c',
+      source: { field_83f4l__c: '华大九天', field_n1qN0__c__r: '北京华大九天科技股份有限公司' } });
+    const mcp = fakeOnesOptionSearchMcp({
+      '华大九天': [{ uuid: 'BJY0WFZJ', name: '北京华大九天科技股份有限公司' }],
+      '北京华大九天科技股份有限公司': [{ uuid: 'BJY0WFZJ', name: '北京华大九天科技股份有限公司' }],
+    });
+    const sync = new PortfolioSyncService(db, mcp, async () => []);
+    const optionId = await (sync as any).resolveOnesCustomerOption(db.getCustomer('crm-hd'));
+    assert.equal(optionId, 'BJY0WFZJ');
+    const identity = db.listIdentities('crm-hd').find((item) => item.system === 'ones_customer_option');
+    assert.equal(identity?.external_id, 'BJY0WFZJ');
+    assert.equal(identity?.label, '北京华大九天科技股份有限公司');
+    assert.equal(identity?.status, 'confirmed');
+
+    // 场景二：主体名对应多个 ONES 选项（人工智能研究院型）→ 不自动归属，落候选事件。
+    db.upsertCustomer({ id: 'crm-ai', name: '人工智能研究院', sourceObject: 'object_Umwnn__c',
+      source: { field_83f4l__c: '人工智能研究院', field_n1qN0__c__r: '北京通用人工智能研究院' } });
+    const mcp2 = fakeOnesOptionSearchMcp({
+      '人工智能研究院': [
+        { uuid: 'v8Goci1j', name: '北京智源人工智能研究院' },
+        { uuid: 'tyy8tinj', name: '北京通用人工智能研究院' },
+        { uuid: 'gJDSkP9x', name: '武汉人工智能研究院' },
+      ],
+      '北京通用人工智能研究院': [{ uuid: 'tyy8tinj', name: '北京通用人工智能研究院' }],
+    });
+    const sync2 = new PortfolioSyncService(db, mcp2, async () => []);
+    const optionId2 = await (sync2 as any).resolveOnesCustomerOption(db.getCustomer('crm-ai'));
+    assert.equal(optionId2, 'tyy8tinj');
+    assert.equal(db.listIdentities('crm-ai').find((item) => item.system === 'ones_customer_option')?.external_id, 'tyy8tinj');
+
+    // 场景三：显示名与主体名都无法精确唯一匹配 → 保持未归属，写候选事件。
+    db.upsertCustomer({ id: 'crm-xx', name: '简称客户', sourceObject: 'object_Umwnn__c',
+      source: { field_83f4l__c: '简称客户', field_n1qN0__c__r: '某集团' } });
+    const mcp3 = fakeOnesOptionSearchMcp({
+      '简称客户': [{ uuid: 'opt-a', name: '简称客户集团' }],
+      '某集团': [{ uuid: 'opt-b', name: '某集团有限公司' }, { uuid: 'opt-c', name: '某集团股份' }],
+    });
+    const sync3 = new PortfolioSyncService(db, mcp3, async () => []);
+    const optionId3 = await (sync3 as any).resolveOnesCustomerOption(db.getCustomer('crm-xx'));
+    assert.equal(optionId3, null);
+    assert.equal(db.listIdentities('crm-xx').filter((item) => item.system === 'ones_customer_option').length, 0);
+    const candidates = db.listSourceEvents('ones', 'customer_option_candidate', 'crm-xx');
+    assert.ok(candidates.length >= 2, '歧义候选应写入 source_events');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

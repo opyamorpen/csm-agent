@@ -503,10 +503,12 @@ export class PortfolioSyncService {
       return;
     }
     const statuses: SyncRun['sourceStatus'] = {};
+    // CRM 步骤可能更新客户名/主体名，ONES 解析必须读最新记录而不是刷新前的快照。
+    const fresh = () => this.db.getCustomer(customerId) ?? customer;
     for (const [source, task] of [
       ['crm', () => this.syncSingleCrmCustomer(customer)],
-      ['ones', () => this.syncOnesCustomer(customer)],
-      ['hemory', () => this.syncHemoryCustomer(customer)],
+      ['ones', () => this.syncOnesCustomer(fresh())],
+      ['hemory', () => this.syncHemoryCustomer(fresh())],
     ] as const) {
       try {
         statuses[source] = { status: 'succeeded', count: await task() };
@@ -638,42 +640,54 @@ export class PortfolioSyncService {
     await this.onesqlGrammarReady;
   }
 
+  // 售后客户常用简称（如“华大九天”），ONES 客户信息选项则用关联主体全称（如“北京华大九天科技股份有限公司”）。
+  // 解析顺序：显示名精确唯一 → 关联主体名（field_n1qN0__c__r）精确唯一；两者都失败才落候选事件，不做模糊归属。
   private async resolveOnesCustomerOption(customer: Customer): Promise<string | null> {
+    const referenceName = asText(customer.source?.[CRM_FIELDS.nameReference]);
     const existing = this.db.listIdentities(customer.id).find((item) =>
-      item.system === 'ones_customer_option' && item.status === 'confirmed' && item.label === customer.name);
+      item.system === 'ones_customer_option' && item.status === 'confirmed'
+      && (item.label === customer.name || item.label === referenceName));
     if (existing?.external_id) return String(existing.external_id);
 
-    const result = await this.mcp.call('mcp__ones__search_for_issue_field_options', {
-      fieldID: ONES_CUSTOMER_FIELD_ID,
-      input: customer.name,
-    });
-    if (result.isError) throw new Error(result.text);
-    const value = parseJson(result.text);
-    const rawOptions: unknown[] = Array.isArray(value?.data) ? value.data : recordsIn(value);
-    const options: Record<string, unknown>[] = rawOptions
-      .filter((item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item));
-    const exact = options.filter((item) => asText(item.name ?? item.value) === customer.name);
-    if (exact.length === 1) {
-      const optionId = asText(exact[0].uuid ?? exact[0].id);
-      if (optionId) {
-        this.db.upsertIdentity(customer.id, 'ones_customer_option', optionId, customer.name, 'confirmed');
-        return optionId;
+    const candidates: Array<{ option: Record<string, unknown>; exact: boolean }> = [];
+    for (const name of [customer.name, referenceName]) {
+      if (!name) continue;
+      const result = await this.mcp.call('mcp__ones__search_for_issue_field_options', {
+        fieldID: ONES_CUSTOMER_FIELD_ID,
+        input: name,
+      });
+      if (result.isError) throw new Error(result.text);
+      const value = parseJson(result.text);
+      const rawOptions: unknown[] = Array.isArray(value?.data) ? value.data : recordsIn(value);
+      const options: Record<string, unknown>[] = rawOptions
+        .filter((item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item));
+      const exact = options.filter((item) => asText(item.name ?? item.value) === name);
+      if (exact.length === 1) {
+        const optionId = asText(exact[0].uuid ?? exact[0].id);
+        if (optionId) {
+          this.db.upsertIdentity(customer.id, 'ones_customer_option', optionId, name, 'confirmed');
+          return optionId;
+        }
+      }
+      for (const item of exact.length > 1 ? exact : options) {
+        const optionId = asText(item.uuid ?? item.id);
+        if (!optionId || candidates.some((entry) => asText(entry.option.uuid ?? entry.option.id) === optionId)) continue;
+        candidates.push({ option: item, exact: exact.length > 1 && exact.includes(item) });
       }
     }
 
-    for (const item of exact.length > 1 ? exact : options) {
-      const optionId = asText(item.uuid ?? item.id);
-      if (!optionId) continue;
+    for (const { option, exact } of candidates) {
+      const optionId = asText(option.uuid ?? option.id)!;
       this.db.upsertSourceEvent({
         customerId: null,
         sourceSystem: 'ones',
         sourceType: 'customer_option_candidate',
         externalId: `${customer.id}:${optionId}`,
-        title: `待确认 ONES 客户信息: ${asText(item.name ?? item.value) ?? optionId}`,
+        title: `待确认 ONES 客户信息: ${asText(option.name ?? option.value) ?? optionId}`,
         occurredAt: new Date().toISOString(),
-        payload: { crmCustomerId: customer.id, crmCustomerName: customer.name, option: item },
-        confidence: exact.length > 1 ? 0.5 : 0.2,
-        attributionStatus: exact.length > 1 ? 'ambiguous' : 'unattributed',
+        payload: { crmCustomerId: customer.id, crmCustomerName: customer.name, crmCustomerReferenceName: referenceName, option },
+        confidence: exact ? 0.5 : 0.2,
+        attributionStatus: exact ? 'ambiguous' : 'unattributed',
       });
     }
     return null;
@@ -704,8 +718,10 @@ export class PortfolioSyncService {
       const displayId = asText(item.display_id ?? item.issue_number);
       const title = asText(item.field001) ?? 'ONES 工作项';
       const status = asText(item.field005);
+      // JrvswW8P.name 返回的是选项名（常为客户主体全称），与显示名或关联主体名任一一致即归属该客户。
       const customerName = asText(item[ONES_CUSTOMER_FIELD_ID]);
-      if (customerName !== customer.name) {
+      const referenceName = asText(customer.source?.[CRM_FIELDS.nameReference]);
+      if (customerName !== customer.name && customerName !== referenceName) {
         this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType, externalId: id, displayId, title,
           occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(), payload: item,
           url: onesIssueUrl(id, displayId), confidence: 0.2, attributionStatus: 'ambiguous' });

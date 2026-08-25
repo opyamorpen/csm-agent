@@ -379,12 +379,29 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
   throw new Error('hemory 子命令只允许 sync/inbox/assign/clear');
 }
 
+// 草稿确认视图：与 Web 卡片共用服务端 displayFields，按最小必填项逐行结构化输出。
+function printDraftItems(items: any[]): void {
+  for (const item of items) {
+    console.log(`\n[${item.id}] ${draftTypeLabel(item.type)} ｜ ${item.status} ｜ ${item.title}`);
+    if (item.displayFields?.length) for (const field of item.displayFields) console.log(`  ${field.label}: ${field.value}`);
+    else console.log(`  摘要: ${item.summary}`);
+    if (item.targetObject) console.log(`  目标: ${item.targetObject}${item.targetTool ? ` ｜ ${item.targetTool}` : ''}`);
+    if (item.unknowns?.length) console.log(`  待确认: ${item.unknowns.join('、')}`);
+    if (item.validationErrors?.length) console.log(`  校验错误: ${item.validationErrors.join('；')}`);
+    if (item.error) console.log(`  失败原因: ${item.error}`);
+  }
+}
+
+function draftTypeLabel(type: string): string {
+  return ({ internal_todo: 'Agent 待办', workhour: '工时', followup: '沟通记录', suggestion: '需求', ticket: '工单', operations: '运维工单' } as Record<string, string>)[type] || type;
+}
+
 async function showDrafts(customerInput?: string): Promise<void> {
   const customer = customerInput ? await resolveCustomer(customerInput) : null;
   const body = await request<any>(`/api/draft-batches${customer ? `?customer_id=${encodeURIComponent(customer.id)}` : ''}`);
   if (jsonOutput) return print(body.batches);
   console.table((body.batches ?? []).flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
-    customerId: item.customerId, type: item.type, status: item.status, version: item.version, title: item.title }))));
+    customerId: item.customerId, type: item.type, status: item.status, version: item.version, target: item.targetObject || '', title: item.title }))));
 }
 
 async function editBatchItems(batch: any): Promise<any> {
@@ -410,7 +427,11 @@ async function editBatchItems(batch: any): Promise<any> {
 
 async function reviewDraftBatch(batchId: string): Promise<void> {
   let batch = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}`);
-  print(batch);
+  if (jsonOutput) print(batch);
+  else {
+    console.log(`批次 ${batch.id} ｜ 客户 ${batch.customerId} ｜ ${batch.status} ｜ ${batch.generator}`);
+    printDraftItems(batch.items ?? []);
+  }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const first = (await rl.question('输入 [e] 编辑，直接回车预览全部可用草稿，其他内容取消: ')).trim().toLowerCase();
@@ -419,12 +440,18 @@ async function reviewDraftBatch(batchId: string): Promise<void> {
     const itemIds = (batch.items ?? []).filter((item: any) => !['written', 'dismissed', 'stale'].includes(item.status)).map((item: any) => item.id);
     const preview = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ itemIds }) });
-    print(preview);
+    if (jsonOutput) print(preview);
+    else {
+      console.log('\n预览校验结果：');
+      for (const item of preview.items ?? []) console.log(`  ${item.id}: ${item.validationErrors?.length ? item.validationErrors.join('；') : '可写入'}`);
+    }
     if (preview.items.some((item: any) => item.validationErrors?.length)) throw new Error('存在不可写草稿，请编辑后重新 review');
     const answer = (await rl.question('批准以上草稿逐项写入？[y/N]: ')).trim().toLowerCase();
     if (answer !== 'y') return;
-    print(await request(`/api/draft-batches/${encodeURIComponent(batchId)}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: preview.items.map(({ id, version, approvalHash }: any) => ({ id, version, approvalHash })) }) }));
+    const confirmed = await request(`/api/draft-batches/${encodeURIComponent(batchId)}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: preview.items.map(({ id, version, approvalHash }: any) => ({ id, version, approvalHash })) }) });
+    if (jsonOutput) print(confirmed);
+    else printDraftItems((confirmed as any).items ?? []);
   } finally { rl.close(); }
 }
 

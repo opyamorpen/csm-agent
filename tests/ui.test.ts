@@ -32,8 +32,31 @@ test('draft inbox exposes regenerate control and operations label', () => {
 
   assert.ok(renderer, 'loadDraftBatches source was not found');
   assert.match(renderer, /\['stale', 'partial', 'failed'\]\.includes\(batch\.status\)/);
+  // 存在阻断性校验错误（如 ONES 客户信息未解析）的批次也允许重新生成。
+  assert.match(renderer, /hasBlockingErrors/);
+  assert.match(renderer, /item\.validationErrors\?\.length && !\['written', 'dismissed', 'stale'\]\.includes\(item\.status\)/);
   assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/regenerate/);
   assert.match(source, /operations: '运维工单'/);
+});
+
+test('draft cards render structured minimal required fields instead of a summary blob', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // displayFields 键值行取代整段摘要；无 displayFields 时才回退到 summary。
+  assert.match(renderer, /if \(item\.displayFields\?\.length\)/);
+  assert.match(renderer, /const fields = el\('div', 'draft-fields'\)/);
+  assert.match(renderer, /fields\.append\(el\('div', 'draft-field-row', `\$\{field\.label\}：\$\{field\.value\}`\)\)/);
+  assert.match(renderer, /else body\.append\(el\('p', null, item\.summary\)\)/);
+  // 目标系统与工具的元信息行。
+  assert.match(renderer, /目标: \$\{item\.targetObject\}/);
+  // 待确认信息保留展示。
+  assert.match(renderer, /待确认: \$\{item\.unknowns\.join\('、'\)\}/);
+
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.draft-fields \{[^}]*display: grid/);
+  assert.match(styles, /\.draft-field-row \{/);
 });
 
 test('customer detail tabs drop meetings and followups list CRM sales records by create time', () => {

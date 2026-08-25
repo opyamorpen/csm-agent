@@ -42,6 +42,13 @@
   },
   "ones_customer_binding": {
     "fieldID": "JrvswW8P",
-    "value": "当前客户的 ones_customer_option_id"
+    "value": "当前客户的 ones_customer_option_id（显示名或 CRM 关联主体名 field_n1qN0__c__r 精确唯一解析）"
+  },
+  "ones_minimal_required_arguments": {
+    "projectID": "目标项目 ID",
+    "issueTypeID": "目标工作项类型 ID",
+    "summary": "标题",
+    "description": "Hemory 摘要",
+    "fieldValues": ["客户信息 JrvswW8P=当前客户 option ID"]
   }
 }

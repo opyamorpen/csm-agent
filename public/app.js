@@ -798,7 +798,9 @@
       const confirmButton = el('button', 'primary-command small', '确认所选草稿');
       confirmButton.onclick = () => confirmDraftBatch(batch, section);
       head.append(title, confirmButton);
-      if (['stale', 'partial', 'failed'].includes(batch.status)) {
+      // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
+      const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
+      if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors) {
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.onclick = async () => {
           if (!confirm('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
@@ -814,9 +816,17 @@
         selector.disabled = ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
         const body = el('div', 'draft-item-body');
         const itemHead = el('div', 'draft-item-head'); itemHead.append(badge(draftTypeLabel(item.type), 'accent'), el('strong', null, item.title), badge(item.status, item.status === 'written' ? 'success' : item.status === 'failed' ? 'risk-high' : 'warning'));
-        body.append(itemHead, el('p', null, item.summary));
+        body.append(itemHead);
+        // 最小必填项结构化展示（displayFields 由服务端按类型生成），取代原来的整段摘要。
+        if (item.displayFields?.length) {
+          const fields = el('div', 'draft-fields');
+          for (const field of item.displayFields) fields.append(el('div', 'draft-field-row', `${field.label}：${field.value}`));
+          body.append(fields);
+        } else body.append(el('p', null, item.summary));
+        if (item.targetObject) body.append(el('div', 'cell-sub', `目标: ${item.targetObject}${item.targetTool ? ` ｜ ${item.targetTool}` : ''}`));
         if (item.validationErrors?.length) body.append(el('div', 'draft-errors', item.validationErrors.join('；')));
         if (item.error) body.append(el('div', 'draft-errors', item.error));
+        if (item.unknowns?.length) body.append(el('div', 'cell-sub', `待确认: ${item.unknowns.join('、')}`));
         const actions = el('div', 'row-actions');
         if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) { const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editableDraft(item); actions.append(edit); }
         if (item.status === 'failed') { const retry = el('button', 'quiet-command small', '重试'); retry.onclick = async () => { try { await api(`/api/draft-items/${item.id}/retry`, { method: 'POST' }); await loadDraftBatches(); } catch (error) { alert(error.message); } }; actions.append(retry); }
