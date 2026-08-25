@@ -4,6 +4,7 @@ import WebKit
 // Values baked in by scripts/build-mac-app.sh at build time.
 let nodeBin = "__NODE_BIN__"
 let repoDir = "__REPO_DIR__"
+let npxDir = "__NPX_DIR__"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var window: NSWindow?
@@ -23,6 +24,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         p.currentDirectoryURL = URL(fileURLWithPath: repoDir)
         var env = ProcessInfo.processInfo.environment
         env["CSM_PORT"] = "3210"
+        // GUI apps launched from Finder lack the shell PATH (nvm's npx etc.),
+        // so prepend the npx directory so ONES's `npx mcp-remote` can spawn.
+        if !npxDir.isEmpty {
+            if let existing = env["PATH"], !existing.isEmpty {
+                env["PATH"] = npxDir + ":" + existing
+            } else {
+                env["PATH"] = npxDir
+            }
+        }
         p.environment = env
         do {
             try p.run()

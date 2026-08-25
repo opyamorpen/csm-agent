@@ -16,6 +16,10 @@ if [ -z "$NODE_BIN" ]; then
   echo "错误：找不到 node。请先安装 Node.js（>=20）。" >&2
   exit 1
 fi
+NPX_DIR=""
+if NPX_BIN="$(command -v npx 2>/dev/null)"; then
+  NPX_DIR="$(dirname "$NPX_BIN")"
+fi
 
 echo "==> 构建服务器 dist/"
 (cd "$ROOT" && npm run build)
@@ -31,13 +35,13 @@ if [ ! -f "$ROOT/assets/AppIcon.icns" ]; then
 fi
 cp "$ROOT/assets/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-echo "==> 生成 main.swift（写入 node 路径与项目路径）"
-python3 - "$ROOT/scripts/mac-app/main.swift" "$BUILD_DIR/main.swift" "$NODE_BIN" "$ROOT" <<'PY'
+echo "==> 生成 main.swift（写入 node 路径、npx 目录与项目路径）"
+python3 - "$ROOT/scripts/mac-app/main.swift" "$BUILD_DIR/main.swift" "$NODE_BIN" "$ROOT" "$NPX_DIR" <<'PY'
 import sys
-src, dst, node_bin, repo = sys.argv[1:5]
+src, dst, node_bin, repo, npx_dir = sys.argv[1:6]
 with open(src, encoding='utf-8') as f:
     t = f.read()
-t = t.replace('__NODE_BIN__', node_bin).replace('__REPO_DIR__', repo)
+t = t.replace('__NODE_BIN__', node_bin).replace('__REPO_DIR__', repo).replace('__NPX_DIR__', npx_dir)
 with open(dst, 'w', encoding='utf-8') as f:
     f.write(t)
 PY
