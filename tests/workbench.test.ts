@@ -388,12 +388,12 @@ test('workbench: relevant Hemory evidence creates drafts and approved local todo
       call: async () => ({ text: '', isError: false }) } as any;
     const service = new HemoryDraftService(db, fakeMcp);
     const queued = service.enqueue('crm-d', [event.id]);
-    assert.ok(queued);
-    for (let i = 0; i < 20 && db.getDraftJob(queued!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal(db.getDraftJob(queued!.jobId)?.status, 'succeeded');
+    assert.equal(queued.length, 1);
+    for (let i = 0; i < 20 && db.getDraftJob(queued[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getDraftJob(queued[0].jobId)?.status, 'succeeded');
     const batch = db.listDraftBatches('crm-d')[0];
     assert.equal(batch.items?.length, 5);
-    assert.equal(service.enqueue('crm-d', [event.id])?.fingerprint, queued!.fingerprint);
+    assert.equal(service.enqueue('crm-d', [event.id])[0].fingerprint, queued[0].fingerprint);
     assert.equal(db.listDraftBatches('crm-d').length, 1);
     const todo = batch.items!.find((item) => item.type === 'internal_todo')!;
     const preview = await service.preview(batch.id, [todo.id]);
@@ -420,37 +420,178 @@ async function waitForJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
   assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
 }
 
-test('workbench: same-recording fragments merge into one batch and multiple drafts of one type survive', async () => {
+test('workbench: same-day fragments merge into one batch with a single followup and a paired workhour draft', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
   const db = new WorkbenchDatabase(dir);
   try {
     db.upsertCustomer({ id: 'crm-m', name: '客户马' });
-    const f1 = segment(db, 'crm-m', 'r9:a', 'r9', '话题A', '2026-08-25T01:00:00Z', '先聊聊上线部署的安排');
+    // 同日两个录音：上午会 13:00-13:30（上海），下午会 15:00-15:20。
+    const f1 = segment(db, 'crm-m', 'r9:a', 'r9', '话题A', '2026-08-25T05:00:00Z', '先聊聊上线部署的安排');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T05:00:00Z','$.endAt','2026-08-25T05:30:00Z') WHERE id=?").run(f1.id);
     const first = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
     const queued1 = first.enqueue('crm-m', [f1.id]);
-    await waitForJob(db, queued1!.jobId);
-    // 分次归属：同录音第二个片段现在才绑定，应并入同一批次而不是新建一个。
-    const f2 = segment(db, 'crm-m', 'r9:b', 'r9', '话题B', '2026-08-25T02:00:00Z', '又出现了一个报错工单');
+    await waitForJob(db, queued1[0]!.jobId);
+    // 分次归属：同日第二个录音现在才绑定，应并入同一批次而不是新建一个。
+    const f2 = segment(db, 'crm-m', 'r10:a', 'r10', '话题B', '2026-08-25T07:00:00Z', '又出现了一个报错工单');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T07:00:00Z','$.endAt','2026-08-25T07:20:00Z') WHERE id=?").run(f2.id);
     const queued2 = first.enqueue('crm-m', [f2.id]);
-    await waitForJob(db, queued2!.jobId);
+    await waitForJob(db, queued2[0]!.jobId);
     const batches = db.listDraftBatches('crm-m');
     assert.equal(batches.filter((batch) => batch.status !== 'stale').length, 1);
     const merged = batches.find((batch) => batch.status !== 'stale')!;
     assert.deepEqual(merged.sourceEventIds.sort(), [f1.id, f2.id].sort());
-    // LLM 返回同类型多条草稿时不能被折叠：两条 ticket 都要保留。
+    // 沟通记录有且仅有一条：证据覆盖两个录音、正文含两个话题、标题带上海日。
+    const followups = merged.items!.filter((item) => item.type === 'followup');
+    assert.equal(followups.length, 1);
+    const followup = followups[0];
+    assert.deepEqual(followup.evidenceRefs.sort(), [f1.id, f2.id].sort());
+    assert.match(followup.title, /客户马 2026-08-25 沟通记录/);
+    assert.match(followup.summary, /【话题A】/);
+    assert.match(followup.summary, /【话题B】/);
+    assert.ok(String(followup.fields.one_line_summary ?? '').includes('话题A'));
+    // 服务开始/结束 = 覆盖片段首尾时刻，不再同为首个事件时刻。
+    assert.equal(followup.targetArguments.object_data.field_oUaZx__c, '2026-08-25T05:00:00.000Z');
+    assert.equal(followup.targetArguments.object_data.field_wYlhw__c, '2026-08-25T07:00:00.000Z');
+    // 连带工时：时长 = 两个录音跨度之和（0.5h + 0.33h ≈ 0.8h），描述是一句话。
+    const workhours = merged.items!.filter((item) => item.type === 'workhour');
+    assert.equal(workhours.length, 1);
+    const workhour = workhours[0];
+    assert.equal(workhour.targetArguments.hours, 0.8);
+    assert.equal(workhour.targetArguments.date, '2026-08-25');
+    assert.equal(workhour.targetArguments.description, followup.fields.one_line_summary);
+    // LLM 返回同类型多条非 followup 草稿时不能被折叠：两条 ticket 都要保留。
     const third = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
       { type: 'ticket', title: '工单一', summary: '第一个故障', evidence_refs: [f1.id] },
       { type: 'ticket', title: '工单二', summary: '第二个故障', evidence_refs: [f2.id] },
     ]));
     const regenerated = third.regenerate(merged.id);
-    await waitForJob(db, regenerated.jobId);
+    await waitForJob(db, regenerated[0]!.jobId);
     const active = db.listDraftBatches('crm-m').filter((batch) => batch.status !== 'stale');
     assert.equal(active.length, 1);
     assert.equal(active[0].items?.filter((item) => item.type === 'ticket').length, 2);
+    assert.equal(active[0].items?.filter((item) => item.type === 'followup').length, 1);
     // 每条草稿只引用自己的证据片段。
     const tickets = active[0].items!.filter((item) => item.type === 'ticket');
     assert.deepEqual(tickets[0].fields.evidence_refs, [tickets[0].title === '工单一' ? f1.id : f2.id]);
     assert.deepEqual(tickets[1].fields.evidence_refs, [tickets[1].title === '工单一' ? f1.id : f2.id]);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: published followup truncates the day merge to new communication only', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-p', name: '客户佩', sourceObject: 'object_Umwnn__c' });
+    const morning = segment(db, 'crm-p', 'rp:a', 'rp', '上午话题', '2026-08-25T01:00:00Z', '上午沟通了报表需求');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T01:00:00Z','$.endAt','2026-08-25T01:40:00Z') WHERE id=?").run(morning.id);
+    const mcp = fakeCrmMcp('{"resultCode":"SUCCESS","data":{"id":"rec-p"}}');
+    const service = new HemoryDraftService(db, mcp);
+    const queued = service.enqueue('crm-p', [morning.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-p').find((item) => item.status !== 'stale')!;
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    // 确认写入 CRM：上午沟通已发布。
+    const preview = await service.preview(batch.id, [followup.id]);
+    await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    // 下午又出现新沟通：新草稿只覆盖下午。
+    const afternoon = segment(db, 'crm-p', 'rp2:a', 'rp2', '下午话题', '2026-08-25T08:00:00Z', '下午讨论了扩容计划');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T08:00:00Z','$.endAt','2026-08-25T08:30:00Z') WHERE id=?").run(afternoon.id);
+    const queued2 = service.enqueue('crm-p', [afternoon.id]);
+    await waitForJob(db, queued2[0]!.jobId);
+    const batchWith = (eventId: string) => db.listDraftBatches('crm-p')
+      .find((item) => item.items?.some((entry) => entry.type === 'followup' && entry.status !== 'stale' && entry.evidenceRefs.includes(eventId)))!;
+    const afternoonBatch = batchWith(afternoon.id);
+    const newFollowup = afternoonBatch.items!.find((item) => item.type === 'followup' && item.status !== 'stale')!;
+    assert.deepEqual(newFollowup.evidenceRefs, [afternoon.id]);
+    assert.match(newFollowup.summary, /【下午话题】/);
+    assert.doesNotMatch(newFollowup.summary, /上午话题/);
+    // 已发布的上午沟通不再出现在新草稿正文里，工时也只计下午录音。
+    const newWorkhour = afternoonBatch.items!.find((item) => item.type === 'workhour' && item.status !== 'stale')!;
+    assert.equal(newWorkhour.targetArguments.hours, 0.5);
+    assert.deepEqual(newWorkhour.evidenceRefs, [afternoon.id]);
+    // 下午草稿也发布后，晚间新沟通仍应生成只覆盖晚间的草稿与工时（豁免只截断已发布内容）。
+    const preview2 = await service.preview(afternoonBatch.id, [newFollowup.id]);
+    await service.confirm(afternoonBatch.id, preview2.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    const evening = segment(db, 'crm-p', 'rp3:a', 'rp3', '晚间话题', '2026-08-25T13:00:00Z', '晚间又提到一个报错工单故障');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T13:00:00Z','$.endAt','2026-08-25T13:25:00Z') WHERE id=?").run(evening.id);
+    const queued3 = service.enqueue('crm-p', [evening.id]);
+    await waitForJob(db, queued3[0]!.jobId);
+    const eveningBatch = batchWith(evening.id);
+    const eveningFollowup = eveningBatch.items!.find((item) => item.type === 'followup' && item.status !== 'stale')!;
+    assert.deepEqual(eveningFollowup.evidenceRefs, [evening.id]);
+    const eveningWorkhour = eveningBatch.items!.find((item) => item.type === 'workhour' && item.status !== 'stale')!;
+    assert.equal(eveningWorkhour.targetArguments.hours, 0.4);
+    // 晚间草稿也发布后全天已回写：强制重生成不再产出沟通记录/工时，但其他类型照旧。
+    const preview3 = await service.preview(eveningBatch.id, [eveningFollowup.id]);
+    await service.confirm(eveningBatch.id, preview3.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    const forced = service.regenerate(eveningBatch.id);
+    await waitForJob(db, forced[0].jobId);
+    const finalBatch = db.listDraftBatches('crm-p')
+      .find((item) => item.items?.some((entry) => entry.type === 'ticket' && entry.status !== 'stale'))!;
+    assert.ok(!finalBatch.items!.some((item) => item.type === 'followup' && item.status !== 'stale'), '已全部发布后不应再生成沟通记录草稿');
+    assert.ok(!finalBatch.items!.some((item) => item.type === 'workhour' && item.status !== 'stale'), '无新沟通时不应连带生成工时草稿');
+    assert.ok(finalBatch.items!.some((item) => item.type === 'ticket' && item.status !== 'stale'), '工单草稿不受发布豁免影响');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: CRM followup events also count as published signal for the day merge', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-q', name: '客户祁', sourceObject: 'object_Umwnn__c' });
+    // 手动在 CRM 录入的跟进（本地缓存为 crm_followup 事件）发生在上午 11 点（上海）。
+    db.upsertSourceEvent({ customerId: 'crm-q', sourceSystem: 'crm', sourceType: 'crm_followup', externalId: 'crm-rec-1',
+      title: '手动跟进', occurredAt: '2026-08-25T03:00:00Z', attributionStatus: 'confirmed' });
+    const morning = segment(db, 'crm-q', 'rq:a', 'rq', '上午话题', '2026-08-25T02:00:00Z', '上午沟通了部署');
+    const afternoon = segment(db, 'crm-q', 'rq2:a', 'rq2', '下午话题', '2026-08-25T06:00:00Z', '下午沟通了扩容');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts());
+    const queued = service.enqueue('crm-q', [morning.id, afternoon.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-q').find((item) => item.status !== 'stale')!;
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    // CRM 已有跟进之后的新沟通才算：只汇总下午片段。
+    assert.deepEqual(followup.evidenceRefs, [afternoon.id]);
+    assert.match(followup.summary, /【下午话题】/);
+    assert.doesNotMatch(followup.summary, /上午话题/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: multi-day attribution creates one batch per Shanghai day', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-n', name: '客户倪' });
+    // 8-24 深夜 23:30（上海）与 8-25 凌晨 00:30（上海）：跨上海自然日。
+    const day1 = segment(db, 'crm-n', 'rd1:a', 'rd1', '昨日话题', '2026-08-24T15:30:00Z', '昨天聊了部署');
+    const day2 = segment(db, 'crm-n', 'rd2:a', 'rd2', '今日话题', '2026-08-24T16:30:00Z', '今天继续聊扩容');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const jobs = service.enqueue('crm-n', [day1.id, day2.id]);
+    assert.equal(jobs.length, 2);
+    for (const job of jobs) await waitForJob(db, job.jobId);
+    const active = db.listDraftBatches('crm-n').filter((batch) => batch.status !== 'stale');
+    assert.equal(active.length, 2);
+    const titles = active.flatMap((batch) => batch.items!.filter((item) => item.type === 'followup').map((item) => item.title));
+    assert.ok(titles.some((title) => title.includes('2026-08-24')), '应有 8-24 批次');
+    assert.ok(titles.some((title) => title.includes('2026-08-25')), '应有 8-25 批次');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: workhour falls back to unknown when recording times are missing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-t', name: '客户泰' });
+    // 无 startAt/endAt 的历史片段：时长回到 unknown，由校验错误引导人工补充。
+    const legacy = segment(db, 'crm-t', 'rt:a', 'rt', '旧话题', '2026-08-25T05:00:00Z', '沟通了旧系统迁移');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued = service.enqueue('crm-t', [legacy.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-t').find((item) => item.status !== 'stale')!;
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour.targetArguments.hours, 'unknown');
+    assert.ok(workhour.validationErrors.some((message) => message.includes('工时时长')));
+    // followup 照常生成，不受工时数据缺失影响。
+    assert.ok(batch.items!.some((item) => item.type === 'followup'));
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -462,15 +603,15 @@ test('workbench: stale batch heals on re-enqueue and regenerate works from CLI r
     const f1 = segment(db, 'crm-s', 'r5:a', 'r5', '话题A', '2026-08-25T01:00:00Z', '客服反馈一个需求，希望支持批量导出');
     const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
     const queued1 = service.enqueue('crm-s', [f1.id]);
-    await waitForJob(db, queued1!.jobId);
+    await waitForJob(db, queued1[0].jobId);
     const original = db.listDraftBatches('crm-s')[0];
-    assert.equal(original.items?.length, 2);
+    assert.equal(original.items?.length, 3);
     // 重新归属（内容变化）后旧批次作废。
     const changed = db.upsertSourceEvent({ customerId: 'crm-s', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r5:a',
       title: '话题A', occurredAt: '2026-08-25T01:00:00Z', attributionStatus: 'confirmed',
       payload: { recordingId: 'r5', speakers: ['CSM'], transcript: '客服反馈一个需求，希望支持批量导出，另外下个月要部署升级环境' } });
     const queued2 = service.enqueue('crm-s', [changed.id]);
-    await waitForJob(db, queued2!.jobId);
+    await waitForJob(db, queued2[0].jobId);
     const stale = db.getDraftBatch(original.id)!;
     assert.equal(stale.status, 'stale');
     const healed = db.listDraftBatches('crm-s').find((batch) => batch.status !== 'stale');
@@ -479,7 +620,7 @@ test('workbench: stale batch heals on re-enqueue and regenerate works from CLI r
     assert.ok(healed!.items?.some((item) => item.type === 'operations'), '应生成运维工单草稿');
     // regenerate 强制重新生成。
     const forced = service.regenerate(healed!.id);
-    await waitForJob(db, forced.jobId);
+    await waitForJob(db, forced[0].jobId);
     assert.ok(db.listDraftBatches('crm-s').filter((batch) => batch.status !== 'stale').length >= 1);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -519,7 +660,7 @@ test('workbench: followup drafts write to CRM data_record_create with customer b
     const mcp = fakeCrmMcp('{"resultCode":"SUCCESS","data":{"id":"rec-1"}}');
     const service = new HemoryDraftService(db, mcp);
     const queued = service.enqueue('crm-f', [event.id]);
-    for (let i = 0; i < 40 && db.getDraftJob(queued!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 40 && db.getDraftJob(queued[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const batch = db.listDraftBatches('crm-f')[0];
     const followup = batch.items!.find((item) => item.type === 'followup')!;
     // 绑定到真正的写工具，而不是描述表单的只读工具。
@@ -544,7 +685,7 @@ test('workbench: followup drafts write to CRM data_record_create with customer b
     calls.length = 0;
     const failing = new HemoryDraftService(db, fakeCrmMcp('{"resultCode":"USER_TOOL_NOT_EXIST"}'));
     const queued2 = failing.enqueue('crm-g', [event2.id]);
-    for (let i = 0; i < 40 && db.getDraftJob(queued2!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 40 && db.getDraftJob(queued2[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const batch2 = db.listDraftBatches('crm-g')[0];
     const followup2 = batch2.items!.find((item) => item.type === 'followup')!;
     const preview2 = await failing.preview(batch2.id, [followup2.id]);
@@ -567,7 +708,7 @@ test('workbench: followup drafts bind the after-sales object for legacy AccountO
       payload: { recordingId: 'r10', speaker: 'CSM', transcript: '沟通了续约和报价' }, attributionStatus: 'confirmed' });
     const service = new HemoryDraftService(db, fakeCrmMcp('{"resultCode":"SUCCESS","data":{"id":"rec-2"}}'));
     const queued = service.enqueue('crm-legacy', [event.id]);
-    for (let i = 0; i < 40 && db.getDraftJob(queued!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 40 && db.getDraftJob(queued[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const batch = db.listDraftBatches('crm-legacy')[0];
     const followup = batch.items!.find((item) => item.type === 'followup')!;
     // 关联到同名售后客户的 _id，而不是 AccountObj 老客户自身的 id。
@@ -581,7 +722,7 @@ test('workbench: followup drafts bind the after-sales object for legacy AccountO
       title: '孤儿沟通', occurredAt: '2026-08-25T06:00:00Z',
       payload: { recordingId: 'r11', speaker: 'CSM', transcript: '一次无法归属对象的沟通' }, attributionStatus: 'confirmed' });
     const queued2 = service.enqueue('crm-orphan', [event2.id]);
-    for (let i = 0; i < 40 && db.getDraftJob(queued2!.jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 40 && db.getDraftJob(queued[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const batch2 = db.listDraftBatches('crm-orphan')[0];
     const followup2 = batch2.items!.find((item) => item.type === 'followup')!;
     assert.ok(followup2.validationErrors.some((message) => message.includes('object_Umwnn__c')));
@@ -641,7 +782,7 @@ test('workbench: ONES work-item drafts carry minimal required arguments with opt
     const mcp = fakeOnesMcp();
     const service = new HemoryDraftService(db, mcp);
     const queued = service.enqueue('crm-o', [event.id]);
-    await waitDraftJob(db, queued!.jobId);
+    await waitDraftJob(db, queued[0].jobId);
     const batch = db.listDraftBatches('crm-o')[0];
     const suggestion = batch.items!.find((item) => item.type === 'suggestion')!;
     // 最小必填参数集：项目/类型/标题/客户字段/描述（Hemory 摘要）。
@@ -683,7 +824,7 @@ test('workbench: ONES drafts fall back to same-name after-sales customer option 
     const mcp = fakeOnesMcp({ requiredExtra: [{ uuid: 'extra-1', name: '严重程度' }] });
     const service = new HemoryDraftService(db, mcp);
     const queued = service.enqueue('crm-legacy-o', [event.id]);
-    await waitDraftJob(db, queued!.jobId);
+    await waitDraftJob(db, queued[0].jobId);
     const batch = db.listDraftBatches('crm-legacy-o')[0];
     const ticket = batch.items!.find((item) => item.type === 'ticket')!;
     // 同名回退：fieldValues 使用同名售后客户的 option。
@@ -698,7 +839,7 @@ test('workbench: ONES drafts fall back to same-name after-sales customer option 
       title: '另一个需求', occurredAt: '2026-08-25T06:00:00Z',
       payload: { recordingId: 'r22', speaker: 'CSM', transcript: '客户提出了新功能需求' }, attributionStatus: 'confirmed' });
     const queued2 = service.enqueue('crm-no-opt', [event2.id]);
-    await waitDraftJob(db, queued2!.jobId);
+    await waitDraftJob(db, queued[0].jobId);
     const batch2 = db.listDraftBatches('crm-no-opt')[0];
     const suggestion2 = batch2.items!.find((item) => item.type === 'suggestion')!;
     assert.ok(suggestion2.validationErrors.some((message) => /客户缺少已确认的 ONES 客户信息 option ID（.*请刷新客户同步.*）/.test(message)));

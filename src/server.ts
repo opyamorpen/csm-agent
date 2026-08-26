@@ -325,10 +325,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             byCustomer.set(event.customerId, ids);
           }
           for (const id of new Set([...previousCustomers, ...byCustomer.keys()])) workbench.sync.recompute(id);
-          const jobs = [...byCustomer].flatMap(([id, ids]) => {
-            const job = workbench.drafts.enqueue(id, ids);
-            return job ? [job] : [];
-          });
+          const jobs = [...byCustomer].flatMap(([id, ids]) => workbench.drafts.enqueue(id, ids));
           return json(res, 200, { events, jobs });
         } catch (error) {
           return json(res, 409, { error: (error as Error).message });
@@ -442,7 +439,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/regenerate') {
-          try { return json(res, 200, workbench.drafts.regenerate(batchId)); }
+          try { return json(res, 200, { jobs: workbench.drafts.regenerate(batchId) }); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/confirm') {

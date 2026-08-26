@@ -3,10 +3,11 @@ import type { Runtime } from '../bootstrap.js';
 import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
+import { shanghaiDateKey } from './sync.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
-export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v1';
+export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v2-day-merge';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
@@ -143,6 +144,7 @@ export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, custo
       { key: 'target', label: '目标对象', value: 'CRM / 销售记录（跟进）' },
       { key: 'customer', label: '关联客户', value: bound ? `${String(bound.name ?? '')}（${String(bound.id ?? '')}）` : '未绑定 CRM 售后客户' },
       { key: 'title', label: '标题', value: item.title },
+      { key: 'summary', label: '当日一句话', value: unknown(String(item.fields?.one_line_summary ?? '')) },
       { key: 'content', label: '跟进内容', value: String(objectData?.active_record_content ?? item.summary) },
     ];
   }
@@ -188,26 +190,35 @@ export function classifyDraftTypes(events: SourceEvent[]): DraftItemType[] {
 function defaultProposal(type: DraftItemType, customer: Customer, events: SourceEvent[]): DraftProposal {
   const quote = events.map(textOf).join('；').slice(0, 1200);
   const first = events[0];
+  const dateKey = events.length ? shanghaiEventDate(events[0]) : shanghaiDateKey();
   const base = { evidence_quotes: events.map(textOf), occurred_at: first?.occurredAt ?? new Date().toISOString() };
+  const topics = events.map((event) => event.title);
+  const speakers = [...new Set(events.flatMap((event) => (Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : []).filter(Boolean)))];
   if (type === 'internal_todo') return { type, title: first?.title.slice(0, 100) || `跟进 ${customer.name}`,
     summary: quote, fields: { ...base, owner: 'unknown', due_at: 'unknown', expected_outcome: 'unknown' }, unknowns: ['负责人', '截止时间'] };
-  if (type === 'workhour') return { type, title: `${customer.name}客户沟通工时`, summary: quote,
-    fields: { ...base, hours: 'unknown', description: quote }, unknowns: ['工时时长'] };
+  if (type === 'workhour') return { type, title: `${customer.name} ${dateKey} 客户沟通工时`, summary: quote,
+    fields: { ...base, hours: 'unknown', description: quote, date_key: dateKey }, unknowns: ['工时时长'] };
   if (type === 'suggestion') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户需求`, summary: quote,
     fields: { ...base, description: quote }, unknowns: [] };
   if (type === 'ticket') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户工单`, summary: quote,
     fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
   if (type === 'operations') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户运维事项`, summary: quote,
     fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
-  return { type, title: `${customer.name}沟通记录`, summary: quote,
-    fields: { ...base, method: '会议', participants: [...new Set(events.map((event) => String(event.payload?.speaker ?? '')).filter(Boolean))],
-      key_topics: events.map((event) => event.title), next_steps: 'unknown' }, unknowns: ['下一步计划'] };
+  // followup：天粒度合并——全天片段按【话题】分节汇总，标题带日期。
+  return { type, title: `${customer.name} ${dateKey} 沟通记录`,
+    summary: events.map((event) => `【${event.title}】\n${textOf(event)}`).join('\n\n').slice(0, 3000),
+    fields: { ...base, date_key: dateKey, method: '会议', participants: speakers, key_topics: topics,
+      one_line_summary: `与${customer.name}就${topics.slice(0, 3).join('、')}等进行沟通`, next_steps: 'unknown' }, unknowns: ['下一步计划'] };
 }
 
-async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[]): Promise<DraftProposal[]> {
+async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[]): Promise<DraftProposal[]> {
+  const unpublished = new Set(unpublishedEvents.map((event) => event.id));
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
+    published: !unpublished.has(event.id),
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [], text: textOf(event) }));
-  const prompt = `为客户沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations；同一类型可以输出多条草稿，但每条必须对应独立的话题或行动；只返回有证据支持的草稿。\n`
+  const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
+    + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段，按话题分节汇总全天沟通；其 fields 必须包含 one_line_summary（一句话总结当天沟通）。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
+    + `workhour 不必输出（系统按录音时长自动计算并连带生成）。其他类型同一类型可以输出多条草稿，但每条必须对应独立的话题或行动；只返回有证据支持的草稿。\n`
     + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns。\n`
     + `只输出 JSON：{"drafts":[{"type":"...","title":"...","summary":"...","fields":{},"evidence_refs":["..."],"unknowns":[]}]}。\n`
     + `客户：${customer.name}（CRM ${customer.id}）\n证据：${JSON.stringify(evidence)}`;
@@ -230,13 +241,45 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
   });
 }
 
-export function draftFingerprint(customerId: string, events: SourceEvent[]): string {
+/** 片段所属上海自然日；occurred_at 无效时按当前日期兜底。 */
+export function shanghaiEventDate(event: SourceEvent): string {
+  const at = new Date(event.occurredAt);
+  return shanghaiDateKey(Number.isNaN(at.getTime()) ? new Date() : at);
+}
+
+/** 天粒度指纹：同客户同日同片段集合（含内容 hash）复用同一批次，新增/变化片段自然换指纹重建。 */
+export function draftFingerprint(customerId: string, dateKey: string, events: SourceEvent[]): string {
   const sources = [...events].sort((a, b) => a.id.localeCompare(b.id)).map((event) => `${event.id}:${event.payloadHash}`);
-  return hash(`${DRAFT_GENERATION_VERSION}:${customerId}:${sources.join('|')}`);
+  return hash(`${DRAFT_GENERATION_VERSION}:${customerId}:${dateKey}:${sources.join('|')}`);
 }
 
 export function sortedDraftEvents(events: SourceEvent[]): SourceEvent[] {
   return [...events].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * 从片段自带的录音时间计算当天沟通工时：按录音聚合该客户片段的首尾时刻求跨度，跨录音求和（小时，1 位小数）。
+ * 任一录音缺 recordingId/时间数据或跨度为零时返回 null，交由“请补充工时时长”校验路径人工处理。
+ */
+export function computeWorkhours(events: SourceEvent[]): number | null {
+  const spans = new Map<string, { start: number; end: number }>();
+  for (const event of events) {
+    const recordingId = String(event.payload?.recordingId ?? '');
+    if (!recordingId) return null;
+    const start = new Date(String(event.payload?.startAt ?? event.occurredAt)).getTime();
+    const end = new Date(String(event.payload?.endAt ?? event.occurredAt)).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    const current = spans.get(recordingId);
+    spans.set(recordingId, current ? { start: Math.min(current.start, start), end: Math.max(current.end, end) } : { start, end });
+  }
+  if (!spans.size) return null;
+  let total = 0;
+  for (const span of spans.values()) {
+    if (span.end <= span.start) return null;
+    total += span.end - span.start;
+  }
+  const hours = Math.round((total / 3_600_000) * 10) / 10;
+  return hours > 0 ? hours : null;
 }
 
 export class HemoryDraftService {
@@ -244,18 +287,26 @@ export class HemoryDraftService {
 
   constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpHub, private readonly runtime?: Runtime) {}
 
-  enqueue(customerId: string, eventIds: string[]): { jobId: string; fingerprint: string } | null {
+  /** 按客户 + 上海自然日入队：跨天归属每天一个批次；返回当天（各天）的生成任务。 */
+  enqueue(customerId: string, eventIds: string[]): Array<{ jobId: string; fingerprint: string }> {
     const events = this.confirmedSegments(customerId, eventIds);
-    if (!events.length) return null;
-    return this.generate(customerId, events, false);
+    if (!events.length) return [];
+    const days = [...new Set(events.map((event) => shanghaiEventDate(event)))];
+    return days.map((dateKey) => this.generateForDay(customerId, dateKey, false))
+      .filter((job): job is { jobId: string; fingerprint: string } => !!job);
   }
 
-  regenerate(batchId: string): { jobId: string; fingerprint: string } {
+  regenerate(batchId: string): Array<{ jobId: string; fingerprint: string }> {
     const batch = this.db.getDraftBatch(batchId);
     if (!batch) throw new Error('draft batch not found');
-    const events = this.confirmedSegments(batch.customerId, batch.sourceEventIds);
-    if (!events.length) throw new Error('批次没有仍归属于该客户的 Hemory 片段');
-    return this.generate(batch.customerId, events, true);
+    const days = new Set<string>();
+    for (const id of batch.sourceEventIds) {
+      const event = this.db.getSourceEvent(id);
+      if (event && event.customerId === batch.customerId) days.add(shanghaiEventDate(event));
+    }
+    if (!days.size) throw new Error('批次没有仍归属于该客户的 Hemory 片段');
+    return [...days].map((dateKey) => this.generateForDay(batch.customerId, dateKey, true))
+      .filter((job): job is { jobId: string; fingerprint: string } => !!job);
   }
 
   private confirmedSegments(customerId: string, eventIds: string[]): SourceEvent[] {
@@ -265,23 +316,14 @@ export class HemoryDraftService {
       && event.sourceSystem === 'hemory' && event.sourceType === 'ai_topic_segment' && this.db.isHemoryFragmentActive(event.id));
   }
 
-  // 同一录音的片段应进入同一批次，避免分次归属把一场会议拆成多条跟进记录。
-  private expandToRecordings(customerId: string, attributed: SourceEvent[]): SourceEvent[] {
-    const recordingIds = new Set(attributed.map((event) => String(event.payload?.recordingId ?? '')).filter(Boolean));
-    if (!recordingIds.size) return sortedDraftEvents(attributed);
-    const expanded = new Map(attributed.map((event) => [event.id, event]));
-    for (const event of this.db.listConfirmedHemorySegments(customerId)) {
-      if (recordingIds.has(String(event.payload?.recordingId ?? ''))) expanded.set(event.id, event);
-    }
-    return sortedDraftEvents([...expanded.values()]);
-  }
-
-  private generate(customerId: string, attributed: SourceEvent[], force: boolean): { jobId: string; fingerprint: string } {
-    const events = this.expandToRecordings(customerId, attributed);
-    const fingerprint = draftFingerprint(customerId, events);
+  // 天粒度批次：同客户同日一条合并沟通记录 + 一条连带工时；旧录音级批次会被同日重建自然取代。
+  private generateForDay(customerId: string, dateKey: string, force: boolean): { jobId: string; fingerprint: string } | null {
+    const events = this.db.listConfirmedHemorySegmentsForDay(customerId, dateKey);
+    if (!events.length) return null;
+    const fingerprint = draftFingerprint(customerId, dateKey, events);
     const existing = this.db.findDraftBatchByFingerprint(fingerprint);
     if (existing && !force && existing.status !== 'stale') {
-      // 同一批片段已有可用批次时保持幂等，直接复用原任务；只有批次已作废才需要换盐重新生成。
+      // 同一天片段集合已有可用批次时保持幂等，直接复用原任务；只有批次已作废才需要换盐重新生成。
       return { jobId: this.db.findDraftJobByFingerprint(fingerprint)?.id ?? '', fingerprint };
     }
     this.db.markDraftsStaleForEvents(events.map((event) => event.id));
@@ -310,40 +352,97 @@ export class HemoryDraftService {
     try {
       const customer = this.db.getCustomer(job.customerId);
       if (!customer) throw new Error('customer not found');
-      const events = job.sourceEventIds.map((id) => this.db.getSourceEvent(id)).filter((event): event is SourceEvent => !!event && event.customerId === customer.id);
+      const seeded = job.sourceEventIds.map((id) => this.db.getSourceEvent(id))
+        .filter((event): event is SourceEvent => !!event && event.customerId === customer.id);
+      if (!seeded.length) throw new Error('没有仍归属于该客户的 Hemory 片段');
+      // 以任务种子推导上海日后取当天全部已确认活跃片段：任务排队期间新归属的同日片段也会并入。
+      const dateKey = shanghaiEventDate(seeded[0]);
+      const events = this.db.listConfirmedHemorySegmentsForDay(customer.id, dateKey);
       if (!events.length) throw new Error('没有仍归属于该客户的 Hemory 片段');
+      // 发布豁免：当天已写入 CRM 的沟通（工作台确认的草稿或 CRM 已有跟进记录）之后才算新沟通。
+      const cutoff = this.db.followupPublishedCutoff(customer.id, dateKey);
+      const followupEvents = cutoff
+        ? events.filter((event) => new Date(event.occurredAt).getTime() > new Date(cutoff).getTime())
+        : events;
       let ai: DraftProposal[] = [];
       let generator = 'rules';
       if (this.runtime) {
-        try { ai = await proposeWithModel(this.runtime, customer, events); generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`; }
+        try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents); generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`; }
         catch (error) { generator = `rules-fallback: ${(error as Error).message}`.slice(0, 160); }
       }
-      const seen = new Set<string>();
-      const proposals = ai.filter((proposal) => {
-        const key = `${proposal.type}::${proposal.title}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      }).slice(0, MAX_DRAFT_ITEMS);
-      const covered = new Set(proposals.map((proposal) => proposal.type));
-      for (const type of classifyDraftTypes(events)) {
-        if (covered.has(type) || proposals.length >= MAX_DRAFT_ITEMS) continue;
-        proposals.push(defaultProposal(type, customer, events));
-        covered.add(type);
-      }
+      const proposals = this.buildProposals(ai, customer, events, followupEvents, dateKey);
       const batch = this.db.createDraftBatch({ customerId: customer.id, fingerprint: job.fingerprint,
         sourceEventIds: events.map((event) => event.id), generationVersion: DRAFT_GENERATION_VERSION, generator });
+      // 同客户同日只保留一个活跃批次：临创建前作废包含当天片段的其他批次（含并发任务先建者），已写入项不受影响。
+      this.db.markDraftsStaleForEvents(events.map((event) => event.id), batch.id);
       if (!batch.items?.length) {
         for (const proposal of proposals) this.createItem(batch, customer, events, proposal);
       }
       this.db.refreshDraftBatchStatus(batch.id);
       this.db.updateDraftJob(jobId, 'succeeded');
-      this.db.audit('agent', 'generate_hemory_drafts', 'draft_batch', batch.id, { customerId: customer.id, sourceEventIds: batch.sourceEventIds, generator });
+      this.db.audit('agent', 'generate_hemory_drafts', 'draft_batch', batch.id, { customerId: customer.id, sourceEventIds: batch.sourceEventIds, generator, dateKey, followupEventIds: followupEvents.map((event) => event.id) });
     } catch (error) {
       this.db.updateDraftJob(jobId, 'failed', (error as Error).message);
     } finally {
       this.processing.delete(jobId);
     }
+  }
+
+  /**
+   * 最终提案集合：followup 恒为一条（合并当天全部未发布沟通），有 followup 就连带一条 workhour（录音时长 + 一句话描述）；
+   * 其余类型沿用 LLM 提案与关键词兜底，可多条。
+   */
+  private buildProposals(ai: DraftProposal[], customer: Customer, events: SourceEvent[], followupEvents: SourceEvent[], dateKey: string): DraftProposal[] {
+    const proposals: DraftProposal[] = [];
+    if (followupEvents.length) {
+      const followup = this.mergedFollowupProposal(ai, customer, followupEvents, dateKey);
+      proposals.push(followup, this.workhourProposal(customer, followupEvents, dateKey, followup));
+    }
+    const seen = new Set<string>();
+    for (const proposal of ai) {
+      if (proposal.type === 'followup' || proposal.type === 'workhour') continue; // 这两类结构化生成，不信任模型多条输出
+      const key = `${proposal.type}::${proposal.title}`;
+      if (seen.has(key) || proposals.length >= MAX_DRAFT_ITEMS) continue;
+      seen.add(key);
+      proposals.push(proposal);
+    }
+    const covered = new Set(proposals.map((proposal) => proposal.type));
+    for (const type of classifyDraftTypes(events)) {
+      if (type === 'followup' || type === 'workhour') continue;
+      if (covered.has(type) || proposals.length >= MAX_DRAFT_ITEMS) continue;
+      proposals.push(defaultProposal(type, customer, events));
+      covered.add(type);
+    }
+    return proposals;
+  }
+
+  private mergedFollowupProposal(ai: DraftProposal[], customer: Customer, followupEvents: SourceEvent[], dateKey: string): DraftProposal {
+    const ids = new Set(followupEvents.map((event) => event.id));
+    // 只采信证据仍落在未发布范围内的 LLM 提案，已发布内容绝不重复汇总。
+    const valid = ai.filter((proposal) => proposal.type === 'followup'
+      && (proposal.evidenceRefs ?? []).some((id) => ids.has(id)));
+    const oneLine = valid.map((proposal) => String(proposal.fields?.one_line_summary ?? '')).find(Boolean)
+      ?? `与${customer.name}就${followupEvents.map((event) => event.title).slice(0, 3).join('、')}等进行沟通`;
+    // 每个片段一节：优先用 LLM 对该片段的摘要，无命中时回退片段原文，保证全天覆盖无遗漏。
+    const sections = followupEvents.map((event) => {
+      const own = valid.find((proposal) => (proposal.evidenceRefs ?? []).includes(event.id));
+      return `【${event.title}】\n${own ? own.summary : textOf(event)}`;
+    });
+    const speakers = [...new Set(followupEvents.flatMap((event) =>
+      (Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : []).filter(Boolean)))];
+    return { type: 'followup', title: `${customer.name} ${dateKey} 沟通记录`, summary: sections.join('\n\n').slice(0, 3000),
+      fields: { date_key: dateKey, method: '会议', participants: speakers,
+        key_topics: followupEvents.map((event) => event.title), one_line_summary: oneLine, next_steps: 'unknown' },
+      evidenceRefs: followupEvents.map((event) => event.id), unknowns: ['下一步计划'] };
+  }
+
+  private workhourProposal(customer: Customer, followupEvents: SourceEvent[], dateKey: string, followup: DraftProposal): DraftProposal {
+    const hours = computeWorkhours(followupEvents);
+    const description = String(followup.fields?.one_line_summary ?? followup.summary).slice(0, 300);
+    return { type: 'workhour', title: `${customer.name} ${dateKey} 客户沟通工时`, summary: description,
+      fields: { date_key: dateKey, hours: hours == null ? 'unknown' : hours, description },
+      evidenceRefs: followupEvents.map((event) => event.id),
+      unknowns: hours == null ? ['工时时长（录音时间缺失，请人工补充）'] : [] };
   }
 
   private createItem(batch: DraftBatch, customer: Customer, events: SourceEvent[], proposal: DraftProposal): DraftItem {
@@ -399,12 +498,14 @@ export class HemoryDraftService {
         if (matches.length === 1) afterSales = { id: matches[0].id, name: matches[0].name };
       }
       if (!afterSales) validationErrors.push('客户未解析到 CRM 售后客户（object_Umwnn__c）记录，无法绑定跟进关联');
-      // ActiveRecordObj 必填：服务开始/结束时间、渠道（线上）、关联业务对象、跟进类型（常规客情维护）。
-      const occurredAt = String(fields.occurred_at ?? events[0]?.occurredAt ?? new Date().toISOString());
+      // ActiveRecordObj 必填：服务开始/结束时间（覆盖片段首尾时刻）、渠道（线上）、关联业务对象、跟进类型（常规客情维护）。
+      const times = events.map((event) => new Date(event.occurredAt).getTime()).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+      const startAt = times.length ? new Date(times[0]).toISOString() : new Date().toISOString();
+      const endAt = times.length ? new Date(times.at(-1)!).toISOString() : startAt;
       const objectData: Record<string, unknown> = {
         active_record_content: `${proposal.title}\n${proposal.summary}`,
-        field_oUaZx__c: occurredAt,
-        field_wYlhw__c: occurredAt,
+        field_oUaZx__c: startAt,
+        field_wYlhw__c: endAt,
         field_MIe19__c: 'option1',
         related_api_names: [CRM_AFTER_SALES_OBJECT],
         active_record_type: '1cbaf4b4110c4a9d836867492e833d9e',
@@ -420,9 +521,11 @@ export class HemoryDraftService {
       if (!manhour) validationErrors.push('客户未绑定“客户工时管理 / 售后客户”工作项');
       if (!tool) validationErrors.push('未找到 ONES 工时登记写工具');
       if (fields.hours === 'unknown' || fields.hours == null) validationErrors.push('请补充工时时长');
+      // 日期用上海自然日：occurred_at 前缀是 UTC，上海 0-8 点的会议会错到前一天。
+      const dateKey = String(fields.date_key ?? (events.length ? shanghaiEventDate(events[0]) : shanghaiDateKey()));
       return { system: 'ones' as const, object: '客户工时管理 / 售后客户', tool,
-        arguments: { issueID: manhour?.externalId ?? '', hours: fields.hours, description: proposal.summary,
-          date: String(events[0]?.occurredAt ?? '').slice(0, 10) }, validationErrors };
+        arguments: { issueID: manhour?.externalId ?? '', hours: fields.hours,
+          description: String(fields.description ?? proposal.summary), date: dateKey }, validationErrors };
     }
     const deskType = onesDeskTypeId(type);
     if (!deskType) throw new Error(`未知的草稿目标类型: ${type}`);

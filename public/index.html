@@ -191,6 +191,18 @@
     </div>
   </div>
 
+  <!-- 页面内对话框：Mac 壳 WKWebView 未实现原生 JS 对话框面板，confirm/alert/prompt 会静默失败，一律走这里。 -->
+  <div id="appDialog" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-box app-dialog-box">
+      <pre id="appDialogMessage"></pre>
+      <input id="appDialogInput" class="app-dialog-input hidden" type="text" autocomplete="off">
+      <div class="modal-actions">
+        <button id="appDialogCancel" class="ghost" type="button">取消</button>
+        <button id="appDialogOk" class="primary" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>

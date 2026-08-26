@@ -76,6 +76,22 @@ test('customer detail tabs drop meetings and followups list CRM sales records by
   assert.doesNotMatch(renderer, /nextAction/);
 });
 
+test('app dialogs replace native confirm/alert/prompt for WKWebView compatibility', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // Mac 壳 WKWebView 未实现原生 JS 对话框面板，confirm/alert/prompt 会静默失败（曾导致草稿确认无反应）。
+  // 显示契约：全部交互走页面内对话框，禁止直接调用原生版本。
+  assert.doesNotMatch(source, /[^a-zA-Z.](confirm|alert|prompt)\(/, 'app.js 不得直接调用原生 confirm/alert/prompt');
+  assert.match(source, /const confirmDialog = \(message\) => showAppDialog/);
+  assert.match(source, /const alertDialog = \(message\) => showAppDialog/);
+  assert.match(source, /const promptDialog = \(message, defaultValue = ''\) => showAppDialog/);
+  assert.match(source, /await confirmDialog\(`确认逐项执行 \$\{preview\.items\.length\} 份草稿/);
+  // 对话框 DOM 与输入框都在 index.html 内静态存在。
+  assert.match(html, /id="appDialog"/);
+  assert.match(html, /id="appDialogInput"/);
+});
+
 test('hemory inbox exposes ignore and restore actions with incremental sync', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');

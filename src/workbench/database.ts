@@ -692,6 +692,47 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
   }
 
+  /** 客户在某上海自然日的全部已确认活跃片段；occurred_at 混有 +08:00/Z 格式，必须 datetime() 归一化。 */
+  listConfirmedHemorySegmentsForDay(customerId: string, date: string): SourceEvent[] {
+    const range = shanghaiDayRange(date);
+    return this.listConfirmedHemorySegments(customerId)
+      .filter((event) => {
+        const at = new Date(event.occurredAt);
+        return at.getTime() >= new Date(range.start).getTime() && at.getTime() <= new Date(range.end).getTime();
+      });
+  }
+
+  /**
+   * 每日沟通记录的“已发布”信号：当天已 written 的 followup 草稿引用的证据事件、
+   * 以及本地同步到的 CRM 跟进记录（含手动录入）事件 occurredAt 的最大值。
+   * 返回 null 表示当天无已发布记录；调用方以此作为豁免截断点。
+   */
+  followupPublishedCutoff(customerId: string, date: string): string | null {
+    const range = shanghaiDayRange(date);
+    const inRange = (value: string) => {
+      const at = new Date(value).getTime();
+      return at >= new Date(range.start).getTime() && at <= new Date(range.end).getTime();
+    };
+    let cutoff: number | null = null;
+    const touch = (value: string) => {
+      if (!inRange(value)) return;
+      const at = new Date(value).getTime();
+      if (cutoff == null || at > cutoff) cutoff = at;
+    };
+    for (const row of this.db.prepare(`SELECT di.evidence_refs_json FROM draft_items di
+        WHERE di.customer_id=? AND di.type='followup' AND di.status='written'`).all(customerId) as Row[]) {
+      for (const eventId of parseJson<string[]>(row.evidence_refs_json, [])) {
+        const event = this.getSourceEvent(eventId);
+        if (event?.customerId === customerId && event.sourceSystem === 'hemory') touch(event.occurredAt);
+      }
+    }
+    for (const row of this.db.prepare(`SELECT occurred_at FROM source_events
+        WHERE customer_id=? AND source_system='crm' AND source_type='crm_followup'`).all(customerId) as Row[]) {
+      touch(String(row.occurred_at));
+    }
+    return cutoff == null ? null : new Date(cutoff).toISOString();
+  }
+
   findDraftBatchByFingerprint(fingerprint: string): DraftBatch | undefined {
     const row = this.db.prepare('SELECT * FROM draft_batches WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     return row ? { ...draftBatchFromRow(row), items: this.listDraftItems(String(row.id)) } : undefined;
@@ -1137,9 +1178,10 @@ export class WorkbenchDatabase {
     return item;
   }
 
-  markDraftsStaleForEvents(eventIds: string[]): void {
+  markDraftsStaleForEvents(eventIds: string[], keepBatchId?: string): void {
     const wanted = new Set(eventIds);
     for (const row of this.db.prepare('SELECT id,source_event_ids_json FROM draft_batches').all() as Row[]) {
+      if (keepBatchId && String(row.id) === keepBatchId) continue;
       if (!parseJson<string[]>(row.source_event_ids_json, []).some((id) => wanted.has(id))) continue;
       this.db.prepare("UPDATE draft_items SET status='stale',updated_at=? WHERE batch_id=? AND status NOT IN ('written','dismissed')")
         .run(nowIso(), String(row.id));

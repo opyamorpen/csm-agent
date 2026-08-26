@@ -108,6 +108,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return nil
     }
 
+    // Without these panels window.confirm()/alert()/prompt() silently fail
+    // (confirm returns false, alert shows nothing), which broke draft confirmation.
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "CSM Agent"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "CSM Agent"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "取消")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "CSM Agent"
+        alert.informativeText = prompt
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "取消")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.stringValue = defaultText ?? ""
+        alert.accessoryView = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            completionHandler(input.stringValue)
+        } else {
+            completionHandler(nil)
+        }
+    }
+
     // Retry until the Node server is up (it takes a moment to boot).
     func webView(_ webView: WKWebView,
                  didFailProvisionalNavigation navigation: WKNavigation?,

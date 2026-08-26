@@ -586,6 +586,12 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .source-link { display: inline-block; margin-top: 4px; color: #2457c5; font-size: 12px; }
 
 .workbench-modal-box { width: min(820px, 100%); }
+.app-dialog-box { width: min(460px, 100%); }
+#appDialogMessage { margin: 0 0 14px; max-height: 50vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--text); }
+.app-dialog-input { width: 100%; min-height: 36px; margin: 0 0 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; color: var(--text); font: inherit; }
+.app-dialog-input:focus { outline: 2px solid #b9cdf8; border-color: #507edc; }
+.app-dialog-input.hidden { display: none; }
+.app-dialog-box .modal-actions { justify-content: flex-end; }
 .form-field { display: block; margin-bottom: 12px; }
 .form-field > span { display: block; margin-bottom: 4px; color: #566170; font-size: 12px; }
 .form-field input, .form-field textarea { width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; color: var(--text); font: inherit; }

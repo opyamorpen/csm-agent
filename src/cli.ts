@@ -481,10 +481,10 @@ async function reviewDraftBatch(batchId: string): Promise<void> {
   } finally { rl.close(); }
 }
 
-async function waitForRegeneratedBatch(customerId: string, fingerprint: string): Promise<any | null> {
+async function waitForRegeneratedBatch(customerId: string, fingerprints: string[]): Promise<any | null> {
   for (let i = 0; i < 30; i++) {
     const body = await request<any>(`/api/draft-batches?customer_id=${encodeURIComponent(customerId)}`);
-    const batch = (body.batches ?? []).find((item: any) => item.fingerprint === fingerprint);
+    const batch = (body.batches ?? []).find((item: any) => fingerprints.includes(item.fingerprint));
     if (batch) return batch;
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -493,17 +493,24 @@ async function waitForRegeneratedBatch(customerId: string, fingerprint: string):
 
 async function regenerateDraftBatch(batchId: string): Promise<void> {
   const original = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}`);
-  const job = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}/regenerate`, { method: 'POST' });
-  if (jsonOutput) return print({ job, supersededBatchId: original.id, customerId: original.customerId });
-  console.log(`已提交重新生成任务 ${job.jobId}（旧批次 ${original.id} 的未写入草稿已作废），等待新批次生成…`);
-  const batch = await waitForRegeneratedBatch(original.customerId, job.fingerprint);
-  if (!batch) {
-    console.log('60 秒内未生成新批次，可稍后运行 csm-agent drafts 查看。');
-    return print(job);
+  // 批次已按客户+上海日组织；跨天批次重生成会按天各建一个新批次，逐个等待。
+  const { jobs } = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}/regenerate`, { method: 'POST' });
+  if (jsonOutput) return print({ jobs, supersededBatchId: original.id, customerId: original.customerId });
+  console.log(`已提交 ${jobs.length} 个重新生成任务（旧批次 ${original.id} 的未写入草稿已作废），等待新批次生成…`);
+  const fingerprints: string[] = jobs.map((job: any) => job.fingerprint);
+  const printed = new Set<string>();
+  for (const fingerprint of fingerprints) {
+    const batch = await waitForRegeneratedBatch(original.customerId, [fingerprint]);
+    if (!batch) {
+      console.log(`任务 ${fingerprint} 60 秒内未生成新批次，可稍后运行 csm-agent drafts 查看。`);
+      continue;
+    }
+    if (printed.has(batch.id)) continue;
+    printed.add(batch.id);
+    console.log(`新批次 ${batch.id} 已生成（${batch.items?.length ?? 0} 条草稿）：`);
+    console.table((batch.items ?? []).map((item: any) => ({ type: item.type, status: item.status, title: item.title })));
+    console.log(`下一步：csm-agent draft review ${batch.id}`);
   }
-  console.log(`新批次 ${batch.id} 已生成（${batch.items?.length ?? 0} 条草稿）：`);
-  console.table((batch.items ?? []).map((item: any) => ({ type: item.type, status: item.status, title: item.title })));
-  console.log(`下一步：csm-agent draft review ${batch.id}`);
 }
 
 async function draftCommand(subcommand: string, values: string[]): Promise<void> {

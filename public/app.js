@@ -172,6 +172,36 @@
   workbenchModalClose.onclick = closeWorkbenchModal;
   workbenchModal.onclick = (event) => { if (event.target === workbenchModal) closeWorkbenchModal(); };
 
+  // 页面内对话框：Mac 壳的 WKWebView 未实现原生 JS 对话框面板，confirm/alert/prompt 会静默失败，禁止直接调用原生版本。
+  const appDialog = document.getElementById('appDialog');
+  const appDialogMessage = document.getElementById('appDialogMessage');
+  const appDialogInput = document.getElementById('appDialogInput');
+  const appDialogOk = document.getElementById('appDialogOk');
+  const appDialogCancel = document.getElementById('appDialogCancel');
+
+  function showAppDialog({ message, okText = '确定', cancelText = '取消', withInput = false, defaultValue = '' }) {
+    return new Promise((resolve) => {
+      appDialogMessage.textContent = message;
+      appDialogInput.classList.toggle('hidden', !withInput);
+      if (withInput) { appDialogInput.value = defaultValue; }
+      appDialogOk.textContent = okText;
+      appDialogCancel.textContent = cancelText;
+      appDialog.classList.remove('hidden');
+      const done = (value) => { appDialog.classList.add('hidden'); appDialogOk.onclick = null; appDialogCancel.onclick = null; appDialogInput.onkeydown = null; appDialog.onclick = null; resolve(value); };
+      appDialogOk.onclick = () => done(withInput ? appDialogInput.value : true);
+      appDialogCancel.onclick = () => done(withInput ? null : false);
+      appDialog.onclick = (event) => { if (event.target === appDialog) done(withInput ? null : false); };
+      if (withInput) {
+        appDialogInput.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); done(appDialogInput.value); } };
+        appDialogInput.focus();
+      } else appDialogOk.focus();
+    });
+  }
+
+  const confirmDialog = (message) => showAppDialog({ message, cancelText: '取消' });
+  const alertDialog = (message) => showAppDialog({ message, cancelText: '关闭' });
+  const promptDialog = (message, defaultValue = '') => showAppDialog({ message, withInput: true, defaultValue });
+
   // ── chat rendering ─────────────────────────────────────────────
 
   function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); }
@@ -380,7 +410,7 @@
   }
 
   async function renameSession(id, oldTitle) {
-    const title = prompt('会话名称：', oldTitle || '');
+    const title = await promptDialog('会话名称：', oldTitle || '');
     if (title === null || !title.trim()) return;
     await fetch(`/api/sessions/${id}`, {
       method: 'PATCH',
@@ -391,7 +421,7 @@
   }
 
   async function deleteSession(id) {
-    if (!confirm('删除该会话？此操作不可恢复。')) return;
+    if (!await confirmDialog('删除该会话？此操作不可恢复。')) return;
     await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     if (id === sessionId) {
       await newSession();
@@ -727,7 +757,7 @@
           event.preventDefault(); event.stopPropagation();
           try { await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ eventIds: [fragment.id], customerId: null, expectedHashes: { [fragment.id]: fragment.payloadHash } }) }); await loadHemoryInbox(); }
-          catch (error) { alert(error.message); }
+          catch (error) { await alertDialog(error.message); }
         };
         rowActions.append(restore);
       } else {
@@ -735,7 +765,7 @@
         ignore.type = 'button';
         ignore.onclick = async (event) => {
           event.preventDefault(); event.stopPropagation();
-          try { await ignoreHemoryFragments([fragment.id]); } catch (error) { alert(error.message); }
+          try { await ignoreHemoryFragments([fragment.id]); } catch (error) { await alertDialog(error.message); }
         };
         rowActions.append(ignore);
       }
@@ -761,12 +791,12 @@
 
   async function updateHemoryAttribution(clear) {
     const eventIds = selectedHemoryFragments();
-    if (!eventIds.length) return alert('请先选择片段');
+    if (!eventIds.length) return alertDialog('请先选择片段');
     let customerId = null;
     if (!clear) {
       const input = hemoryCustomer.value.trim();
       const customer = customersCache.find((item) => input === `${item.name} (${item.id})` || input === item.id || input === item.name);
-      if (!customer) return alert('请选择一个唯一的 CRM 客户');
+      if (!customer) return alertDialog('请选择一个唯一的 CRM 客户');
       customerId = customer.id;
     }
     const expectedHashes = Object.fromEntries([...hemoryFragmentList.querySelectorAll('input[type="checkbox"]:checked')].map((input) => [input.dataset.eventId, input.dataset.payloadHash]));
@@ -796,24 +826,24 @@
           unknowns: unknowns.input.value.split('\n').map((value) => value.trim()).filter(Boolean), validationErrors: [],
         }) });
         closeWorkbenchModal(); await loadDraftBatches();
-      } catch (error) { alert(error.message); }
+      } catch (error) { await alertDialog(error.message); }
     };
     workbenchModalBody.append(title.field, summary.field, fields.field, tool.field, args.field, unknowns.field, save);
   }
 
   async function confirmDraftBatch(batch, container) {
     const itemIds = [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.itemId);
-    if (!itemIds.length) return alert('请选择要确认的草稿');
+    if (!itemIds.length) return alertDialog('请选择要确认的草稿');
     try {
       const preview = await api(`/api/draft-batches/${batch.id}/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemIds }) });
       const invalid = preview.items.filter((item) => item.validationErrors?.length);
-      if (invalid.length) return alert(invalid.map((item) => `${item.id}: ${item.validationErrors.join('；')}`).join('\n'));
-      if (!confirm(`确认逐项执行 ${preview.items.length} 份草稿？成功项不会因其他项失败而回滚。`)) return;
+      if (invalid.length) return alertDialog(invalid.map((item) => `${item.id}: ${item.validationErrors.join('；')}`).join('\n'));
+      if (!await confirmDialog(`确认逐项执行 ${preview.items.length} 份草稿？成功项不会因其他项失败而回滚。`)) return;
       await api(`/api/draft-batches/${batch.id}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
         items: preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })),
       }) });
       await Promise.all([loadDraftBatches(), loadActions()]);
-    } catch (error) { alert(error.message); }
+    } catch (error) { alertDialog(error.message); }
   }
 
   async function loadDraftBatches() {
@@ -836,9 +866,9 @@
       if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors) {
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.onclick = async () => {
-          if (!confirm('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
+          if (!await confirmDialog('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
           try { await api(`/api/draft-batches/${batch.id}/regenerate`, { method: 'POST' }); await loadDraftBatches(); }
-          catch (error) { alert(error.message); }
+          catch (error) { alertDialog(error.message); }
         };
         head.append(regenerate);
       }
@@ -862,7 +892,7 @@
         if (item.unknowns?.length) body.append(el('div', 'cell-sub', `待确认: ${item.unknowns.join('、')}`));
         const actions = el('div', 'row-actions');
         if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) { const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editableDraft(item); actions.append(edit); }
-        if (item.status === 'failed') { const retry = el('button', 'quiet-command small', '重试'); retry.onclick = async () => { try { await api(`/api/draft-items/${item.id}/retry`, { method: 'POST' }); await loadDraftBatches(); } catch (error) { alert(error.message); } }; actions.append(retry); }
+        if (item.status === 'failed') { const retry = el('button', 'quiet-command small', '重试'); retry.onclick = async () => { try { await api(`/api/draft-items/${item.id}/retry`, { method: 'POST' }); await loadDraftBatches(); } catch (error) { await alertDialog(error.message); } }; actions.append(retry); }
         if (item.result?.actionItemId) { const open = el('button', 'quiet-command small', '打开 Agent 待办'); open.onclick = () => showView('actions'); actions.append(open); }
         body.append(actions); row.append(selector, body); section.append(row);
       }
@@ -889,14 +919,14 @@
   document.getElementById('hemoryClear').onclick = () => void updateHemoryAttribution(true);
   document.getElementById('hemoryIgnore').onclick = async () => {
     const eventIds = selectedHemoryFragments();
-    if (!eventIds.length) return alert('请先选择片段');
-    try { await ignoreHemoryFragments(eventIds); } catch (error) { alert(error.message); }
+    if (!eventIds.length) return alertDialog('请先选择片段');
+    try { await ignoreHemoryFragments(eventIds); } catch (error) { await alertDialog(error.message); }
   };
   document.getElementById('refreshDrafts').onclick = () => void loadDraftBatches();
   document.getElementById('hemorySync').onclick = async () => {
     // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日。
     try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryDate.value || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }
-    catch (error) { alert(error.message); }
+    catch (error) { await alertDialog(error.message); }
   };
 
   // ── customer workbench ─────────────────────────────────────────
@@ -1218,7 +1248,7 @@
 
   function draftCommand(customer, targetKey, timeline, identities) {
     const button = el('button', 'primary-command small', `从会议生成${DRAFT_TARGETS[targetKey].label}草稿`);
-    button.onclick = () => startAgentDraft(customer, targetKey, timeline, identities).catch((error) => alert(error.message));
+    button.onclick = () => startAgentDraft(customer, targetKey, timeline, identities).catch(async (error) => { await alertDialog(error.message); });
     return button;
   }
 
@@ -1241,10 +1271,10 @@
         try {
           const intent = await api(`/api/action-items/${action.id}/wecom-todo-intents`, { method: 'POST' });
           window.open(intent.url, '_blank', 'noopener');
-        } catch (error) { alert(error.message); }
+        } catch (error) { await alertDialog(error.message); }
       };
       const complete = el('button', 'quiet-command small', '完成');
-      complete.onclick = async () => { const outcome = prompt('记录实际结果：', '') || ''; await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }) }); customerMode ? openCustomer(action.customerId) : loadActions(); };
+      complete.onclick = async () => { const outcome = (await promptDialog('记录实际结果：', '')) ?? ''; await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }) }); customerMode ? openCustomer(action.customerId) : loadActions(); };
       buttons.append(wecom, complete);
     }
     card.append(buttons);
@@ -1300,7 +1330,7 @@
     const refresh = el('button', 'quiet-command', '刷新三套系统');
     refresh.onclick = async () => { const run = await api(`/api/customers/${encodeURIComponent(customerId)}/refresh`, { method: 'POST' }); await pollSync(run.id); await openCustomer(customerId); };
     const generate = el('button', 'primary-command', '生成案例草稿');
-    generate.onclick = async () => { try { const draft = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) }); editCase(draft); } catch (error) { alert(error.message); } };
+    generate.onclick = async () => { try { const draft = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) }); editCase(draft); } catch (error) { await alertDialog(error.message); } };
     const ask = el('button', 'quiet-command', '询问 Agent');
     ask.onclick = () => { showView('agent'); inputEl.value = `基于已同步上下文分析「${c.name}」的续约风险、增购机会和下一步行动`; inputEl.focus(); };
     commands.append(refresh, generate, ask); head.append(title, commands); customerOverview.append(head);
@@ -1426,13 +1456,13 @@
     publish.onclick = async () => {
       try {
         draft = await saveDraft();
-        const parentPageID = prompt('ONES 案例库父页面 ID：', '') || '';
+        const parentPageID = (await promptDialog('ONES 案例库父页面 ID：', '')) ?? '';
         if (!parentPageID) return;
         const preview = await api(`/api/case-drafts/${draft.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID }) });
-        if (!confirm(`确认将“${draft.title}”写入 ONES Wiki？\n\n${preview.args.content.slice(0, 800)}`)) return;
+        if (!await confirmDialog(`确认将“${draft.title}”写入 ONES Wiki？\n\n${preview.args.content.slice(0, 800)}`)) return;
         draft = await api(`/api/case-drafts/${draft.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: draft.version, parentPageID, approvalHash: preview.approvalHash }) });
         closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases();
-      } catch (error) { alert(error.message); }
+      } catch (error) { await alertDialog(error.message); }
     };
     actions.append(save, publish);
     workbenchModalBody.append(title.field, background.field, pain.field, solution.field, implementation.field, results.field, quote.field, lessons.field, redaction.field, actions);
