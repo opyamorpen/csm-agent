@@ -14,7 +14,9 @@ const CRM_FIELDS = {
   // 售后客户名称是手填文本字段，常为简称（如「华大九天」），只作次级名称。
   shortName: 'field_83f4l__c',
   industry: 'field_OL1jQ__c',
-  csm: 'field_M1uu5__c',
+  // CSM 负责人 = 售后客户的「负责人」字段（owner，employee，显示值 owner__r/name）；
+  // field_M1uu5__c 是「客户经理」，field_c2pNm__c 是「所属销售」，都不是负责人。
+  csm: 'owner',
   renewalDate: 'field_lh3L2__c',
   contractValue: 'field_d0EqS__c',
   contractValueFallback: 'field_yxgZ1__c',
@@ -262,7 +264,7 @@ export function crmCustomer(record: Record<string, unknown>): Parameters<Workben
     sourceObject: CRM_OBJECT,
     shortName: asText(record[CRM_FIELDS.shortName]),
     industry: asText(record[CRM_FIELDS.industry]),
-    csmName: asText(record[CRM_FIELDS.csm]),
+    csmName: relatedName(record, CRM_FIELDS.csm),
     renewalDate: asDate(record[CRM_FIELDS.renewalDate]),
     contractValue: asNumber(record[CRM_FIELDS.contractValue] ?? record[CRM_FIELDS.contractValueFallback]),
     afterSalesStage: normalizeAfterSalesStage(stage),

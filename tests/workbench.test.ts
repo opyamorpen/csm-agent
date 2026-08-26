@@ -60,6 +60,18 @@ test('workbench: CRM stage is persisted separately from contract lifecycle statu
   assert.equal(fallback?.name, '只有简称');
 });
 
+test('workbench: CRM CSM owner resolves from the owner employee field, not 客户经理/所属销售', () => {
+  const input = crmCustomer({
+    _id: 'crm-owner', field_n1qN0__c__r: '负责人客户集团有限公司',
+    owner: ['1251'], owner__r: { id: '1251', name: '赵荣泽', post: '客户成功经理' },
+    field_M1uu5__c: ['sale-1'], field_M1uu5__c__r: { name: '客户经理甲' },
+    field_c2pNm__c: ['sale-2'], field_c2pNm__c__r: { name: '销售乙' },
+  });
+  // CSM 负责人 = 售后客户的「负责人」（owner，employee 显示值），不是客户经理也不是所属销售。
+  assert.equal(input?.csmName, '赵荣泽');
+  assert.equal(crmCustomer({ _id: 'crm-owner2', field_n1qN0__c__r: '无负责人客户' })?.csmName, null);
+});
+
 test('workbench: CRM followup event binds after-sales customer and keeps record create time', () => {
   const input = crmFollowupEvent({
     _id: 'rec-1', active_record_content: '首次跟进\n沟通了续约意向', active_record_type__r: '常规客情维护',
