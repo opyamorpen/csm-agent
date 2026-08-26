@@ -8,6 +8,8 @@ export interface McpGateway {
   resolve(publicName: string): { server: string; rawName: string } | undefined;
   isWrite(server: string, rawName: string): boolean;
   call(publicName: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+  /** Names of currently connected MCP servers (for unknown-tool diagnostics). */
+  serverNames?(): string[];
 }
 
 export interface AgentEvent {
@@ -108,7 +110,11 @@ export async function runLoop(params: LoopParams): Promise<string> {
       } else {
         const target = mcp.resolve(call.name);
         if (!target) {
-          resultText = `未知工具: ${call.name}`;
+          const connected = mcp.serverNames?.() ?? [];
+          const serverHint = connected.length
+            ? `当前已连接的 MCP 服务器: ${connected.join('、')}。`
+            : '当前没有任何已连接的 MCP 服务器。';
+          resultText = `未知工具: ${call.name}。${serverHint}请从系统提示「可用 MCP 工具」清单中选择真实存在的工具名，不要臆造工具名。`;
           isError = true;
         } else if (mcp.isWrite(target.server, target.rawName)) {
           const actualArgs = (call.arguments ?? {}) as Record<string, unknown>;
@@ -167,6 +173,16 @@ export interface SessionConfig {
   systemPrompt: string;
   localTools?: Record<string, LocalToolHandler>;
   maxIterations?: number;
+  /**
+   * Live runtime access: when present, each send() refreshes the context's
+   * systemPrompt/tools/model before running, so sessions created before an
+   * MCP reconnect or model switch pick up the latest runtime state.
+   */
+  live?: {
+    getSystemPrompt(): string;
+    getTools(): Tool[];
+    getModel(): Model<any>;
+  };
 }
 
 /** A multi-turn agent session that keeps conversation history in its context. */
@@ -183,6 +199,11 @@ export class AgentSession {
 
   /** Append a user message and run the loop. Returns the final assistant text. */
   async send(userInput: string, hooks: AgentHooks): Promise<string> {
+    if (this.cfg.live) {
+      this.context.systemPrompt = this.cfg.live.getSystemPrompt();
+      this.context.tools = this.cfg.live.getTools();
+      this.cfg.model = this.cfg.live.getModel();
+    }
     this.context.messages.push({ role: 'user', content: userInput, timestamp: Date.now() });
     return runLoop({ ...this.cfg, context: this.context, hooks });
   }

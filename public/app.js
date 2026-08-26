@@ -21,6 +21,8 @@
   const llmProvider = document.getElementById('llmProvider');
   const llmModel = document.getElementById('llmModel');
   const llmKey = document.getElementById('llmKey');
+  const searchKey = document.getElementById('searchKey');
+  const searchMaxResults = document.getElementById('searchMaxResults');
 
   const recordModal = document.getElementById('recordModal');
   const recordClose = document.getElementById('recordClose');
@@ -79,6 +81,7 @@
   let customersCache = [];
 
   let sessionId = null;
+  let sessionCustomerId = null;
   let es = null;
   let busy = false;
   let maxSeq = 0;
@@ -396,10 +399,23 @@
 
   async function switchSession(id) {
     sessionId = id;
+    sessionCustomerId = null;
     clearMessages();
     connectEvents(id);
-    renderSessionList(await (await fetch('/api/sessions')).json().then((d) => d.sessions));
+    const list = await (await fetch('/api/sessions')).json().then((d) => d.sessions);
+    renderSessionList(list);
+    const meta = list.find((s) => s.id === id);
+    sessionCustomerId = meta?.customerId ?? null;
     setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+  }
+
+  /** Ensure the active agent session is bound to this customer; create one if not. */
+  async function ensureCustomerSession(customer) {
+    if (sessionId && sessionCustomerId === customer.id) return;
+    const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
+    await switchSession(created.id);
+    renderCustomerCard(created.customer);
+    loadSessions();
   }
 
   async function newSession() {
@@ -638,9 +654,23 @@
     }
   }
 
+  async function loadSearchConfigUI() {
+    try {
+      const res = await fetch('/api/config/search');
+      const data = await res.json();
+      searchKey.value = '';
+      searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...';
+      searchMaxResults.value = data.maxResults || 5;
+    } catch (err) {
+      configResult.className = 'err';
+      configResult.textContent = '联网搜索配置加载失败: ' + err.message;
+    }
+  }
+
   settingsBtn.addEventListener('click', () => {
     settingsModal.classList.remove('hidden');
     loadLlmConfigUI();
+    loadSearchConfigUI();
     loadMcpConfigUI();
   });
   settingsClose.addEventListener('click', () => settingsModal.classList.add('hidden'));
@@ -671,6 +701,23 @@
         results.push('模型: ' + (llmData.error || llmRes.status));
       } else {
         results.push('模型: ' + llmData.provider + '/' + llmData.model + ' 已生效');
+      }
+
+      const searchPayload = { apiKey: searchKey.value.trim(), maxResults: Number(searchMaxResults.value) || 5 };
+      const searchRes = await fetch('/api/config/search', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchPayload),
+      });
+      const searchData = await searchRes.json();
+      if (!searchRes.ok) {
+        results.push('联网搜索: ' + (searchData.error || searchRes.status));
+      } else {
+        results.push(searchData.apiKeyConfigured
+          ? `联网搜索: Tavily 已配置（每次 ${searchData.maxResults} 条）`
+          : '联网搜索: 未配置 API key（web_search 将提示未配置）');
+        searchKey.value = '';
+        searchKey.placeholder = searchData.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...';
       }
 
       const mcpRes = await fetch('/api/config/mcp', {
@@ -1332,7 +1379,14 @@
     const generate = el('button', 'primary-command', '生成案例草稿');
     generate.onclick = async () => { try { const draft = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) }); editCase(draft); } catch (error) { await alertDialog(error.message); } };
     const ask = el('button', 'quiet-command', '询问 Agent');
-    ask.onclick = () => { showView('agent'); inputEl.value = `基于已同步上下文分析「${c.name}」的续约风险、增购机会和下一步行动`; inputEl.focus(); };
+    ask.onclick = async () => {
+      try {
+        await ensureCustomerSession(c);
+      } catch (error) { await alertDialog(error.message); return; }
+      showView('agent');
+      inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
+      inputEl.focus();
+    };
     commands.append(refresh, generate, ask); head.append(title, commands); customerOverview.append(head);
 
     const summary = el('div', 'definition-grid');

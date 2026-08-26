@@ -154,3 +154,32 @@ test('hemory inbox shows topic-part badges for recurring events', () => {
   assert.match(styles, /\.fragment-topic-part \{/);
   assert.match(styles, /\.fragment-topic-part \{[^}]*border: 1px dashed/);
 });
+
+test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // 显示契约：「询问 Agent」必须复用/新建绑定当前客户的会话（ensureCustomerSession），
+  // 不得直接把消息发进当前激活会话（曾导致把问题发进绑定别的客户的旧会话）。
+  const ask = source.match(/const ask = el\('button', 'quiet-command', '询问 Agent'\);[\s\S]*?\n    };/)?.[0];
+  assert.ok(ask, 'ask agent button source was not found');
+  assert.match(ask, /await ensureCustomerSession\(c\)/);
+  assert.match(ask, /最近三个月的公开动态/);
+  const ensure = source.match(/async function ensureCustomerSession[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(ensure, 'ensureCustomerSession source was not found');
+  assert.match(ensure, /sessionCustomerId === customer\.id/);
+  assert.match(ensure, /JSON\.stringify\(\{ customerId: customer\.id \}\)/);
+  // 会话切换要回填绑定客户，供按钮判断是否可复用。
+  const switchFn = source.match(/async function switchSession[\s\S]*?\n  }\n\n  async function newSession/)?.[0];
+  assert.ok(switchFn, 'switchSession source was not found');
+  assert.match(switchFn, /sessionCustomerId = meta\?\.customerId \?\? null/);
+});
+
+test('settings modal exposes Tavily web search configuration', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  // 显示契约：设置页有联网搜索分区（key + 返回条数），保存走 /api/config/search，key 不回显。
+  assert.match(html, /id="searchKey"/);
+  assert.match(html, /id="searchMaxResults"/);
+  assert.match(source, /async function loadSearchConfigUI/);
+  assert.match(source, /\/api\/config\/search/);
+  assert.ok(source.includes("searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...'"));
+});

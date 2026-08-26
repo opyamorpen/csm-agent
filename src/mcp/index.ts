@@ -123,6 +123,11 @@ export class McpHub {
     return [...this.servers.values()].flatMap((c) => c.tools);
   }
 
+  /** Names of currently connected servers (diagnostics for unknown-tool errors). */
+  serverNames(): string[] {
+    return [...this.servers.keys()];
+  }
+
   toPiTools(): Tool[] {
     return this.listTools().map((t) => ({
       name: t.publicName,

@@ -178,3 +178,50 @@ function atomicWriteYaml(path: string, obj: unknown): void {
   writeFileSync(tmp, yaml.dump(obj, { lineWidth: -1, noRefs: true }), { encoding: 'utf8', mode: 0o600 });
   renameSync(tmp, path);
 }
+
+// ── Web search configuration ───────────────────────────────────────────────
+
+export interface SearchConfig {
+  provider: 'tavily';
+  /** API key value; only written to disk, never returned by GET. */
+  apiKey?: string;
+  /** Max results per query, capped server-side. */
+  maxResults: number;
+}
+
+export const SEARCH_PROVIDERS: Array<{ id: string; label: string; apiKeyEnv: string; defaultMaxResults: number }> = [
+  { id: 'tavily', label: 'Tavily', apiKeyEnv: 'TAVILY_API_KEY', defaultMaxResults: 5 },
+];
+
+export const DEFAULT_SEARCH_CONFIG: SearchConfig = { provider: 'tavily', maxResults: 5 };
+
+/** Public view of the search config: key presence only, never the key itself. */
+export function searchConfigStatus(cfg: SearchConfig): Record<string, unknown> {
+  return { provider: cfg.provider, apiKeyConfigured: !!cfg.apiKey, maxResults: cfg.maxResults };
+}
+
+export function loadSearchConfig(): SearchConfig {
+  try {
+    const path = userConfigPath('search.user.yaml');
+    if (!existsSync(path)) {
+      // Fall back to env var when no user config exists yet.
+      const key = process.env.TAVILY_API_KEY;
+      return key ? { provider: 'tavily', apiKey: key, maxResults: 5 } : DEFAULT_SEARCH_CONFIG;
+    }
+    const parsed = yaml.load(readFileSync(path, 'utf8')) as Partial<SearchConfig> & { search?: Partial<SearchConfig> };
+    const raw = parsed?.search && typeof parsed.search === 'object' ? parsed.search : parsed;
+    const provider = raw?.provider === 'tavily' ? 'tavily' : 'tavily';
+    const apiKey = typeof raw?.apiKey === 'string' && raw.apiKey.trim() ? raw.apiKey.trim() : process.env.TAVILY_API_KEY;
+    const maxResults = Math.min(10, Math.max(1, Number(raw?.maxResults ?? 5) || 5));
+    return { provider, apiKey, maxResults };
+  } catch {
+    return DEFAULT_SEARCH_CONFIG;
+  }
+}
+
+export function saveSearchConfig(cfg: SearchConfig): void {
+  const out: SearchConfig = { provider: 'tavily', maxResults: Math.min(10, Math.max(1, Number(cfg.maxResults) || 5)) };
+  if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
+  mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
+  atomicWriteYaml(userConfigPath('search.user.yaml'), out);
+}

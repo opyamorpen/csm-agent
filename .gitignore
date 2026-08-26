@@ -10,3 +10,4 @@ dist-mac/
 config/local*.yaml
 config/mcp.user.yaml
 config/llm.user.yaml
+config/search.user.yaml

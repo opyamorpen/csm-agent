@@ -24,6 +24,9 @@ export interface SessionMeta {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Customer binding (CRM 售后客户 _id + name) when the session was created with one. */
+  customerId?: string;
+  customerName?: string;
 }
 
 export interface StoredSession {
@@ -74,12 +77,23 @@ export class Store {
 
   listSessions(): SessionMeta[] {
     try {
-      return readdirSync(this.sessionsDir)
+      const metas: Array<SessionMeta | null> = readdirSync(this.sessionsDir)
         .filter((f) => f.endsWith('.json'))
         .map((f) => {
           const s = this.loadSession(f.replace(/\.json$/, ''));
-          return s ? { id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt } : null;
-        })
+          if (!s) return null;
+          const c = s.customer as { customer_name?: string; crm_customer_id?: string } | undefined;
+          const meta: SessionMeta = {
+            id: s.id,
+            title: s.title,
+            createdAt: s.createdAt,
+            updatedAt: s.updatedAt,
+          };
+          if (c?.crm_customer_id) meta.customerId = c.crm_customer_id;
+          if (c?.customer_name) meta.customerName = c.customer_name;
+          return meta;
+        });
+      return metas
         .filter((s): s is SessionMeta => s !== null)
         .sort((a, b) => b.updatedAt - a.updatedAt);
     } catch {

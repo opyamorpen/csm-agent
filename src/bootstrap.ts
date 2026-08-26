@@ -4,6 +4,8 @@ import { loadDotEnv, loadLlmConfig, saveLlmConfig, providerFor, type McpServerCo
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
+import { customerProfileTool, customerEventsTool } from './tools/workbench.js';
+import { webSearchTool, recordWebIntelligenceTool } from './tools/websearch.js';
 import { buildSystemPrompt, type ToolSummary } from './prompt.js';
 
 export interface Runtime {
@@ -42,6 +44,11 @@ function resolveModel(models: Models, cfg: LlmConfig): Model<any> {
   return model;
 }
 
+/** Local (non-MCP) tools available to every session. */
+export function localTools(): Tool[] {
+  return [confirmWriteTool, resolveCustomerTool, customerProfileTool, customerEventsTool, webSearchTool, recordWebIntelligenceTool];
+}
+
 /**
  * Build the shared runtime: model collection + MCP hub + tools + prompt.
  * MCP connection failures are logged but non-fatal, so the UI still starts
@@ -68,10 +75,10 @@ export async function createRuntime(): Promise<Runtime> {
     mcp,
     llm,
     systemPrompt: buildSystemPrompt(toolSummaries(mcp)),
-    tools: [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()],
+    tools: localTools(),
     reloadMcp: async (servers) => {
       await mcp.reconnect(servers);
-      runtime.tools = [confirmWriteTool, resolveCustomerTool, ...mcp.toPiTools()];
+      runtime.tools = [...localTools(), ...mcp.toPiTools()];
       runtime.systemPrompt = buildSystemPrompt(toolSummaries(mcp));
     },
     setLlm: (cfg) => {

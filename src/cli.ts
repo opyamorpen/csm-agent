@@ -46,7 +46,7 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
-  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/wecom/status'] },
+  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/wecom/status'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
@@ -59,7 +59,7 @@ const CLI_CAPABILITIES = [
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
-  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm'] },
+  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'web_search', 'record_web_intelligence'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
 
@@ -129,6 +129,8 @@ function help(): void {
   csm-agent service status|restart|uninstall|logs
   csm-agent wecom
   csm-agent agent <客户ID或名称> <指令>
+    （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
+     联网检索 web_search（需在设置中配置 Tavily key）、落库 record_web_intelligence）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
   csm-agent capabilities [--json]
   csm-agent version
@@ -629,11 +631,11 @@ async function runCustomerAgent(customerInput: string, prompt: string): Promise<
 }
 
 async function doctor(): Promise<void> {
-  const [list, wecom, llm] = await Promise.all([customers(), request('/api/wecom/status'), request('/api/config/llm')]);
+  const [list, wecom, llm, search] = await Promise.all([customers(), request('/api/wecom/status'), request('/api/config/llm'), request('/api/config/search')]);
   const sample = list[0];
   const overview = sample ? await request<any>(`/api/customers/${encodeURIComponent(sample.id)}/overview`) : null;
   print({ baseUrl, api: 'ok', customers: list.length, sampleCustomer: sample?.id ?? null,
-    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, wecom });
+    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search, wecom });
 }
 
 async function main(): Promise<void> {

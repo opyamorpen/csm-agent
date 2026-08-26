@@ -1,0 +1,13 @@
+# CSM agent — 联网搜索配置（种子）
+#
+# 客户公开动态检索使用 Tavily（https://tavily.com）。注册后在设置页填写 API Key，
+# 或将本文件另存为 config/search.user.yaml（优先加载，且被 gitignore 不会提交），
+# 或设置环境变量 TAVILY_API_KEY / 写入 ~/.csm-agent/.env。
+#
+# 示例（不要照抄）：
+#   provider: tavily
+#   apiKey: tvly-xxxxxxxxxxxxxxxxxxxx
+#   maxResults: 5
+
+provider: tavily
+maxResults: 5

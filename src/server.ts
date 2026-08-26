@@ -4,10 +4,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
-import { loadMcpServers, saveMcpServers, type McpServerConfig } from './config.js';
+import { loadMcpServers, saveMcpServers, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
 import { AgentSession, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
+import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToolHandlers } from './tools/workbench.js';
+import { WEB_SEARCH_TOOL_NAME, RECORD_WEB_INTELLIGENCE_TOOL_NAME, makeWebSearchHandler, makeRecordWebIntelligenceHandler } from './tools/websearch.js';
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
@@ -161,13 +163,54 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   }
 
   function makeAgent(session: Session): AgentSession {
+    // Local workbench/web tools resolve the bound customer from the session's
+    // context (falls back to lookup by name until the model confirms identity).
+    const boundCustomer = () => {
+      const id = session.customer?.crm_customer_id;
+      if (id && workbench.db.getCustomer(id)) {
+        const c = workbench.db.getCustomer(id)!;
+        return { id: c.id, name: c.name };
+      }
+      const name = session.customer?.customer_name;
+      if (name) {
+        const matches = workbench.db.listCustomers(name).filter((c) => c.name === name || c.shortName === name);
+        if (matches.length === 1) return { id: matches[0].id, name: matches[0].name };
+      }
+      return null;
+    };
+    const workbenchHandlers = makeWorkbenchToolHandlers({
+      getCustomer: boundCustomer,
+      overview: (id) => workbench.db.overview(id),
+      timeline: (id, limit) => workbench.db.listTimeline(id, limit).map((e) => e as unknown as Record<string, unknown>),
+    });
+    const searchConfig = loadSearchConfig();
+    const webSearch = makeWebSearchHandler({
+      getApiKey: () => loadSearchConfig().apiKey,
+      getMaxResults: () => loadSearchConfig().maxResults ?? searchConfig.maxResults,
+    });
+    const recordWebIntelligence = makeRecordWebIntelligenceHandler({
+      getCustomer: boundCustomer,
+      addEvidence: (input) => workbench.db.addEvidence(input),
+    });
     return new AgentSession({
       models: runtime.models,
       model: runtime.model,
       mcp: runtime.mcp,
       tools: runtime.tools,
       systemPrompt: runtime.systemPrompt,
+      // Sessions created before an MCP reconnect or model switch must pick up
+      // the latest runtime state on every turn (restored sessions otherwise
+      // stay frozen on a stale, possibly empty, tool list).
+      live: {
+        getSystemPrompt: () => runtime.systemPrompt,
+        getTools: () => runtime.tools,
+        getModel: () => runtime.model,
+      },
       localTools: {
+        [CUSTOMER_PROFILE_TOOL_NAME]: workbenchHandlers.profile,
+        [CUSTOMER_EVENTS_TOOL_NAME]: workbenchHandlers.events,
+        [WEB_SEARCH_TOOL_NAME]: webSearch,
+        [RECORD_WEB_INTELLIGENCE_TOOL_NAME]: recordWebIntelligence,
         [CUSTOMER_CONTEXT_TOOL_NAME]: async (args, emit) => {
           const next = extractCustomerContext(args);
           if (Object.keys(next).length === 0) {
@@ -561,6 +604,19 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           model: runtime.llm.model,
           apiKeyConfigured: !!runtime.llm.apiKey,
         });
+      }
+
+      // ── Search (web intelligence) configuration ──
+      if (req.method === 'GET' && path === '/api/config/search') {
+        return json(res, 200, searchConfigStatus(loadSearchConfig()));
+      }
+      if (req.method === 'PUT' && path === '/api/config/search') {
+        const body = await readBody(req);
+        const current = loadSearchConfig();
+        const apiKey = typeof body.apiKey === 'string' ? body.apiKey : current.apiKey;
+        const maxResults = body.maxResults == null ? current.maxResults : Math.min(10, Math.max(1, Number(body.maxResults) || 5));
+        saveSearchConfig({ provider: 'tavily', apiKey: apiKey && apiKey.trim() ? apiKey.trim() : undefined, maxResults });
+        return json(res, 200, { ok: true, ...searchConfigStatus(loadSearchConfig()) });
       }
 
       // ── records ──

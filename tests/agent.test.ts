@@ -7,7 +7,7 @@ import {
   fauxToolCall,
   Type,
 } from '@earendil-works/pi-ai';
-import { runAgent, type McpGateway } from '../src/agent.js';
+import { runAgent, AgentSession, type McpGateway } from '../src/agent.js';
 import { confirmWriteTool, type ConfirmDraft } from '../src/tools/confirm.js';
 
 const WRITE_TOOL_NAME = 'mcp__crm__create_followup';
@@ -169,4 +169,62 @@ test('runAgent: local tool (resolve_customer) emits customer_context and bypasse
   assert.equal(emitted.length, 1);
   assert.equal((emitted[0] as any).context.customer_name, '云启科技');
   assert.equal(result, '已解析');
+});
+
+test('AgentSession: send() refreshes systemPrompt/tools/model from live runtime', async () => {
+  // Simulate a session created BEFORE MCP connected (empty tool list, stale prompt).
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+
+  const runtime = {
+    systemPrompt: '（尚未配置任何 MCP 服务器）',
+    tools: [confirmWriteTool],
+    model,
+  };
+  const session = new AgentSession({
+    models,
+    model,
+    mcp: gw,
+    tools: runtime.tools,
+    systemPrompt: runtime.systemPrompt,
+    live: {
+      getSystemPrompt: () => runtime.systemPrompt,
+      getTools: () => runtime.tools,
+      getModel: () => runtime.model,
+    },
+    hooks: undefined as never,
+  });
+
+  faux.setResponses([fauxAssistantMessage('ok')]);
+
+  // MCP connects / reload happens after the session was created.
+  runtime.systemPrompt = '已连接 crm/ones/hemory';
+  runtime.tools = tools;
+
+  await session.send('你好', { onEvent() {}, requestConfirm: async () => false });
+
+  assert.equal(session.context.systemPrompt, '已连接 crm/ones/hemory', 'send() 应取最新 systemPrompt');
+  assert.ok(session.context.tools.some((t) => t.name === WRITE_TOOL_NAME), 'send() 应取最新工具清单');
+});
+
+test('runAgent: unknown tool error lists connected servers and warns against inventing names', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const gw: McpGateway = {
+    resolve: () => undefined,
+    isWrite: () => false,
+    async call() { return { text: '', isError: false }; },
+    serverNames: () => ['crm', 'ones', 'hemory'],
+  };
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('mcp__crm__search_customer', {})]),
+    fauxAssistantMessage('已纠错'),
+  ]);
+  const results: string[] = [];
+  await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '查客户',
+    hooks: { onEvent(e) { if (e.type === 'tool_result') results.push(e.result ?? ''); }, requestConfirm: async () => false },
+  });
+  assert.ok(results[0].includes('未知工具'), '应标明未知工具');
+  assert.ok(results[0].includes('crm、ones、hemory'), '应列出已连接服务器');
+  assert.ok(results[0].includes('不要臆造工具名'), '应提示不要臆造工具名');
 });
