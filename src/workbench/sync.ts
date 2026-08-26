@@ -6,9 +6,10 @@ import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceE
 
 const CRM_FIELDS = {
   id: '_id',
-  name: 'field_83f4l__c',
-  nameReference: 'field_n1qN0__c__r',
+  // 客户名称是 object_reference（→ AccountObj「客户」），显示值带 __r 后缀，始终是客户全称。
+  name: 'field_n1qN0__c__r',
   nameReferenceId: 'field_n1qN0__c',
+  // 售后客户名称是手填文本字段，常为简称（如「华大九天」），只作次级名称。
   shortName: 'field_83f4l__c',
   industry: 'field_OL1jQ__c',
   csm: 'field_M1uu5__c',
@@ -244,7 +245,8 @@ export function crmFollowupEvent(record: Record<string, unknown>): SourceEventIn
 
 export function crmCustomer(record: Record<string, unknown>): Parameters<WorkbenchDatabase['upsertCustomer']>[0] | null {
   const id = asText(record[CRM_FIELDS.id]) ?? asText(record.id);
-  const name = asText(record[CRM_FIELDS.name]) ?? asText(record[CRM_FIELDS.nameReference]);
+  // 客户名称（引用显示值）是主名称；个别记录引用缺失时才回退到售后客户名称文本。
+  const name = asText(record[CRM_FIELDS.name]) ?? asText(record[CRM_FIELDS.shortName]);
   if (!id || !name) return null;
   const lifeStatus = asText(record[`${CRM_FIELDS.lifeStatus}__r`]) ?? asText(record[CRM_FIELDS.lifeStatus]);
   const special = asText(record[CRM_FIELDS.specialRenewalTerms]);
@@ -640,18 +642,16 @@ export class PortfolioSyncService {
     await this.onesqlGrammarReady;
   }
 
-  // 售后客户常用简称（如“华大九天”），ONES 客户信息选项则用关联主体全称（如“北京华大九天科技股份有限公司”）。
-  // 解析顺序：显示名精确唯一 → 关联主体名（field_n1qN0__c__r）精确唯一；两者都失败才落候选事件，不做模糊归属。
+  // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）只作次级搜索。
+  // 解析顺序：客户名称精确唯一 → 售后客户名称精确唯一；两者都失败才落候选事件，不做模糊归属。
   private async resolveOnesCustomerOption(customer: Customer): Promise<string | null> {
-    const referenceName = asText(customer.source?.[CRM_FIELDS.nameReference]);
+    const names = [...new Set([customer.name, customer.shortName].filter((name): name is string => !!name))];
     const existing = this.db.listIdentities(customer.id).find((item) =>
-      item.system === 'ones_customer_option' && item.status === 'confirmed'
-      && (item.label === customer.name || item.label === referenceName));
+      item.system === 'ones_customer_option' && item.status === 'confirmed' && names.includes(String(item.label)));
     if (existing?.external_id) return String(existing.external_id);
 
     const candidates: Array<{ option: Record<string, unknown>; exact: boolean }> = [];
-    for (const name of [customer.name, referenceName]) {
-      if (!name) continue;
+    for (const name of names) {
       const result = await this.mcp.call('mcp__ones__search_for_issue_field_options', {
         fieldID: ONES_CUSTOMER_FIELD_ID,
         input: name,
@@ -685,7 +685,7 @@ export class PortfolioSyncService {
         externalId: `${customer.id}:${optionId}`,
         title: `待确认 ONES 客户信息: ${asText(option.name ?? option.value) ?? optionId}`,
         occurredAt: new Date().toISOString(),
-        payload: { crmCustomerId: customer.id, crmCustomerName: customer.name, crmCustomerReferenceName: referenceName, option },
+        payload: { crmCustomerId: customer.id, crmCustomerName: customer.name, crmCustomerShortName: customer.shortName, option },
         confidence: exact ? 0.5 : 0.2,
         attributionStatus: exact ? 'ambiguous' : 'unattributed',
       });
@@ -718,10 +718,9 @@ export class PortfolioSyncService {
       const displayId = asText(item.display_id ?? item.issue_number);
       const title = asText(item.field001) ?? 'ONES 工作项';
       const status = asText(item.field005);
-      // JrvswW8P.name 返回的是选项名（常为客户主体全称），与显示名或关联主体名任一一致即归属该客户。
+      // JrvswW8P.name 返回选项名（即客户名称全称），与客户名称或售后客户名称（简称）任一一致即归属该客户。
       const customerName = asText(item[ONES_CUSTOMER_FIELD_ID]);
-      const referenceName = asText(customer.source?.[CRM_FIELDS.nameReference]);
-      if (customerName !== customer.name && customerName !== referenceName) {
+      if (customerName !== customer.name && customerName !== customer.shortName) {
         this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType, externalId: id, displayId, title,
           occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(), payload: item,
           url: onesIssueUrl(id, displayId), confidence: 0.2, attributionStatus: 'ambiguous' });

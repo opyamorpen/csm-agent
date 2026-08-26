@@ -48,10 +48,16 @@ test('workbench: customer portfolio supports renewal date and amount sorting wit
 }));
 
 test('workbench: CRM stage is persisted separately from contract lifecycle status', () => {
-  const input = crmCustomer({ _id: 'crm-stage', field_83f4l__c: '阶段客户', field_c0avd__c__r: '续约中', life_status__r: '正常' });
+  const input = crmCustomer({ _id: 'crm-stage', field_n1qN0__c__r: '阶段客户集团有限公司', field_83f4l__c: '阶段客户', field_c0avd__c__r: '续约中', life_status__r: '正常' });
   assert.equal(input?.afterSalesStage, '续约中');
   assert.equal(input?.contractStatus, '正常');
   assert.equal(input?.sourceObject, 'object_Umwnn__c');
+  // 客户名称（引用显示值）是主名称，售后客户名称（简称）只作次级名称。
+  assert.equal(input?.name, '阶段客户集团有限公司');
+  assert.equal(input?.shortName, '阶段客户');
+  // 引用缺失的记录回退到售后客户名称，仍可入客户表。
+  const fallback = crmCustomer({ _id: 'crm-stage2', field_83f4l__c: '只有简称', field_c0avd__c__r: '续约中', life_status__r: '正常' });
+  assert.equal(fallback?.name, '只有简称');
 });
 
 test('workbench: CRM followup event binds after-sales customer and keeps record create time', () => {
@@ -547,11 +553,11 @@ test('workbench: ONES work-item drafts carry minimal required arguments with opt
     const createCall = mcp.calls.find((call) => call.publicName === 'mcp__ones__create_new_issue')!;
     assert.deepEqual(createCall.args, { projectID: 'GL3ysesFPdnAQNIU', issueTypeID: 'A99xMfkg',
       summary: suggestion.title, description: suggestion.summary, fieldValues: [{ fieldID: 'JrvswW8P', value: 'opt-77' }] });
-    // displayFields：最小必填项结构化展示。
+    // displayFields：最小必填项结构化展示；客户信息在名称与选项名一致时只显示一个名字。
     const customer = db.getCustomer('crm-o')!;
     const fields = draftDisplayFields(db, suggestion, customer);
     assert.deepEqual(fields.map((field) => field.label), ['所属项目', '工作项类型', '标题', '客户信息', '描述']);
-    assert.match(fields.find((field) => field.key === 'customer')!.value, /客户欧 → 客户欧/);
+    assert.equal(fields.find((field) => field.key === 'customer')!.value, '客户欧');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -613,7 +619,7 @@ test('workbench: parseOnesIssueFields tolerates unknown shapes and flags only ca
   assert.deepEqual(missing2.map((field) => field.uuid), ['JrvswW8P']);
 });
 
-// 模拟 ONES search_for_issue_field_options：按输入返回固定选项集，覆盖显示名/主体名两级解析。
+// 模拟 ONES search_for_issue_field_options：按输入返回固定选项集，覆盖客户名称/售后客户名称两级解析。
 function fakeOnesOptionSearchMcp(optionsByInput: Record<string, Array<{ uuid: string; name: string }>>): any {
   const calls: Array<{ publicName: string; args: any }> = [];
   return {
@@ -629,15 +635,13 @@ function fakeOnesOptionSearchMcp(optionsByInput: Record<string, Array<{ uuid: st
   };
 }
 
-test('workbench: ONES customer option resolves by display name then CRM reference name, uniquely', async () => {
+test('workbench: ONES customer option resolves by 客户名称 then 售后客户名称, uniquely', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-option-'));
   const db = new WorkbenchDatabase(dir);
   try {
-    // 场景一：显示名是简称，主体名与 ONES 选项全称精确一致（华大九天型）。
-    db.upsertCustomer({ id: 'crm-hd', name: '华大九天', sourceObject: 'object_Umwnn__c',
-      source: { field_83f4l__c: '华大九天', field_n1qN0__c__r: '北京华大九天科技股份有限公司' } });
+    // 场景一（常态）：客户名称（field_n1qN0__c__r 全称）与 ONES 选项精确一致。
+    db.upsertCustomer({ id: 'crm-hd', name: '北京华大九天科技股份有限公司', shortName: '华大九天', sourceObject: 'object_Umwnn__c' });
     const mcp = fakeOnesOptionSearchMcp({
-      '华大九天': [{ uuid: 'BJY0WFZJ', name: '北京华大九天科技股份有限公司' }],
       '北京华大九天科技股份有限公司': [{ uuid: 'BJY0WFZJ', name: '北京华大九天科技股份有限公司' }],
     });
     const sync = new PortfolioSyncService(db, mcp, async () => []);
@@ -647,29 +651,40 @@ test('workbench: ONES customer option resolves by display name then CRM referenc
     assert.equal(identity?.external_id, 'BJY0WFZJ');
     assert.equal(identity?.label, '北京华大九天科技股份有限公司');
     assert.equal(identity?.status, 'confirmed');
+    // 客户名称直接命中时不再搜索简称。
+    assert.deepEqual(mcp.calls.map((call) => call.args.input), ['北京华大九天科技股份有限公司']);
 
-    // 场景二：主体名对应多个 ONES 选项（人工智能研究院型）→ 不自动归属，落候选事件。
-    db.upsertCustomer({ id: 'crm-ai', name: '人工智能研究院', sourceObject: 'object_Umwnn__c',
-      source: { field_83f4l__c: '人工智能研究院', field_n1qN0__c__r: '北京通用人工智能研究院' } });
+    // 场景二：客户名称在 ONES 侧搜不到精确选项时，回退搜索售后客户名称（简称），精确唯一命中即可确认。
+    db.upsertCustomer({ id: 'crm-ai', name: '北京通用人工智能研究院', shortName: '通用AI研究院', sourceObject: 'object_Umwnn__c' });
     const mcp2 = fakeOnesOptionSearchMcp({
-      '人工智能研究院': [
+      '北京通用人工智能研究院': [
         { uuid: 'v8Goci1j', name: '北京智源人工智能研究院' },
-        { uuid: 'tyy8tinj', name: '北京通用人工智能研究院' },
         { uuid: 'gJDSkP9x', name: '武汉人工智能研究院' },
       ],
-      '北京通用人工智能研究院': [{ uuid: 'tyy8tinj', name: '北京通用人工智能研究院' }],
+      '通用AI研究院': [{ uuid: 'tyy8tinj', name: '通用AI研究院' }],
     });
     const sync2 = new PortfolioSyncService(db, mcp2, async () => []);
     const optionId2 = await (sync2 as any).resolveOnesCustomerOption(db.getCustomer('crm-ai'));
     assert.equal(optionId2, 'tyy8tinj');
     assert.equal(db.listIdentities('crm-ai').find((item) => item.system === 'ones_customer_option')?.external_id, 'tyy8tinj');
 
-    // 场景三：显示名与主体名都无法精确唯一匹配 → 保持未归属，写候选事件。
-    db.upsertCustomer({ id: 'crm-xx', name: '简称客户', sourceObject: 'object_Umwnn__c',
-      source: { field_83f4l__c: '简称客户', field_n1qN0__c__r: '某集团' } });
+    // 场景二b：客户名称与简称都无法精确唯一匹配 → 未归属、落候选事件。
+    db.upsertCustomer({ id: 'crm-ai2', name: '某研究院', shortName: '智源', sourceObject: 'object_Umwnn__c' });
+    const mcp2b = fakeOnesOptionSearchMcp({
+      '某研究院': [],
+      '智源': [{ uuid: 'v8Goci1j', name: '智源研究院' }],
+    });
+    const sync2b = new PortfolioSyncService(db, mcp2b, async () => []);
+    const optionId2b = await (sync2b as any).resolveOnesCustomerOption(db.getCustomer('crm-ai2'));
+    assert.equal(optionId2b, null);
+    assert.equal(db.listIdentities('crm-ai2').filter((item) => item.system === 'ones_customer_option').length, 0);
+    assert.ok(db.listSourceEvents('ones', 'customer_option_candidate', 'crm-ai2').length >= 1);
+
+    // 场景三：两个名称都无法精确唯一匹配 → 保持未归属，写候选事件。
+    db.upsertCustomer({ id: 'crm-xx', name: '某集团', shortName: '简称客户', sourceObject: 'object_Umwnn__c' });
     const mcp3 = fakeOnesOptionSearchMcp({
-      '简称客户': [{ uuid: 'opt-a', name: '简称客户集团' }],
       '某集团': [{ uuid: 'opt-b', name: '某集团有限公司' }, { uuid: 'opt-c', name: '某集团股份' }],
+      '简称客户': [{ uuid: 'opt-a', name: '简称客户集团' }],
     });
     const sync3 = new PortfolioSyncService(db, mcp3, async () => []);
     const optionId3 = await (sync3 as any).resolveOnesCustomerOption(db.getCustomer('crm-xx'));

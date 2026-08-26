@@ -121,7 +121,9 @@ export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, custo
       { key: 'project', label: '所属项目', value: `${ONES_DESK_PROJECT_LABEL}（${String(item.targetArguments.projectID ?? '')}）` },
       { key: 'issueType', label: '工作项类型', value: `${ONES_DESK_TYPE_LABELS[deskType]}（${String(item.targetArguments.issueTypeID ?? '')}）` },
       { key: 'title', label: '标题', value: item.title },
-      { key: 'customer', label: '客户信息', value: option ? `${customer.name} → ${option.label || option.id}` : `${customer.name}（ONES 客户信息未解析）` },
+      { key: 'customer', label: '客户信息', value: option
+        ? option.label && option.label !== customer.name ? `${customer.name} → ${option.label}` : (option.label || customer.name)
+        : `${customer.name}（ONES 客户信息未解析）` },
       { key: 'description', label: '描述', value: String(item.targetArguments.description ?? item.summary) },
     ];
   }

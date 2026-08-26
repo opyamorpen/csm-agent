@@ -42,7 +42,7 @@
   },
   "ones_customer_binding": {
     "fieldID": "JrvswW8P",
-    "value": "当前客户的 ones_customer_option_id（显示名或 CRM 关联主体名 field_n1qN0__c__r 精确唯一解析）"
+    "value": "当前客户的 ones_customer_option_id（按客户名称 field_n1qN0__c__r 或售后客户名称 field_83f4l__c 精确唯一解析）"
   },
   "ones_minimal_required_arguments": {
     "projectID": "目标项目 ID",
