@@ -162,6 +162,17 @@ export class WorkbenchDatabase {
     this.db.close();
   }
 
+  /** 全库一致性备份（WAL 下安全快照），重切等破坏性维护操作前调用。 */
+  backupTo(targetPath: string): void {
+    this.db.prepare('VACUUM INTO ?').run(targetPath);
+  }
+
+  /** 全部 Hemory 原始转写录音（不限于滚动同步窗口），重切命令的数据源。 */
+  listHemoryRawTranscriptRecordings(): SourceEvent[] {
+    return (this.db.prepare(`SELECT * FROM source_events WHERE source_system='hemory' AND source_type='raw_transcript'
+      ORDER BY occurred_at DESC`).all() as Row[]).map(sourceEventFromRow);
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS customers (
@@ -620,7 +631,10 @@ export class WorkbenchDatabase {
   }
 
   listTimeline(customerId: string, limit = 100): SourceEvent[] {
-    const rows = this.db.prepare('SELECT * FROM source_events WHERE customer_id=? ORDER BY occurred_at DESC, external_id DESC LIMIT ?').all(customerId, limit) as Row[];
+    // 停用的 Hemory 片段（被新代际取代）不再进入客户时间线，避免重切后新旧并存；未登记代际的历史行不受影响。
+    const rows = this.db.prepare(`SELECT * FROM source_events WHERE customer_id=?
+      AND NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)
+      ORDER BY occurred_at DESC, external_id DESC LIMIT ?`).all(customerId, limit) as Row[];
     return rows.map(sourceEventFromRow);
   }
 
@@ -809,6 +823,12 @@ export class WorkbenchDatabase {
   listActiveHemoryFragmentsForRecording(recordingEventId: string): SourceEvent[] {
     return (this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id
       WHERE g.recording_event_id=? AND g.active=1 ORDER BY e.occurred_at`).all(recordingEventId) as Row[]).map(sourceEventFromRow);
+  }
+
+  /** 与 listConfirmedHemorySegments 回退语义一致：已登记代际的片段看 active，未登记的历史行视为活跃。 */
+  isHemoryFragmentActive(eventId: string): boolean {
+    const row = this.db.prepare('SELECT active FROM hemory_fragment_generations WHERE event_id=?').get(eventId) as Row | undefined;
+    return row ? Number(row.active) === 1 : true;
   }
 
   addEvidence(input: EvidenceInput): string {
@@ -1152,7 +1172,9 @@ export class WorkbenchDatabase {
       caseDrafts: this.listCaseDrafts(customerId),
       actions: this.listActions(customerId),
       timeline: this.listTimeline(customerId, 30),
-      sourceCounts: this.db.prepare('SELECT source_system,COUNT(*) AS count,MAX(synced_at) AS last_synced_at FROM source_events WHERE customer_id=? GROUP BY source_system').all(customerId),
+      sourceCounts: this.db.prepare(`SELECT source_system,COUNT(*) AS count,MAX(synced_at) AS last_synced_at FROM source_events
+        WHERE customer_id=? AND NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)
+        GROUP BY source_system`).all(customerId),
     };
   }
 }

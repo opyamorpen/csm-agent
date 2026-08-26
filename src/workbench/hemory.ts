@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto';
 import type { Runtime } from '../bootstrap.js';
 import { extractText } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
-import type { HemorySegmentationJob, SourceEvent } from './types.js';
+import type { Customer, HemorySegmentationJob, SourceEvent } from './types.js';
 
-export const HEMORY_SEGMENTATION_VERSION = 'hemory-topic-segments-v1';
+// v2：事件级切片。同一业务对象 + 同一核心问题/请求/决定为一段；版本进入外部 ID，
+// 避免边界相同的 v2 片段继承 v1 片段的人工归属（hemory_attributions 按 event_id 回放）。
+export const HEMORY_SEGMENTATION_VERSION = 'hemory-topic-segments-v2';
+export const HEMORY_SEGMENTATION_VERSION_PREFIX = 'v2';
 export const HEMORY_MIN_FRAGMENT_LINES = 3;
 export const HEMORY_MIN_FRAGMENT_CHARS = 40;
+export const HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS = 3;
 
 interface TranscriptLine {
   spokenAt: string;
@@ -19,6 +23,9 @@ interface ModelSegment {
   endIndex: number;
   topic: string;
   summary: string;
+  subject: string;
+  focus: string;
+  topicKey: string;
   include: boolean;
   discardReason?: string;
 }
@@ -69,7 +76,15 @@ function validateSegments(value: unknown, lineCount: number): ModelSegment[] {
     if (typeof item.topic !== 'string' || !item.topic.trim() || typeof item.summary !== 'string' || !item.summary.trim()) {
       throw new Error(`第 ${index + 1} 个片段缺少话题或摘要`);
     }
-    return { startIndex, endIndex, topic: item.topic.trim(), summary: item.summary.trim(), include: item.include === true,
+    if (typeof item.subject !== 'string' || !item.subject.trim() || typeof item.focus !== 'string' || !item.focus.trim()) {
+      throw new Error(`第 ${index + 1} 个片段缺少业务对象（subject）或核心问题（focus）`);
+    }
+    if (typeof item.topic_key !== 'string' || !item.topic_key.trim()) {
+      throw new Error(`第 ${index + 1} 个片段缺少 topic_key`);
+    }
+    return { startIndex, endIndex, topic: item.topic.trim(), summary: item.summary.trim(),
+      subject: item.subject.trim(), focus: item.focus.trim(), topicKey: item.topic_key.trim(),
+      include: item.include === true,
       discardReason: typeof item.discard_reason === 'string' ? item.discard_reason : undefined };
   });
   if (!segments.length || segments[0].startIndex !== 0 || segments.at(-1)!.endIndex !== lineCount - 1) {
@@ -81,36 +96,112 @@ function validateSegments(value: unknown, lineCount: number): ModelSegment[] {
   return segments;
 }
 
-async function proposeSegments(runtime: Runtime, recordingId: string, lines: TranscriptLine[]): Promise<ModelSegment[]> {
-  const evidence = lines.map((line, index) => ({ index, spoken_at: line.spokenAt, speaker: line.speaker, text: line.text }));
-  const prompt = `整理一场 Hemory 录音的完整转写，按连贯业务话题切分。每条输入必须且只能属于一个片段，索引必须连续覆盖 0 到 ${lines.length - 1}。\n`
-    + `只输出 JSON：{"segments":[{"start_index":0,"end_index":2,"topic":"话题标题","summary":"忠于原文的摘要","include":true,"discard_reason":""}]}。\n`
-    + `include 规则：至少包含 3 条有实际信息的发言，形成独立、连贯的客户业务话题；寒暄、环境音、零散的一两句话、无明确业务信息的内容必须为 false。`
-    + `不得为了达到门槛合并不相关短句。摘要不得补造客户、负责人、日期、时长或结论。\n录音 ID：${recordingId}\n完整转写：${JSON.stringify(evidence)}`;
+async function callSegmenter(runtime: Runtime, systemPrompt: string, prompt: string): Promise<unknown> {
   const response = await runtime.models.complete(runtime.model, {
-    systemPrompt: '你是 CSM Agent 的会议分段器。只整理给定转写，不调用工具，不执行写入。',
+    systemPrompt,
     messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
     tools: [],
   });
   if (response.stopReason === 'error') throw new Error((response as { errorMessage?: string }).errorMessage ?? '模型调用失败');
-  return validateSegments(cleanJson(extractText(response.content)), lines.length);
+  return cleanJson(extractText(response.content));
+}
+
+// 每阶段最多调用 3 次：结构或语义校验失败时把错误附进提示词重试，仍失败则抛错由 job attempts 兜底。
+async function completeStage(runtime: Runtime, stageName: string, buildPrompt: (retryError?: string) => string, lineCount: number): Promise<ModelSegment[]> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS; attempt++) {
+    let parsed: unknown;
+    try {
+      parsed = await callSegmenter(runtime, '你是 CSM Agent 的会议分段器。只整理给定转写，不调用工具，不执行写入。', buildPrompt(lastError?.message));
+    } catch (error) {
+      lastError = error as Error;
+      continue;
+    }
+    try {
+      return validateSegments(parsed, lineCount);
+    } catch (error) {
+      lastError = error as Error;
+    }
+  }
+  throw new Error(`${stageName}失败（已重试 ${HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS} 次）：${lastError?.message ?? '模型未返回有效分段'}`);
+}
+
+const SEGMENT_SCHEMA_DOC = '{"segments":[{"start_index":0,"end_index":2,"topic":"话题标题","summary":"忠于原文的摘要","subject":"业务对象（如具体项目/系统/合同/团队）","focus":"核心问题、请求或决定","topic_key":"录音内唯一事件键（同一事件复现时必须复用）","include":true,"discard_reason":""}]}';
+
+const EVENT_SLICING_RULES = `事件级切分规则：
+- 一个片段 = 同一业务对象 + 同一核心问题/请求/决定。原因、方案、决定、后续行动与对应对象属同一事件，不拆开。
+- 业务对象变化或核心问题变化时必须切段；时间间隔不是切分依据。
+- 同一事件被其他话题打断后再次出现时，保持多个连续片段，但 topic_key 必须相同；不把中间无关原文并入。
+- topic_key 在录音内唯一标识事件；不同事件禁止共用。`;
+
+async function proposeSegments(runtime: Runtime, recordingId: string, lines: TranscriptLine[]): Promise<ModelSegment[]> {
+  const evidence = lines.map((line, index) => ({ index, spoken_at: line.spokenAt, speaker: line.speaker, text: line.text }));
+  const transcriptJson = JSON.stringify(evidence);
+  const partitionPrompt = (retryError?: string) => `整理一场 Hemory 录音的完整转写，按事件切片。每条输入必须且只能属于一个片段，索引必须连续覆盖 0 到 ${lines.length - 1}。\n`
+    + `${EVENT_SLICING_RULES}\n`
+    + `只输出 JSON：${SEGMENT_SCHEMA_DOC}。\n`
+    + `include 规则：至少包含 3 条有实际信息的发言且合计不少于 40 字，形成独立、完整的客户业务事件；寒暄、环境音、零散的一两句话、无明确业务信息的内容必须为 false。`
+    + `不得为了达到门槛合并不相关短句。摘要不得补造客户、负责人、日期、时长或结论。\n`
+    + `${retryError ? `上一次输出校验失败：${retryError}。请修正后重新输出完整 JSON。\n` : ''}`
+    + `录音 ID：${recordingId}\n完整转写：${transcriptJson}`;
+  const partitioned = await completeStage(runtime, '事件分区', partitionPrompt, lines.length);
+
+  const reviewPrompt = (retryError?: string) => `复核以下 Hemory 录音的事件切片结果，专查单一主题性：是否存在把多个事件混进一个片段的情况——例如“还有一件事”引出的新话题、业务对象（客户/项目/系统）切换、核心问题或请求变化。
+${EVENT_SLICING_RULES}
+- 仅拆开确实混合的片段；单事件内部的原因、方案、决定、后续行动保持一段。
+- 拆分后必须重新输出全部片段的完整 JSON（不是增量），索引连续覆盖 0 到 ${lines.length - 1}。
+- include 与 topic_key 一并复核：被拆出的新片段若不足门槛则 include=false；同一事件的多个片段共用 topic_key。
+只输出 JSON：${SEGMENT_SCHEMA_DOC}。
+${retryError ? `上一次输出校验失败：${retryError}。请修正后重新输出完整 JSON。\n` : ''}
+录音 ID：${recordingId}
+当前切片结果：${JSON.stringify(partitioned.map(({ startIndex, endIndex, topic, summary, subject, focus, topicKey, include }) => ({ start_index: startIndex, end_index: endIndex, topic, summary, subject, focus, topic_key: topicKey, include })))}
+完整转写：${transcriptJson}`;
+  return completeStage(runtime, '单一主题复核', reviewPrompt, lines.length);
 }
 
 export function hemorySegmentationFingerprint(recording: SourceEvent): string {
   return hash(`${HEMORY_SEGMENTATION_VERSION}:${recording.externalId}:${recording.payloadHash}`);
 }
 
+export interface HemorySegmentationResult {
+  events: SourceEvent[];
+  proposedCount: number;
+  includedCount: number;
+}
+
+// 相邻且同 topic_key 的片段属于模型未合并的同一事件，代码层防御合并；被其他片段隔开的同 key 片段保留多段。
+function mergeAdjacentSameTopicSegments(segments: ModelSegment[]): ModelSegment[] {
+  const merged: ModelSegment[] = [];
+  for (const segment of segments) {
+    const previous = merged.at(-1);
+    if (previous && previous.topicKey === segment.topicKey && segment.startIndex === previous.endIndex + 1) {
+      previous.endIndex = segment.endIndex;
+      previous.include = previous.include || segment.include;
+      continue;
+    }
+    merged.push({ ...segment });
+  }
+  return merged;
+}
+
 export class HemorySegmentationService {
-  private processing = new Map<string, Promise<SourceEvent[]>>();
+  private processing = new Map<string, Promise<HemorySegmentationResult>>();
 
   constructor(private readonly db: WorkbenchDatabase, private readonly runtime: Runtime,
     private readonly onSegmented?: (events: SourceEvent[]) => void) {}
 
   async segmentRecording(recording: SourceEvent): Promise<SourceEvent[]> {
+    return (await this.segmentRecordingDetailed(recording)).events;
+  }
+
+  async segmentRecordingDetailed(recording: SourceEvent): Promise<HemorySegmentationResult> {
     if (recording.sourceSystem !== 'hemory' || recording.sourceType !== 'raw_transcript') throw new Error('只允许分段 Hemory 原始转写');
     const fingerprint = hemorySegmentationFingerprint(recording);
     const job = this.db.createHemorySegmentationJob(recording.id, fingerprint);
-    if (job.status === 'succeeded') return this.db.listActiveHemoryFragmentsForRecording(recording.id);
+    if (job.status === 'succeeded') {
+      const events = this.db.listActiveHemoryFragmentsForRecording(recording.id);
+      return { events, proposedCount: events.length, includedCount: events.length };
+    }
     if (job.attempts >= 3) throw new Error(job.error ?? 'Hemory 分段已达到最大重试次数');
     const running = this.processing.get(job.id);
     if (running) return running;
@@ -127,32 +218,45 @@ export class HemorySegmentationService {
     }
   }
 
-  private async process(job: HemorySegmentationJob, recording: SourceEvent): Promise<SourceEvent[]> {
+  private async process(job: HemorySegmentationJob, recording: SourceEvent): Promise<HemorySegmentationResult> {
     this.db.updateHemorySegmentationJob(job.id, 'running');
     try {
       const lines = transcriptLines(recording);
       if (!lines.length) throw new Error('Hemory 录音没有可分段的转写行');
       const recordingId = String(recording.payload?.recordingId ?? recording.externalId);
-      const proposed = await proposeSegments(this.runtime, recordingId, lines);
-      const events: SourceEvent[] = [];
+      const proposed = mergeAdjacentSameTopicSegments(await proposeSegments(this.runtime, recordingId, lines));
+      interface Surviving { segment: ModelSegment; evidence: TranscriptLine[]; transcript: string;
+        customer?: Customer; matchCount: number; start: TranscriptLine; end: TranscriptLine }
+      const surviving: Surviving[] = [];
       for (const segment of proposed) {
         const evidence = lines.slice(segment.startIndex, segment.endIndex + 1);
         if (!segment.include || !isMeaningfulHemoryFragment(evidence)) continue;
         const transcript = evidence.map((line) => `${line.speaker}: ${line.text}`).join('\n');
         const matches = this.db.listCustomers().filter((customer) => [customer.name, customer.shortName].filter(Boolean)
           .some((name) => `${segment.topic}\n${segment.summary}\n${transcript}`.includes(name!)));
-        const customer = matches.length === 1 ? matches[0] : undefined;
-        const attributionStatus = matches.length === 1 ? 'confirmed' : matches.length > 1 ? 'ambiguous' : 'unattributed';
-        const start = evidence[0];
-        const end = evidence.at(-1)!;
-        const externalId = `${recordingId}:${start.spokenAt}:${segment.startIndex}:${end.spokenAt}:${segment.endIndex}`;
+        surviving.push({ segment, evidence, transcript, customer: matches.length === 1 ? matches[0] : undefined,
+          matchCount: matches.length, start: evidence[0], end: evidence.at(-1)! });
+      }
+      // 同 key 的片段按出现顺序编号并共享 topicGroupId（录音内唯一）；不跨录音关联。
+      const partsByKey = new Map<string, number>();
+      for (const { segment } of surviving) partsByKey.set(segment.topicKey, (partsByKey.get(segment.topicKey) ?? 0) + 1);
+      const seenKeys = new Map<string, number>();
+      const events: SourceEvent[] = [];
+      for (const item of surviving) {
+        const segment = item.segment;
+        const part = (seenKeys.get(segment.topicKey) ?? 0) + 1;
+        seenKeys.set(segment.topicKey, part);
+        const attributionStatus = item.matchCount === 1 ? 'confirmed' : item.matchCount > 1 ? 'ambiguous' : 'unattributed';
+        const externalId = `${HEMORY_SEGMENTATION_VERSION_PREFIX}:${recordingId}:${item.start.spokenAt}:${segment.startIndex}:${item.end.spokenAt}:${segment.endIndex}`;
         const previous = this.db.findSourceEvent('hemory', 'ai_topic_segment', externalId);
-        const event = this.db.upsertSourceEvent({ customerId: customer?.id ?? null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
-          externalId, title: segment.topic.slice(0, 160), occurredAt: start.spokenAt, confidence: customer ? 0.85 : 0.2,
+        const event = this.db.upsertSourceEvent({ customerId: item.customer?.id ?? null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+          externalId, title: segment.topic.slice(0, 160), occurredAt: item.start.spokenAt, confidence: item.customer ? 0.85 : 0.2,
           attributionStatus, payload: { recordingId, rawRecordingEventId: recording.id, recordingHash: recording.payloadHash,
             generationVersion: HEMORY_SEGMENTATION_VERSION, topic: segment.topic, summary: segment.summary,
-            startAt: start.spokenAt, endAt: end.spokenAt, speakers: [...new Set(evidence.map((line) => line.speaker).filter(Boolean))],
-            transcript, evidence, startIndex: segment.startIndex, endIndex: segment.endIndex } });
+            subject: segment.subject, focus: segment.focus, topicKey: segment.topicKey,
+            topicGroupId: `${recordingId}:${segment.topicKey}`, topicPartIndex: part, topicPartCount: partsByKey.get(segment.topicKey) ?? 1,
+            startAt: item.start.spokenAt, endAt: item.end.spokenAt, speakers: [...new Set(item.evidence.map((line) => line.speaker).filter(Boolean))],
+            transcript: item.transcript, evidence: item.evidence, startIndex: segment.startIndex, endIndex: segment.endIndex } });
         if (previous && previous.payloadHash !== event.payloadHash) this.db.markDraftsStaleForEvents([event.id]);
         events.push(event);
       }
@@ -163,7 +267,7 @@ export class HemorySegmentationService {
         { fingerprint: job.fingerprint, generator, inputLines: lines.length, includedSegments: events.length, proposedSegments: proposed.length });
       try { this.onSegmented?.(events); }
       catch (error) { this.db.audit('agent', 'process_hemory_segment_callback_failed', 'source_event', recording.id, { error: (error as Error).message }); }
-      return events;
+      return { events, proposedCount: proposed.length, includedCount: events.length };
     } catch (error) {
       this.db.updateHemorySegmentationJob(job.id, 'failed', { error: (error as Error).message });
       throw error;

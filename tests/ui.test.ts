@@ -102,3 +102,17 @@ test('hemory inbox exposes ignore and restore actions with incremental sync', ()
   // 恢复走既有 attribution 接口（customerId=null 回到待归属）。
   assert.match(renderer, /eventIds: \[fragment\.id\], customerId: null/);
 });
+
+test('hemory inbox shows topic-part badges for recurring events', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+
+  // v2 事件级切片：同一事件被打断后再次出现的片段共享话题组，收件箱显示「同话题 m/n」。
+  assert.ok(renderer, 'loadHemoryInbox source was not found');
+  assert.match(renderer, /if \(fragment\.payload\?\.topicGroupId\)/);
+  assert.match(renderer, /同话题 \$\{fragment\.payload\.topicPartIndex \?\? '\?'\}\/\$\{fragment\.payload\.topicPartCount \?\? '\?'\}/);
+  assert.match(renderer, /fragment-topic-part/);
+  assert.match(styles, /\.fragment-topic-part \{/);
+  assert.match(styles, /\.fragment-topic-part \{[^}]*border: 1px dashed/);
+});

@@ -259,8 +259,10 @@ export class HemoryDraftService {
   }
 
   private confirmedSegments(customerId: string, eventIds: string[]): SourceEvent[] {
+    // 停用片段不得再生草稿：重切后被取代的 v1 片段即使仍是 confirmed 也已经不属于当前代际。
     return [...new Set(eventIds)].map((id) => this.db.getSourceEvent(id)).filter((event): event is SourceEvent =>
-      !!event && event.customerId === customerId && event.attributionStatus === 'confirmed' && event.sourceSystem === 'hemory' && event.sourceType === 'ai_topic_segment');
+      !!event && event.customerId === customerId && event.attributionStatus === 'confirmed'
+      && event.sourceSystem === 'hemory' && event.sourceType === 'ai_topic_segment' && this.db.isHemoryFragmentActive(event.id));
   }
 
   // 同一录音的片段应进入同一批次，避免分次归属把一场会议拆成多条跟进记录。

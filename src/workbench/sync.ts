@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
+import type { HemorySegmentationResult } from './hemory.js';
 import { assessRisk } from './risk.js';
 import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceEventInput, type SyncRun, type WorkhourRecord } from './types.js';
 
@@ -334,7 +336,7 @@ export class PortfolioSyncService {
   private hemoryRun?: SyncRun;
 
   constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpGateway,
-    private readonly segmentRecording: (recording: SourceEvent) => Promise<SourceEvent[]>) {}
+    private readonly segmentRecording: (recording: SourceEvent) => Promise<HemorySegmentationResult>) {}
 
   refreshAll(): SyncRun {
     const run = this.db.createSyncRun('all');
@@ -445,6 +447,52 @@ export class PortfolioSyncService {
     const windowStart = new Date(new Date(startedAt).getTime() - (HEMORY_SYNC_WINDOW_DAYS - 1) * 86_400_000).toISOString();
     void this.executeHemory(run, windowStart, new Date().toISOString());
     return run;
+  }
+
+  /** 全量重切：遍历库内全部录音（不受滚动窗口限制），与 Hemory 互斥，逐录音成功即切换代际。 */
+  resegmentAllHemory(): SyncRun {
+    if (this.hemoryRun && this.db.getSyncRun(this.hemoryRun.id)?.status === 'running') return this.hemoryRun;
+    const run = this.db.createSyncRun('hemory:resegment:all');
+    this.hemoryRun = run;
+    void this.executeHemoryResegment(run);
+    return run;
+  }
+
+  private async executeHemoryResegment(run: SyncRun): Promise<void> {
+    interface RecordingOutcome { recordingId: string; status: 'succeeded' | 'failed'; fragments?: number; error?: string }
+    const outcomes: RecordingOutcome[] = [];
+    const backupPath = join(dirname(this.db.path), `workbench-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`);
+    try {
+      this.db.backupTo(backupPath);
+      const recordings = this.db.listHemoryRawTranscriptRecordings();
+      let proposed = 0;
+      let included = 0;
+      for (const recording of recordings) {
+        const recordingId = String(recording.payload?.recordingId ?? recording.externalId);
+        try {
+          const result = await this.segmentRecording(recording);
+          proposed += result.proposedCount;
+          included += result.includedCount;
+          outcomes.push({ recordingId, status: 'succeeded', fragments: result.includedCount });
+        } catch (error) {
+          outcomes.push({ recordingId, status: 'failed', error: (error as Error).message });
+        }
+      }
+      for (const customer of this.db.listCustomers()) this.recompute(customer.id);
+      const failed = outcomes.filter((outcome) => outcome.status === 'failed');
+      const summary = { status: failed.length ? 'partial' : 'succeeded', count: included,
+        error: failed.length ? `${failed.length}/${outcomes.length} 录音重切失败` : undefined,
+        recordings: outcomes.length, failedRecordings: failed.length,
+        discardedSegments: Math.max(0, proposed - included), backupPath } as Record<string, unknown>;
+      this.db.finishSyncRun(run.id, failed.length ? 'partial' : 'succeeded', { hemory: summary as SyncRun['sourceStatus'][string] },
+        failed.length ? failed.map((outcome) => `${outcome.recordingId}: ${outcome.error}`).join('; ') : undefined);
+      this.db.audit('csm', 'resegment_hemory_all', 'sync_run', run.id,
+        { recordings: outcomes.length, failed: failed.length, includedSegments: included, discardedSegments: Math.max(0, proposed - included), backupPath, failures: failed });
+    } catch (error) {
+      this.db.finishSyncRun(run.id, 'failed', { hemory: { status: 'failed', error: (error as Error).message } }, (error as Error).message);
+    } finally {
+      this.hemoryRun = undefined;
+    }
   }
 
   private async executeAll(run: SyncRun): Promise<void> {
@@ -816,7 +864,7 @@ export class PortfolioSyncService {
         externalId: recordingId, title: `Hemory 原始转写 ${recordingId}`, occurredAt: lines[0].spokenAt,
         confidence: 1, attributionStatus: 'unattributed', payload: { recordingId, startedAt: lines[0].spokenAt,
           endedAt: lines.at(-1)!.spokenAt, lines, transcript: lines.map((line) => `${line.speaker}: ${line.text}`).join('\n') } });
-      const fragments = await this.segmentRecording(recording);
+      const { events: fragments } = await this.segmentRecording(recording);
       count += fragments.length;
     }
     for (const customer of this.db.listCustomers()) this.recompute(customer.id);

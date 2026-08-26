@@ -34,6 +34,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/ignore')));
+  assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/resegment')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
 });
@@ -48,6 +49,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent hemory assign/);
   assert.match(help.stdout, /csm-agent hemory ignore/);
+  assert.match(help.stdout, /csm-agent hemory resegment --all/);
   assert.match(help.stdout, /csm-agent hemory inbox \[YYYY-MM-DD\] \[--days N\]/);
   assert.match(help.stdout, /csm-agent draft review/);
   assert.match(help.stdout, /csm-agent draft regenerate/);
@@ -75,7 +77,18 @@ test('hemory CLI covers ignore restore and incremental sync semantics', () => {
   assert.match(handler, /hemory\/fragments\/ignore/);
   assert.match(handler, /\/api\/hemory\/sync/);
   assert.match(handler, /--days=/);
-  assert.match(handler, /sync\/inbox\/assign\/clear\/ignore/);
+  assert.match(handler, /sync\/resegment\/inbox\/assign\/clear\/ignore/);
+});
+
+test('hemory resegment waits for the async run and reports v2 resegment statistics', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const handler = source.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
+  assert.ok(handler, 'hemoryCommand source was not found');
+  assert.match(handler, /\/api\/hemory\/resegment/);
+  assert.match(handler, /scope: 'all'/);
+  assert.match(handler, /waitSync\(run\.id, 3600\)/);
+  assert.match(handler, /discardedSegments/);
+  assert.match(handler, /--days=N/);
 });
 
 test('draft review prints structured display fields with raw JSON behind --json', () => {

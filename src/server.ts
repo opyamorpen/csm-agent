@@ -275,6 +275,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           ? workbench.sync.refreshHemoryDate(body.date)
           : workbench.sync.refreshRecentHemory());
       }
+      // 全量重切：遍历库内全部录音并按当前分段版本重切，与增量同步互斥；内部数据变更，无需外部写审批。
+      if (req.method === 'POST' && path === '/api/hemory/resegment') {
+        const body = await readBody(req);
+        if (body.scope !== 'all') return json(res, 400, { error: '仅支持 {"scope":"all"}' });
+        return json(res, 202, workbench.sync.resegmentAllHemory());
+      }
       if (req.method === 'GET' && path === '/api/hemory/fragments') {
         const daysParam = url.searchParams.get('days');
         const fragments = workbench.db.listHemoryFragments({ status: url.searchParams.get('status') ?? 'pending',
@@ -787,7 +793,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
       sync.recompute(customerId);
     }
   });
-  sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecording(recording));
+  sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording));
   const cases = new CaseService(db, runtime.mcp);
   const wecom = new WecomTodoService(db);
   const stopPortfolio = schedulePortfolioSync(sync);

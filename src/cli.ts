@@ -54,7 +54,7 @@ const CLI_CAPABILITIES = [
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
-  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/fragments', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore'] },
+  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
@@ -115,6 +115,7 @@ function help(): void {
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
   csm-agent sync [客户ID或名称]
   csm-agent hemory sync [YYYY-MM-DD]
+  csm-agent hemory resegment --all
   csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--json]
   csm-agent hemory assign <客户ID或名称> <片段ID...>
   csm-agent hemory clear <片段ID...>
@@ -331,8 +332,8 @@ async function rawApi(methodInput: string, path: string, json?: string): Promise
   }));
 }
 
-async function waitSync(id: string): Promise<any> {
-  for (let attempt = 0; attempt < 600; attempt++) {
+async function waitSync(id: string, maxAttempts = 600): Promise<any> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const run = await request<any>(`/api/sync-runs/${id}`);
     process.stdout.write(`\r同步 ${run.status} ${JSON.stringify(run.sourceStatus ?? {})}`.slice(0, 180).padEnd(180));
     if (run.status !== 'running') {
@@ -360,6 +361,23 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
       body: JSON.stringify({ date: values.shift() || undefined }) });
     return print(await waitSync(run.id));
   }
+  if (subcommand === 'resegment') {
+    if (!values.includes('--all')) throw new Error('hemory resegment 需要 --all（全量重切库内全部录音）');
+    const run = await request<any>('/api/hemory/resegment', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'all' }) });
+    // 逐录音两阶段模型调用耗时较长，等待上限放宽到 60 分钟。
+    const completed = await waitSync(run.id, 3600);
+    const summary = completed.sourceStatus?.hemory ?? {};
+    if (!jsonOutput) {
+      console.log(`录音总数 ${summary.recordings ?? '?'}，成功 ${summary.recordings != null ? Number(summary.recordings) - Number(summary.failedRecordings ?? 0) : '?'}，`
+        + `失败 ${summary.failedRecordings ?? 0}，新片段 ${summary.count ?? '?'}，丢弃段 ${summary.discardedSegments ?? '?'}。`);
+      if (summary.backupPath) console.log(`备份：${summary.backupPath}`);
+      console.log('超过 7 个上海自然日的录音，其待归属片段需用 hermory inbox --days=N 或日期过滤查看。');
+    }
+    print(completed);
+    if (completed.status !== 'succeeded') process.exitCode = 2;
+    return;
+  }
   if (subcommand === 'inbox') {
     const days = values.find((value) => /^--days=\d+$/.test(value));
     const date = values.find((value) => !value.startsWith('--') && /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? '';
@@ -367,6 +385,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     if (jsonOutput) return print(body.fragments);
     console.table((body.fragments ?? []).map((item: any) => ({ id: item.id, start: item.payload?.startAt ?? item.occurredAt,
       end: item.payload?.endAt ?? item.occurredAt, recording: item.payload?.recordingId, topic: item.payload?.topic ?? item.title,
+      part: item.payload?.topicGroupId ? `${item.payload?.topicPartIndex}/${item.payload?.topicPartCount}` : '',
       summary: String(item.payload?.summary ?? '').slice(0, 80), speakers: (item.payload?.speakers ?? []).join(','), status: item.attributionStatus })));
     return;
   }
@@ -383,7 +402,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     return print(await request('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventIds, customerId: customer?.id ?? null, expectedHashes }) }));
   }
-  throw new Error('hemory 子命令只允许 sync/inbox/assign/clear/ignore');
+  throw new Error('hemory 子命令只允许 sync/resegment/inbox/assign/clear/ignore');
 }
 
 // 草稿确认视图：与 Web 卡片共用服务端 displayFields，按最小必填项逐行结构化输出。

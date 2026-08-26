@@ -627,6 +627,7 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .fragment-evidence pre { max-height: 220px; margin: 6px 0 0; padding: 8px; overflow: auto; white-space: pre-wrap; border-left: 2px solid var(--border); color: #36414e; font: inherit; }
 .fragment-head, .draft-item-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .fragment-head { justify-content: space-between; }
+.fragment-topic-part { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px dashed var(--border); color: var(--accent); white-space: nowrap; }
 .draft-batch { border-top: 1px solid var(--border); padding-top: 12px; }
 .draft-batch:first-child { border-top: 0; padding-top: 0; }
 .draft-batch-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
