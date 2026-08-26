@@ -889,7 +889,9 @@ export class PortfolioSyncService {
     const customer = this.db.getCustomer(customerId);
     if (!customer) return;
     const evidence = this.db.listEvidence(customerId);
-    const risk = assessRisk(customer, evidence);
+    // 互动维度口径（csm-risk-v2）：最后互动取客户全量业务事件的最晚时间（lastInteractionAt），
+    // 仅在无任何事件时回退 CRM 原始最后联系时间。
+    const risk = assessRisk({ ...customer, lastContactAt: this.db.lastInteractionAt(customerId) ?? customer.lastContactAt }, evidence);
     this.db.saveRisk(risk);
 
     const opportunityEvidence = evidence.filter((item) => item.kind === 'opportunity' || (item.kind === 'voice' && /增购|扩容|采购|需要|模块/.test(item.detail)));

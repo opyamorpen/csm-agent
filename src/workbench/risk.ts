@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Customer, EvidenceInput, RiskAssessment } from './types.js';
 
-export const RISK_RULE_VERSION = 'csm-risk-v1';
+// v2：互动维度的最后互动时间由 CRM 原始字段改为客户全量业务事件的最晚时间（database.lastInteractionAt）。
+export const RISK_RULE_VERSION = 'csm-risk-v2';
 
 function daysUntil(date: string, now: Date): number | null {
   const value = new Date(date);

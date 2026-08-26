@@ -101,6 +101,31 @@ test('workbench: source events are idempotent by source identity', () => withDb(
   assert.equal(db.listTimeline('crm-3')[0].displayId, 'PROJ-1');
 }));
 
+test('workbench: last interaction aggregates the latest business event across sources and formats', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-inter', name: '互动客户', lastContactAt: '2026-08-10T02:00:00.000Z' });
+  // 三种 occurred_at 历史格式各一条：ISO Z、+08:00（Hemory）、naive 本地时间（ONES Desk 启动迁移）。
+  // naive '2026-08-25 20:00:00'（上海）= 12:00Z，必须大于同日的 ISO Z 08:00，验证没有把 naive 误当 UTC。
+  db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-1', title: '工单', occurredAt: '2026-08-25T08:00:00Z' });
+  db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'h-1', title: '沟通片段', occurredAt: '2026-08-20T10:00:00+08:00' });
+  db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-1', title: '建议', occurredAt: '2026-08-25 20:00:00' });
+  // customer_snapshot 是 CRM 记录修改元数据，不算互动。
+  db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'crm', sourceType: 'customer_snapshot', externalId: 'snap-1', title: '快照', occurredAt: '2026-08-26T09:00:00Z' });
+  assert.equal(db.lastInteractionAt('crm-inter'), '2026-08-25T12:00:00.000Z');
+  assert.equal((db.overview('crm-inter') as Record<string, unknown>).lastInteractionAt, '2026-08-25T12:00:00.000Z');
+
+  // 无任何事件时回退 CRM 最后联系时间。
+  db.upsertCustomer({ id: 'crm-only-crm', name: '只有CRM联系时间', lastContactAt: '2026-08-01T01:00:00.000Z' });
+  assert.equal(db.lastInteractionAt('crm-only-crm'), '2026-08-01T01:00:00.000Z');
+
+  // 停用片段（被新代际取代）不参与聚合，同时间线口径；recording_event_id 需真实存在的录音事件（外键）。
+  const recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-stale', title: '录音', occurredAt: '2026-08-26T10:00:00+08:00' });
+  const stale = db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'h-stale', title: '旧代际片段', occurredAt: '2026-08-26T18:00:00+08:00' });
+  db.activateHemoryFragments(recording.id, 'fp-stale', [stale.id]);
+  const fresh = db.upsertSourceEvent({ customerId: 'crm-inter', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'h-fresh', title: '新代际片段', occurredAt: '2026-08-26T11:00:00+08:00' });
+  db.activateHemoryFragments(recording.id, 'fp-stale-2', [fresh.id]);
+  assert.equal(db.lastInteractionAt('crm-inter'), '2026-08-26T03:00:00.000Z');
+}));
+
 test('workbench: ONES CSM sources are selected by customer option and exact issue types', () => {
   const query = buildOnesCustomerQuery('customer-option-1');
   assert.match(query, /JrvswW8P = 'customer-option-1'/);

@@ -90,6 +90,17 @@ function shanghaiTodayStart(now = new Date()): Date {
   return new Date(`${key}T00:00:00+08:00`);
 }
 
+/**
+ * occurred_at 历史上混有三种格式：ISO Z（部分 ONES/CRM）、+08:00（Hemory）、naive 本地时间
+ * （ONES Desk 三类由启动迁移写入，无时区后缀，实为上海时间）。naive 必须补 +08:00 解析，
+ * 否则会被 Date.parse 当 UTC，聚合出的最晚时间偏早 8 小时；无法解析返回 null。
+ */
+function parseOccurredAt(value: string): number | null {
+  const text = value.trim();
+  const at = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? Date.parse(`${text.replace(' ', 'T')}+08:00`) : Date.parse(text);
+  return Number.isNaN(at) ? null : at;
+}
+
 function customerFromRow(row: Row): Customer {
   return {
     id: String(row.id),
@@ -1247,11 +1258,33 @@ export class WorkbenchDatabase {
       .run(randomUUID(), actor, action, entityType, entityId, json(details), nowIso());
   }
 
+  /**
+   * 客户「最后互动时间」：该客户全部业务事件 occurred_at 与 CRM 最后联系时间（last_contact_at）的最大值。
+   * 覆盖 ONES 建议/工单/运维/工时/私有云、CRM 跟进记录（含手动录入）、Hemory 活跃片段；
+   * 排除 crm/customer_snapshot（记录修改属元数据，不算互动）与被新代际停用的片段（同时间线口径）。
+   * occurred_at 混有 Z/+08:00/naive 三种格式，须逐行经 parseOccurredAt 解析，不能字符串比较。
+   */
+  lastInteractionAt(customerId: string): string | null {
+    let latest: number | null = null;
+    const touch = (value: string | null | undefined) => {
+      if (!value) return;
+      const at = parseOccurredAt(value);
+      if (at != null && (latest == null || at > latest)) latest = at;
+    };
+    touch(this.getCustomer(customerId)?.lastContactAt ?? null);
+    const rows = this.db.prepare(`SELECT occurred_at FROM source_events WHERE customer_id=?
+      AND NOT (source_system='crm' AND source_type='customer_snapshot')
+      AND NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)`).all(customerId) as Row[];
+    for (const row of rows) touch(row.occurred_at as string | null);
+    return latest == null ? null : new Date(latest).toISOString();
+  }
+
   overview(customerId: string): Record<string, unknown> | null {
     const customer = this.getCustomer(customerId);
     if (!customer) return null;
     return {
       customer,
+      lastInteractionAt: this.lastInteractionAt(customerId),
       identities: this.listIdentities(customerId),
       risk: this.latestRisk(customerId),
       opportunities: this.listOpportunities(customerId),

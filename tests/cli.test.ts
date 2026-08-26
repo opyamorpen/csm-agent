@@ -136,3 +136,12 @@ test('customer portfolio display contract exposes the supported sort controls', 
   assert.match(html, /value="renewal_amount"/);
   assert.match(app, /sort=\$\{encodeURIComponent\(customerSort\.value\)\}/);
 });
+
+test('customer overview CLI reports the aggregated last interaction time', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const showCustomer = source.match(/async function showCustomer[\s\S]*?\n}\n\nasync function showTimeline/)?.[0];
+
+  // 显示契约：与 Web 概览一致，最后互动优先取服务端聚合时间（全量业务事件最晚时间），回退 CRM 原始字段。
+  assert.ok(showCustomer, 'showCustomer source was not found');
+  assert.match(showCustomer, /最后互动: \$\{overview\.lastInteractionAt \?\? overview\.customer\.lastContactAt \?\? 'unknown'\}/);
+});

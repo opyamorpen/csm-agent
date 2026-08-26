@@ -1336,8 +1336,8 @@
     commands.append(refresh, generate, ask); head.append(title, commands); customerOverview.append(head);
 
     const summary = el('div', 'definition-grid');
-    summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)), definition('产品', (c.products || []).join('、')),
-      definition('最后互动', formatDate(c.lastContactAt)), definition('合同状态', c.contractStatus), definition('数据同步', formatDateTime(c.syncedAt)));
+    summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)),
+      definition('最后互动', formatDate(data.lastInteractionAt ?? c.lastContactAt)), definition('数据同步', formatDateTime(c.syncedAt)));
     customerOverview.append(summary);
 
     const opportunities = el('div', 'opportunity-grid');

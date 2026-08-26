@@ -59,6 +59,28 @@ test('draft cards render structured minimal required fields instead of a summary
   assert.match(styles, /\.draft-field-row \{/);
 });
 
+test('customer overview summary grid drops product and contract status, shows aggregated last interaction', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const summary = source.match(/const summary = el\('div', 'definition-grid'\);[\s\S]*?customerOverview\.append\(summary\);/)?.[0];
+
+  // 显示契约：概览摘要只保留 4 项；「最后互动」优先用服务端聚合时间（全量业务事件最晚时间），回退 CRM 原始字段。
+  assert.ok(summary, 'customer overview summary grid source was not found');
+  assert.doesNotMatch(summary, /definition\('产品'/);
+  assert.doesNotMatch(summary, /definition\('合同状态'/);
+  assert.match(summary, /definition\('续约日期', formatDate\(c\.renewalDate\)\)/);
+  assert.match(summary, /definition\('最后互动', formatDate\(data\.lastInteractionAt \?\? c\.lastContactAt\)\)/);
+  assert.match(summary, /definition\('数据同步', formatDateTime\(c\.syncedAt\)\)/);
+  assert.equal((summary.match(/definition\(/g) ?? []).length, 4);
+
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.definition-grid \{ display: grid; grid-template-columns: repeat\(4, minmax\(120px, 1fr\)\)/);
+  // ≤980px 断点 4 项呈 2×2，避免 3+1 错行。
+  const narrow = styles.match(/@media \(max-width: 980px\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(narrow, '980px media block was not found');
+  assert.match(narrow, /\.definition-grid \{ grid-template-columns: repeat\(2, 1fr\); \}/);
+  assert.match(narrow, /\.definition:nth-child\(2n\) \{ border-right: 0; \}/);
+});
+
 test('customer detail tabs drop meetings and followups list CRM sales records by create time', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const tabStrip = source.match(/const overview = el\('div'\);[\s\S]*?tabs\[0\]\.button\.click\(\);/)?.[0];
