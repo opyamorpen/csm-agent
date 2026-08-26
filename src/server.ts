@@ -271,13 +271,33 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
       if (req.method === 'POST' && path === '/api/hemory/sync') {
         const body = await readBody(req);
-        return json(res, 202, workbench.sync.refreshHemoryDate(typeof body.date === 'string' ? body.date : undefined));
+        return json(res, 202, typeof body.date === 'string' && body.date
+          ? workbench.sync.refreshHemoryDate(body.date)
+          : workbench.sync.refreshRecentHemory());
       }
       if (req.method === 'GET' && path === '/api/hemory/fragments') {
+        const daysParam = url.searchParams.get('days');
         const fragments = workbench.db.listHemoryFragments({ status: url.searchParams.get('status') ?? 'pending',
           date: url.searchParams.get('date') ?? undefined, recordingId: url.searchParams.get('recording_id') ?? undefined,
-          cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100) });
+          cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100),
+          days: daysParam == null ? undefined : Math.max(0, Number(daysParam) || 0) });
         return json(res, 200, { fragments, nextCursor: fragments.at(-1)?.occurredAt ?? null });
+      }
+      if (req.method === 'PUT' && path === '/api/hemory/fragments/ignore') {
+        const body = await readBody(req);
+        const eventIds = Array.isArray(body.eventIds) ? body.eventIds.map(String) : [];
+        if (!eventIds.length) return json(res, 400, { error: 'eventIds 不能为空' });
+        const previousCustomers = new Set(eventIds.map((id: string) => workbench.db.getSourceEvent(id)?.customerId).filter(Boolean) as string[]);
+        try {
+          const events = workbench.db.ignoreHemoryFragments(eventIds,
+            isRecord(body.expectedHashes) ? Object.fromEntries(Object.entries(body.expectedHashes).map(([key, value]) => [key, String(value)])) : {}, 'csm');
+          workbench.db.markDraftsStaleForEvents(eventIds);
+          workbench.db.deleteEvidenceForSourceEvents(eventIds);
+          for (const id of previousCustomers) workbench.sync.recompute(id);
+          return json(res, 200, { events });
+        } catch (error) {
+          return json(res, 409, { error: (error as Error).message });
+        }
       }
       if (req.method === 'PUT' && path === '/api/hemory/fragments/attribution') {
         const body = await readBody(req);

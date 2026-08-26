@@ -75,3 +75,30 @@ test('customer detail tabs drop meetings and followups list CRM sales records by
   assert.match(renderer, /createdAt\(right\) - createdAt\(left\)/);
   assert.doesNotMatch(renderer, /nextAction/);
 });
+
+test('hemory inbox exposes ignore and restore actions with incremental sync', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+  const ignorer = source.match(/async function ignoreHemoryFragments[\s\S]*?\n  }\n\n  async function updateHemoryAttribution/)?.[0];
+
+  // 显示契约：忽略/恢复按钮、已忽略徽章、忽略走专用接口。
+  assert.ok(renderer, 'loadHemoryInbox source was not found');
+  assert.match(renderer, /'已忽略', 'muted'/);
+  assert.match(renderer, /attributionStatus === 'ignored' \? badge\('已忽略', 'muted'\)/);
+  assert.match(renderer, /const ignore = el\('button', 'quiet-command small', '忽略'\)/);
+  assert.match(renderer, /const restore = el\('button', 'quiet-command small', '恢复'\)/);
+  assert.ok(ignorer, 'ignoreHemoryFragments source was not found');
+  assert.match(ignorer, /\/api\/hemory\/fragments\/ignore/);
+
+  // 不再默认把日期过滤器钉死为今天，由服务端 7 天窗口控制默认可见范围。
+  assert.doesNotMatch(source, /hemoryDate\.value = chinaDate\(\)/);
+
+  // 同步按钮与状态选项：增量同步 + 已忽略状态筛选。
+  assert.match(html, /增量同步/);
+  assert.match(html, /<option value="ignored">已忽略<\/option>/);
+  assert.match(html, /id="hemoryIgnore"/);
+
+  // 恢复走既有 attribution 接口（customerId=null 回到待归属）。
+  assert.match(renderer, /eventIds: \[fragment\.id\], customerId: null/);
+});

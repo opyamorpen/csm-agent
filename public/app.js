@@ -674,10 +674,6 @@
 
   // ── Agent Hemory workspace ─────────────────────────────────────
 
-  function chinaDate() {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-  }
-
   async function ensureCustomerOptions() {
     if (!customersCache.length) customersCache = (await api('/api/customers')).customers || [];
     hemoryCustomerOptions.innerHTML = '';
@@ -715,7 +711,31 @@
       const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.eventId = fragment.id; check.dataset.payloadHash = fragment.payloadHash;
       const body = el('div', 'fragment-body');
       const head = el('div', 'fragment-head');
-      head.append(el('strong', null, fragment.payload?.topic || fragment.title), badge(fragment.attributionStatus === 'confirmed' ? '已归属' : fragment.attributionStatus === 'ambiguous' ? '有歧义' : '待归属', fragment.attributionStatus === 'confirmed' ? 'success' : 'warning'));
+      const statusBadge = fragment.attributionStatus === 'confirmed' ? badge('已归属', 'success')
+        : fragment.attributionStatus === 'ignored' ? badge('已忽略', 'muted')
+        : badge(fragment.attributionStatus === 'ambiguous' ? '有歧义' : '待归属', 'warning');
+      head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
+      const rowActions = el('div', 'row-actions');
+      if (fragment.attributionStatus === 'ignored') {
+        const restore = el('button', 'quiet-command small', '恢复');
+        restore.type = 'button';
+        restore.onclick = async (event) => {
+          event.preventDefault(); event.stopPropagation();
+          try { await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ eventIds: [fragment.id], customerId: null, expectedHashes: { [fragment.id]: fragment.payloadHash } }) }); await loadHemoryInbox(); }
+          catch (error) { alert(error.message); }
+        };
+        rowActions.append(restore);
+      } else {
+        const ignore = el('button', 'quiet-command small', '忽略');
+        ignore.type = 'button';
+        ignore.onclick = async (event) => {
+          event.preventDefault(); event.stopPropagation();
+          try { await ignoreHemoryFragments([fragment.id]); } catch (error) { alert(error.message); }
+        };
+        rowActions.append(ignore);
+      }
+      head.append(rowActions);
       const evidence = document.createElement('details');
       evidence.className = 'fragment-evidence';
       evidence.append(el('summary', null, '查看原文证据'), el('pre', null, fragment.payload?.transcript || '无原文'));
@@ -724,6 +744,15 @@
         el('div', 'cell-sub', `${formatDateTime(fragment.payload?.startAt || fragment.occurredAt)} - ${formatDateTime(fragment.payload?.endAt || fragment.occurredAt)} · ${speakers} · ${fragment.customerId ? `CRM ${fragment.customerId}` : '未绑定客户'} · ${fragment.id}`));
       row.append(check, body); hemoryFragmentList.append(row);
     }
+  }
+
+  async function ignoreHemoryFragments(eventIds) {
+    const expectedHashes = Object.fromEntries([...hemoryFragmentList.querySelectorAll('input[type="checkbox"]')]
+      .filter((input) => eventIds.includes(input.dataset.eventId))
+      .map((input) => [input.dataset.eventId, input.dataset.payloadHash]));
+    await api('/api/hemory/fragments/ignore', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventIds, expectedHashes }) });
+    await loadHemoryInbox();
   }
 
   async function updateHemoryAttribution(clear) {
@@ -850,14 +879,19 @@
   }
 
   for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.onclick = () => void showAgentMode(tab.dataset.agentMode);
-  hemoryDate.value = chinaDate();
   hemoryStatus.onchange = () => void loadHemoryInbox();
   hemoryDate.onchange = () => void loadHemoryInbox();
   document.getElementById('hemoryAssign').onclick = () => void updateHemoryAttribution(false);
   document.getElementById('hemoryClear').onclick = () => void updateHemoryAttribution(true);
+  document.getElementById('hemoryIgnore').onclick = async () => {
+    const eventIds = selectedHemoryFragments();
+    if (!eventIds.length) return alert('请先选择片段');
+    try { await ignoreHemoryFragments(eventIds); } catch (error) { alert(error.message); }
+  };
   document.getElementById('refreshDrafts').onclick = () => void loadDraftBatches();
   document.getElementById('hemorySync').onclick = async () => {
-    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryDate.value || chinaDate() }) }); await pollSync(run.id); await loadHemoryInbox(); }
+    // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日。
+    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryDate.value || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }
     catch (error) { alert(error.message); }
   };
 

@@ -1,6 +1,6 @@
 export type RiskLevel = 'high' | 'medium' | 'low' | 'unknown';
 export type ActionStatus = 'new' | 'accepted' | 'in_progress' | 'completed' | 'snoozed' | 'false_positive';
-export type AttributionStatus = 'confirmed' | 'ambiguous' | 'unattributed';
+export type AttributionStatus = 'confirmed' | 'ambiguous' | 'unattributed' | 'ignored';
 export type DraftItemType = 'internal_todo' | 'workhour' | 'followup' | 'suggestion' | 'ticket' | 'operations';
 export type DraftItemStatus = 'draft' | 'ready' | 'writing' | 'written' | 'failed' | 'dismissed' | 'stale';
 export type DraftGenerationStatus = 'pending' | 'running' | 'succeeded' | 'failed';

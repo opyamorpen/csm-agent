@@ -61,9 +61,10 @@ csm-agent case preview <草稿ID> <ONES父页面ID>
 csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <preview返回的批准哈希>
 csm-agent sync [CRM客户ID]
 csm-agent hemory sync [YYYY-MM-DD]
-csm-agent hemory inbox [YYYY-MM-DD]
+csm-agent hemory inbox [YYYY-MM-DD] [--days N]
 csm-agent hemory assign <客户ID或名称> <片段ID...>
 csm-agent hemory clear <片段ID...>
+csm-agent hemory ignore <片段ID...>
 csm-agent drafts [客户ID或名称]
 csm-agent draft review <批次ID>
 csm-agent draft retry <草稿ID>
@@ -132,7 +133,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
-- `POST /api/hemory/sync`、`GET /api/hemory/fragments`、`PUT /api/hemory/fragments/attribution`
+- `POST /api/hemory/sync`、`GET /api/hemory/fragments`、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
@@ -143,6 +144,8 @@ ONES_TEAM_ID=RDjYMhKq
 
 - CRM `_id` 是客户主键；CRM「客户名称」（`field_n1qN0__c__r`）或「售后客户名称」（`field_83f4l__c`）必须与 ONES「客户信息」选项精确且唯一匹配，Hemory 也只在唯一匹配时自动归属，歧义与未归属内容不会进入客户判断。
 - Hemory MCP 当前只提供词法和时间窗口转写搜索，不返回 Hemory 页面中的原生摘要、话题或 section ID；CSM Agent 保存原始转写后使用当前配置的大模型生成自己的话题片段，页面会明确展示话题、摘要和可展开原文证据。
+- Hemory 同步是滚动 7 天增量：自动（13:00/20:00）与手动同步都扫描最近 7 个上海自然日，已入库片段按外部 ID 去重、已归属/已忽略状态在重同步后保持。待归属列表默认只显示最近 7 天（`days=0` 关闭，指定日期或全部状态不受限），超过 7 天的片段不删除，可按日期找回。
+- 片段支持「忽略」：忽略后不再出现在待归属列表、重同步也不会重新进入，可在「已忽略」状态下查看并通过「恢复」（清除归属语义）回到待归属。
 - 同一录音晚间出现新增转写时，Agent 基于完整新内容重新分段；只有最新成功的一代片段进入待归属。旧片段和已写记录保留审计，旧片段关联的未写草稿会标记为失效。
 - 人工 Hemory 归属覆盖自动名称匹配，后续当天全量重拉不会冲掉 CSM 标记；重新归属会令未写出草稿失效，已写记录只保留审计提示，不自动反向修改 CRM/ONES。
 - “需求”草稿写入 ONES Desk「建议和反馈」；工单写入 ONES Desk「工单」；二者都必须绑定客户字段 `JrvswW8P`。工时只写当前客户已绑定的售后客户工作项，沟通记录必须绑定 CRM `_id`。

@@ -33,6 +33,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
+  assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/ignore')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
 });
@@ -46,6 +47,8 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent action complete/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent hemory assign/);
+  assert.match(help.stdout, /csm-agent hemory ignore/);
+  assert.match(help.stdout, /csm-agent hemory inbox \[YYYY-MM-DD\] \[--days N\]/);
   assert.match(help.stdout, /csm-agent draft review/);
   assert.match(help.stdout, /csm-agent draft regenerate/);
   assert.match(help.stdout, /csm-agent service install/);
@@ -63,6 +66,16 @@ test('draft regenerate waits for the new batch and points to the review step', (
   assert.match(handler, /waitForRegeneratedBatch/);
   assert.match(handler, /draft review/);
   assert.match(handler, /已作废/);
+});
+
+test('hemory CLI covers ignore restore and incremental sync semantics', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const handler = source.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
+  assert.ok(handler, 'hemoryCommand source was not found');
+  assert.match(handler, /hemory\/fragments\/ignore/);
+  assert.match(handler, /\/api\/hemory\/sync/);
+  assert.match(handler, /--days=/);
+  assert.match(handler, /sync\/inbox\/assign\/clear\/ignore/);
 });
 
 test('draft review prints structured display fields with raw JSON behind --json', () => {

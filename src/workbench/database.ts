@@ -27,6 +27,9 @@ import { renewalWithin } from './risk.js';
 
 type Row = Record<string, unknown>;
 
+/** 待归属列表默认保留的上海自然日数量（含今天），超出仅在指定日期或全部状态下可见。 */
+export const HEMORY_PENDING_WINDOW_DAYS = 7;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -45,6 +48,20 @@ function parseJson<T>(value: unknown, fallback: T): T {
 
 function bool(value: unknown): boolean | null {
   return value == null ? null : Number(value) === 1;
+}
+
+/** 上海自然日 → UTC ISO 闭区间；occurred_at 是 ISO 字符串，用区间比较避免 UTC 日期前缀把早 8 点前的录音错位到前一天。 */
+function shanghaiDayRange(date: string): { start: string; end: string } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期必须是 YYYY-MM-DD');
+  const start = new Date(`${date}T00:00:00+08:00`);
+  if (Number.isNaN(start.getTime())) throw new Error('invalid date');
+  return { start: start.toISOString(), end: new Date(start.getTime() + 86_400_000 - 1).toISOString() };
+}
+
+/** 上海今天 00:00 对应的 UTC 时间点；待归属默认保留窗口以它为锚。 */
+function shanghaiTodayStart(now = new Date()): Date {
+  const key = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  return new Date(`${key}T00:00:00+08:00`);
 }
 
 function customerFromRow(row: Row): Customer {
@@ -608,22 +625,36 @@ export class WorkbenchDatabase {
   }
 
   listUnattributed(limit = 100): SourceEvent[] {
-    const rows = this.db.prepare("SELECT * FROM source_events WHERE attribution_status!='confirmed' ORDER BY occurred_at DESC LIMIT ?").all(limit) as Row[];
+    const rows = this.db.prepare("SELECT * FROM source_events WHERE attribution_status NOT IN ('confirmed','ignored') ORDER BY occurred_at DESC LIMIT ?").all(limit) as Row[];
     return rows.map(sourceEventFromRow);
   }
 
-  listHemoryFragments(filters: { status?: string; date?: string; recordingId?: string; limit?: number; cursor?: string } = {}): SourceEvent[] {
+  listHemoryFragments(filters: { status?: string; date?: string; recordingId?: string; limit?: number; cursor?: string; days?: number } = {}): SourceEvent[] {
     const clauses = ["source_system='hemory'", "source_type='ai_topic_segment'", 'g.active=1'];
     const args: Array<string | number | null> = [];
     if (filters.status && filters.status !== 'all') {
-      if (filters.status === 'pending') clauses.push("attribution_status!='confirmed'");
+      if (filters.status === 'pending') clauses.push("attribution_status NOT IN ('confirmed','ignored')");
       else { clauses.push('attribution_status=?'); args.push(filters.status); }
     }
-    if (filters.date) { clauses.push("substr(occurred_at,1,10)=?"); args.push(filters.date); }
+    // occurred_at 历史上混有 +08:00 与 Z 两种 ISO 格式，比较/排序必须先经 datetime() 归一化，否则同日字面时刻会错位。
+    if (filters.date) {
+      const range = shanghaiDayRange(filters.date);
+      clauses.push('datetime(occurred_at)>=datetime(?)', 'datetime(occurred_at)<=datetime(?)');
+      args.push(range.start, range.end);
+    }
+    // 待归属默认只保留最近 7 个上海自然日，避免长期不处理导致列表堆积；显式日期/全部状态不受限。
+    if (filters.status === 'pending' && !filters.date) {
+      const days = Math.max(0, filters.days ?? HEMORY_PENDING_WINDOW_DAYS);
+      if (days > 0) {
+        const start = new Date(shanghaiTodayStart().getTime() - (days - 1) * 86_400_000);
+        clauses.push('datetime(occurred_at)>=datetime(?)');
+        args.push(start.toISOString());
+      }
+    }
     if (filters.recordingId) { clauses.push("json_extract(payload_json,'$.recordingId')=?"); args.push(filters.recordingId); }
-    if (filters.cursor) { clauses.push('occurred_at<?'); args.push(filters.cursor); }
+    if (filters.cursor) { clauses.push('datetime(occurred_at)<datetime(?)'); args.push(filters.cursor); }
     const limit = Math.min(500, Math.max(1, filters.limit ?? 100));
-    const rows = this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id WHERE ${clauses.map((clause) => clause.replace(/\b(source_system|source_type|attribution_status|occurred_at|payload_json)\b/g, 'e.$1')).join(' AND ')} ORDER BY e.occurred_at DESC LIMIT ?`)
+    const rows = this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id WHERE ${clauses.map((clause) => clause.replace(/\b(source_system|source_type|attribution_status|payload_json)\b/g, 'e.$1').replace(/\boccurred_at\b/g, 'e.occurred_at')).join(' AND ')} ORDER BY datetime(e.occurred_at) DESC LIMIT ?`)
       .all(...args, limit) as Row[];
     return rows.map(sourceEventFromRow);
   }
@@ -671,6 +702,33 @@ export class WorkbenchDatabase {
           .run(customerId, status, customerId ? 1 : 0.2, eventId);
         this.audit(actor, customerId ? 'attribute_hemory_fragment' : 'clear_hemory_attribution', 'source_event', eventId,
           { previousCustomerId, customerId, payloadHash: event.payloadHash });
+        changed.push(this.getSourceEvent(eventId)!);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return changed;
+  }
+
+  /** 忽略片段：从待归属列表隐藏且重同步不再进入；写入 override，恢复走 attributeHemoryFragments(ids, null)。 */
+  ignoreHemoryFragments(eventIds: string[], expectedHashes: Record<string, string>, actor = 'csm'): SourceEvent[] {
+    const now = nowIso();
+    const changed: SourceEvent[] = [];
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const eventId of [...new Set(eventIds)]) {
+        const event = this.getSourceEvent(eventId);
+        if (!event || event.sourceSystem !== 'hemory' || event.sourceType !== 'ai_topic_segment') throw new Error(`Hemory fragment not found: ${eventId}`);
+        if (expectedHashes[eventId] && expectedHashes[eventId] !== event.payloadHash) throw new Error(`片段内容已变化，请刷新后重试: ${eventId}`);
+        const previousCustomerId = event.customerId ?? null;
+        this.db.prepare(`INSERT INTO hemory_attributions(event_id,customer_id,status,actor,payload_hash,attributed_at) VALUES(?,?,?,?,?,?)
+          ON CONFLICT(event_id) DO UPDATE SET customer_id=excluded.customer_id,status=excluded.status,actor=excluded.actor,payload_hash=excluded.payload_hash,attributed_at=excluded.attributed_at`)
+          .run(eventId, null, 'ignored', actor, event.payloadHash, now);
+        this.db.prepare('UPDATE source_events SET customer_id=?,attribution_status=?,confidence=? WHERE id=?')
+          .run(null, 'ignored', 0, eventId);
+        this.audit(actor, 'ignore_hemory_fragment', 'source_event', eventId, { previousCustomerId, payloadHash: event.payloadHash });
         changed.push(this.getSourceEvent(eventId)!);
       }
       this.db.exec('COMMIT');

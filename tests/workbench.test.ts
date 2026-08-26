@@ -190,6 +190,75 @@ test('workbench: manual Hemory attribution survives a later full upsert', () => 
   assert.equal(refreshed.attributionStatus, 'confirmed');
 }));
 
+test('workbench: ignored Hemory fragments stay hidden and ignored across re-sync until restored', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-i', name: '客户己' });
+  // 直接 upsert 的片段绕过分段服务，需先落一个 raw_transcript 录音再手动登记 generation 才会出现在列表查询。
+  db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'r-ignore', title: '原始转写',
+    occurredAt: new Date().toISOString(), payload: { recordingId: 'r-ignore' }, attributionStatus: 'unattributed' });
+  const register = (eventIds: string[]) => db.activateHemoryFragments(db.findSourceEvent('hemory', 'raw_transcript', 'r-ignore')!.id, 'fingerprint-ignore', eventIds);
+  const upsert = (occurredAt: string, externalId: string) => db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+    externalId, title: '待忽略片段', occurredAt, payload: { recordingId: 'r-ignore', rawRecordingEventId: 'rec-raw-ignore', transcript: '待忽略片段' }, attributionStatus: 'unattributed' });
+  const recent = upsert(new Date().toISOString(), 'r-ignore:t0:x');
+  register([recent.id]);
+  assert.ok(db.listHemoryFragments({ status: 'pending' }).some((item) => item.id === recent.id));
+  db.ignoreHemoryFragments([recent.id], { [recent.id]: recent.payloadHash });
+  // 待归属不可见、已忽略状态可见、全部状态可见。
+  assert.equal(db.listHemoryFragments({ status: 'pending' }).some((item) => item.id === recent.id), false);
+  assert.equal(db.listHemoryFragments({ status: 'ignored' }).some((item) => item.id === recent.id), true);
+  assert.ok(db.listHemoryFragments({ status: 'all' }).some((item) => item.id === recent.id));
+  // 重同步 upsert 后忽略状态回放保持。
+  const resynced = upsert(new Date().toISOString(), 'r-ignore:t0:x');
+  assert.equal(resynced.attributionStatus, 'ignored');
+  assert.equal(resynced.customerId, null);
+  // hash 变化时拒绝忽略，避免误覆盖新内容。
+  const changed = db.getSourceEvent(recent.id)!;
+  assert.throws(() => db.ignoreHemoryFragments([recent.id], { [recent.id]: `${changed.payloadHash}-stale` }), /片段内容已变化/);
+  // 恢复 = 清除归属，回到待归属。
+  db.attributeHemoryFragments([recent.id], null, {});
+  assert.equal(db.listHemoryFragments({ status: 'pending' }).some((item) => item.id === recent.id), true);
+}));
+
+test('workbench: pending Hemory list defaults to a 7-day Shanghai window and date filter uses Shanghai bounds', () => withDb((db) => {
+  const upsert = (externalId: string, occurredAt: string) => db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+    externalId, title: '窗口片段', occurredAt, payload: { recordingId: 'r-window', rawRecordingEventId: 'rec-raw-window', transcript: '窗口片段' }, attributionStatus: 'unattributed' });
+  const events: string[] = [];
+  const insert = (externalId: string, occurredAt: string) => { const event = upsert(externalId, occurredAt); events.push(event.id); return event; };
+  // 全部发生在“今天”（上海），必须在默认窗口内。
+  const now = new Date();
+  const today = insert('r-window:t0:x', now.toISOString());
+  // 上海 6 天前（窗口边界最后一天）与 8 天前（窗口外）。
+  const todayStart = new Date(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now) + 'T00:00:00+08:00');
+  const edge = insert('r-window:t1:x', new Date(todayStart.getTime() - 6 * 86_400_000 + 3_600_000).toISOString());
+  const outside = insert('r-window:t2:x', new Date(todayStart.getTime() - 8 * 86_400_000).toISOString());
+  const shanghai = insert('r-window:t3:x', '2026-08-24T18:00:00Z');
+  // 统一登记 generation（activateHemoryFragments 每次会重置整批 active，最后一次性登记）。
+  const rawEvent = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'r-window', title: '原始转写',
+    occurredAt: today.occurredAt, payload: { recordingId: 'r-window' }, attributionStatus: 'unattributed' });
+  db.activateHemoryFragments(rawEvent.id, 'fingerprint-window', events);
+  const pendingIds = db.listHemoryFragments({ status: 'pending' }).map((item) => item.id);
+  assert.ok(pendingIds.includes(today.id));
+  assert.ok(pendingIds.includes(edge.id));
+  assert.equal(pendingIds.includes(outside.id), false);
+  // days=0 关闭窗口；指定日期不受窗口限制；全部状态不受窗口限制。
+  assert.ok(db.listHemoryFragments({ status: 'pending', days: 0 }).map((item) => item.id).includes(outside.id));
+  const outsideDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(todayStart.getTime() - 8 * 86_400_000));
+  assert.ok(db.listHemoryFragments({ status: 'pending', date: outsideDate }).map((item) => item.id).includes(outside.id));
+  assert.ok(db.listHemoryFragments({ status: 'all' }).map((item) => item.id).includes(outside.id));
+  // 上海日期过滤：UTC 前一天 18:00（上海当天 02:00）必须落在指定上海日。
+  assert.ok(db.listHemoryFragments({ status: 'pending', date: '2026-08-25' }).map((item) => item.id).includes(shanghai.id));
+  assert.equal(db.listHemoryFragments({ status: 'pending', date: '2026-08-24' }).map((item) => item.id).includes(shanghai.id), false);
+  // 历史数据是 +08:00 本地格式（与 UTC Z 混存），比较必须先归一化：
+  // 上海 8-25 23:00 = UTC 8-25 15:00，字符串比较会错判出 8-25 区间。
+  const plusOffset = insert('r-window:t4:x', '2026-08-25T23:00:00+08:00');
+  db.activateHemoryFragments(rawEvent.id, 'fingerprint-window', events);
+  assert.ok(db.listHemoryFragments({ status: 'pending', date: '2026-08-25' }).map((item) => item.id).includes(plusOffset.id));
+  // 7 天窗口对 +08:00 格式同样生效：今天上海 10:00 的片段必须在默认窗口内。
+  const nowPlusOffset = insert('r-window:t5:x', new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date()) + '+08:00');
+  db.activateHemoryFragments(rawEvent.id, 'fingerprint-window', events);
+  assert.ok(db.listHemoryFragments({ status: 'pending' }).map((item) => item.id).includes(nowPlusOffset.id));
+}));
+
 function fakeSegmentationRuntime(outputs: Array<Record<string, unknown>>) {
   let calls = 0;
   return {
@@ -266,6 +335,34 @@ test('workbench: Shanghai schedule uses 13:00 and current-day full bounds', () =
   assert.equal(bounds.startedAt, '2026-08-24T16:00:00.000Z');
   assert.equal(bounds.endedAt, now.toISOString());
   assert.equal(nextHemorySlot(new Date('2026-08-25T06:00:00Z')).hour, 20);
+});
+
+test('workbench: recent Hemory sync scans a rolling 7-day Shanghai window', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-window-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const calls: Array<Record<string, unknown>> = [];
+    const mcp = {
+      call: async (_publicName: string, args: any) => {
+        calls.push(args);
+        return { text: '# more=false\n', isError: false } as any;
+      },
+    } as any;
+    const service = new PortfolioSyncService(db, mcp, async () => []);
+    const run = service.refreshRecentHemory();
+    for (let i = 0; i < 50 && db.getSyncRun(run.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(db.getSyncRun(run.id)?.status, 'succeeded');
+    assert.equal(db.getSyncRun(run.id)?.scope, 'hemory:recent');
+    assert.equal(calls.length, 1);
+    const todayStart = new Date(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date()) + 'T00:00:00+08:00');
+    const expectedStart = new Date(todayStart.getTime() - 6 * 86_400_000).toISOString();
+    assert.equal(calls[0]?.started_at, expectedStart);
+    // 运行中的同步互斥：滚动窗口任务完成后才允许新的 Hemory run（此处已完成，返回新 run）。
+    const second = service.refreshHemoryDate('2026-08-25');
+    assert.notEqual(second.id, run.id);
+    for (let i = 0; i < 50 && db.getSyncRun(second.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: relevant Hemory evidence creates drafts and approved local todo only', async () => {

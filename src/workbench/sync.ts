@@ -41,6 +41,9 @@ const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 const ONES_WEB_BASE_URL = (process.env.ONES_WEB_BASE_URL ?? 'https://our.ones.pro').replace(/\/$/, '');
 const ONES_TEAM_ID = process.env.ONES_TEAM_ID ?? 'RDjYMhKq';
 
+/** 自动/手动增量同步扫描的滚动窗口（上海自然日，含今天）。已入库录音靠分段指纹与 upsert 去重。 */
+export const HEMORY_SYNC_WINDOW_DAYS = 7;
+
 export const ONES_CSM_SOURCES = [
   { projectId: 'GL3ysesFPdnAQNIU', projectName: 'ONES Desk', issueTypeId: 'A99xMfkg', issueTypeName: '建议和反馈', sourceType: 'suggestion_feedback' },
   { projectId: 'GL3ysesFPdnAQNIU', projectName: 'ONES Desk', issueTypeId: '7sxvwZMY', issueTypeName: '工单', sourceType: 'support_ticket' },
@@ -427,7 +430,20 @@ export class PortfolioSyncService {
     if (this.hemoryRun && this.db.getSyncRun(this.hemoryRun.id)?.status === 'running') return this.hemoryRun;
     const run = this.db.createSyncRun(`hemory:${date}${scheduledHour ? `:${scheduledHour}` : ''}`);
     this.hemoryRun = run;
-    void this.executeHemory(run, date);
+    const { startedAt, endedAt } = shanghaiDayBounds(date);
+    void this.executeHemory(run, startedAt, endedAt);
+    return run;
+  }
+
+  /** 滚动增量同步：覆盖最近 HEMORY_SYNC_WINDOW_DAYS 个上海自然日，已入库片段靠 upsert 去重，不重复产生。 */
+  refreshRecentHemory(scheduledHour?: number): SyncRun {
+    if (this.hemoryRun && this.db.getSyncRun(this.hemoryRun.id)?.status === 'running') return this.hemoryRun;
+    const date = shanghaiDateKey();
+    const run = this.db.createSyncRun(scheduledHour ? `hemory:${date}:${scheduledHour}` : 'hemory:recent');
+    this.hemoryRun = run;
+    const { startedAt } = shanghaiDayBounds(date);
+    const windowStart = new Date(new Date(startedAt).getTime() - (HEMORY_SYNC_WINDOW_DAYS - 1) * 86_400_000).toISOString();
+    void this.executeHemory(run, windowStart, new Date().toISOString());
     return run;
   }
 
@@ -440,7 +456,7 @@ export class PortfolioSyncService {
       statuses.crm = { status: 'failed', error: (error as Error).message };
     }
     try {
-      const hemoryCount = await this.syncRecentHemoryDay();
+      const hemoryCount = await this.syncRecentHemory();
       statuses.hemory = { status: 'succeeded', count: hemoryCount };
     } catch (error) {
       statuses.hemory = { status: 'failed', error: (error as Error).message };
@@ -481,13 +497,12 @@ export class PortfolioSyncService {
       failures.map((value) => value.error).filter(Boolean).join('; ') || undefined);
   }
 
-  private async executeHemory(run: SyncRun, date: string): Promise<void> {
+  private async executeHemory(run: SyncRun, startedAt: string, endedAt: string): Promise<void> {
     const delays = [0, 60_000, 5 * 60_000, 15 * 60_000];
     let lastError: Error | undefined;
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt]) await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
       try {
-        const { startedAt, endedAt } = shanghaiDayBounds(date);
         const count = await this.scanHemory([], startedAt, endedAt);
         this.db.finishSyncRun(run.id, 'succeeded', { hemory: { status: 'succeeded', count } });
         this.hemoryRun = undefined;
@@ -768,12 +783,13 @@ export class PortfolioSyncService {
 
   private async syncHemoryCustomer(customer: Customer): Promise<number> {
     void customer;
-    return this.syncRecentHemoryDay();
+    return this.syncRecentHemory();
   }
 
-  private async syncRecentHemoryDay(): Promise<number> {
-    const bounds = shanghaiDayBounds(shanghaiDateKey());
-    return this.scanHemory([], bounds.startedAt, bounds.endedAt);
+  private async syncRecentHemory(): Promise<number> {
+    const { startedAt } = shanghaiDayBounds(shanghaiDateKey());
+    const windowStart = new Date(new Date(startedAt).getTime() - (HEMORY_SYNC_WINDOW_DAYS - 1) * 86_400_000).toISOString();
+    return this.scanHemory([], windowStart, new Date().toISOString());
   }
 
   private async scanHemory(keywords: string[], startedAt: string, endedAt: string): Promise<number> {
@@ -896,12 +912,12 @@ export function scheduleHemorySync(service: PortfolioSyncService, db: WorkbenchD
     const date = shanghaiDateKey(now);
     const passed = [13, 20].filter((hour) => shanghaiSlot(date, hour) <= now);
     const latest = passed.at(-1);
-    if (latest && !db.hasSuccessfulSyncScope(`hemory:${date}:${latest}`)) service.refreshHemoryDate(date, latest);
+    if (latest && !db.hasSuccessfulSyncScope(`hemory:${date}:${latest}`)) service.refreshRecentHemory(latest);
   };
   const schedule = () => {
     const next = nextHemorySlot();
     timer = setTimeout(() => {
-      service.refreshHemoryDate(next.date, next.hour);
+      service.refreshRecentHemory(next.hour);
       schedule();
     }, Math.max(0, next.at.getTime() - Date.now()));
     timer.unref();
