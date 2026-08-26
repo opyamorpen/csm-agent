@@ -46,6 +46,32 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+/**
+ * 从草稿 result_json 判断是否为“明确失败”载荷（execute 存储的是 {response: <原始文本>} 或本地结果）。
+ * ONES：内层 result 为字符串且非 SUCCESS；CRM：resultCode 非 SUCCESS，或 save_status 存在且不在 SUCCESS/SAVED 白名单。
+ * 无法识别（无失败信号或非 JSON）返回 null，保持 written 不动。
+ */
+function extractDraftFailurePayload(resultJson: string, targetSystem: string): { message: string } | null {
+  const outer = parseJson<{ response?: unknown } | null>(resultJson, null);
+  const text = typeof outer?.response === 'string' ? outer.response : resultJson;
+  const inner = parseJson<Record<string, unknown> | null>(text, null);
+  if (!inner || typeof inner !== 'object') return null;
+  if (targetSystem === 'ones' && typeof inner.result === 'string' && inner.result !== 'SUCCESS') {
+    return { message: String(inner.errorMsg ?? inner.errorCode ?? inner.result) };
+  }
+  if (targetSystem === 'crm') {
+    if (typeof inner.resultCode === 'string' && inner.resultCode !== 'SUCCESS') {
+      return { message: String((inner.data as Record<string, unknown> | undefined)?.message ?? inner.resultCode) };
+    }
+    const data = inner.data as Record<string, unknown> | undefined;
+    const saveStatus = data?.save_status;
+    if (typeof saveStatus === 'string' && saveStatus !== 'SUCCESS' && saveStatus !== 'SAVED') {
+      return { message: `${saveStatus}: ${String(data?.failure_reason ?? '')}`.trim() };
+    }
+  }
+  return null;
+}
+
 function bool(value: unknown): boolean | null {
   return value == null ? null : Number(value) === 1;
 }
@@ -477,6 +503,25 @@ export class WorkbenchDatabase {
       WHERE source_system = 'ones'
         AND display_id IS NULL;
     `);
+    this.repairMiswrittenDraftItems();
+  }
+
+  /**
+   * 翻转“假成功”草稿：written 但响应载荷是明确失败（ONES result 非 SUCCESS，或 CRM resultCode 非 SUCCESS /
+   * save_status 未落库）。历史上 execute 只看 MCP isError，业务失败被标成 written 后无法重试也无法重新生成。
+   * 幂等：翻转后 error 有值、result 保留原载荷，重启不再命中。
+   */
+  private repairMiswrittenDraftItems(): void {
+    const rows = this.db.prepare("SELECT id, batch_id, target_system, result_json FROM draft_items WHERE status='written' AND error IS NULL AND result_json IS NOT NULL").all() as Row[];
+    for (const row of rows) {
+      const failure = extractDraftFailurePayload(String(row.result_json), String(row.target_system ?? ''));
+      if (!failure) continue;
+      const reason = `历史执行业务失败（已由数据修复翻转）: ${failure.message}`;
+      this.db.prepare("UPDATE draft_items SET status='failed', error=?, updated_at=? WHERE id=?")
+        .run(reason, nowIso(), String(row.id));
+      this.audit('csm', 'repair_written_draft_status', 'draft_item', String(row.id), { targetSystem: String(row.target_system ?? ''), reason });
+      this.refreshDraftBatchStatus(String(row.batch_id));
+    }
   }
 
   upsertCustomer(input: CustomerInput): Customer {

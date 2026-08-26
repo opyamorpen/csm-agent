@@ -913,6 +913,12 @@ export function shanghaiDateKey(now = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
+/** ONES 工时登记的 startTime 要求 ISO 8601 带时区偏移；按上海时区输出 YYYY-MM-DDTHH:mm:ss+08:00。 */
+export function shanghaiIsoOffset(at: Date): string {
+  const text = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(at);
+  return `${text.replace(' ', 'T')}+08:00`;
+}
+
 export function shanghaiDayBounds(date: string, now = new Date()): { startedAt: string; endedAt: string } {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期必须是 YYYY-MM-DD');
   const start = new Date(`${date}T00:00:00+08:00`);

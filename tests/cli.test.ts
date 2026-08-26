@@ -110,6 +110,24 @@ test('draft review prints structured display fields with raw JSON behind --json'
   assert.match(listing, /target: item\.targetObject \|\| ''/);
 });
 
+test('drafts listing hides written items by default and --all restores the full view', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const listing = source.match(/async function showDrafts[\s\S]*?\n}\n\nasync function editBatchItems/)?.[0];
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+
+  // 显示契约：CLI 与 Web 草稿箱一致，默认隐藏已写入草稿；--all 携带 include=written 查看全量。
+  assert.ok(listing, 'showDrafts source was not found');
+  assert.match(listing, /rawArgs\.includes\('--all'\)/);
+  assert.match(listing, /include=written/);
+  assert.match(listing, /没有待处理草稿/);
+  assert.match(source, /csm-agent drafts \[客户ID或名称\] \[--all\] \[--json\]/);
+  const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string; api: string[] }>;
+  assert.ok(capabilities.some((item) => item.command === 'drafts' && item.api.includes('/api/draft-batches?include=written')));
+  // 服务端同一契约：默认剔除 written 项与全写入批次，include=written 恢复全量。
+  assert.match(server, /include'\) === 'written'/);
+  assert.match(server, /item\.status !== 'written'/);
+});
+
 test('customer portfolio display contract exposes the supported sort controls', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');

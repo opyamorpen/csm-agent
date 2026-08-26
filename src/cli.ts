@@ -55,6 +55,7 @@ const CLI_CAPABILITIES = [
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore'] },
+  { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
@@ -120,7 +121,7 @@ function help(): void {
   csm-agent hemory assign <客户ID或名称> <片段ID...>
   csm-agent hemory clear <片段ID...>
   csm-agent hemory ignore <片段ID...>
-  csm-agent drafts [客户ID或名称] [--json]
+  csm-agent drafts [客户ID或名称] [--all] [--json]
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
   csm-agent draft regenerate <批次ID>
@@ -422,12 +423,18 @@ function draftTypeLabel(type: string): string {
   return ({ internal_todo: 'Agent 待办', workhour: '工时', followup: '沟通记录', suggestion: '需求', ticket: '工单', operations: '运维工单' } as Record<string, string>)[type] || type;
 }
 
-async function showDrafts(customerInput?: string): Promise<void> {
+async function showDrafts(rawArgs: string[]): Promise<void> {
+  // --all 与草稿箱 Web 端显示契约一致：默认隐藏已写入草稿，--all 恢复全量（诊断/对账用）。
+  const includeAll = rawArgs.includes('--all');
+  const customerInput = rawArgs.filter((arg) => arg !== '--all').join(' ').trim();
   const customer = customerInput ? await resolveCustomer(customerInput) : null;
-  const body = await request<any>(`/api/draft-batches${customer ? `?customer_id=${encodeURIComponent(customer.id)}` : ''}`);
+  const query = `${customer ? `customer_id=${encodeURIComponent(customer.id)}` : ''}${customer && includeAll ? '&' : ''}${includeAll ? 'include=written' : ''}`;
+  const body = await request<any>(`/api/draft-batches${query ? `?${query}` : ''}`);
   if (jsonOutput) return print(body.batches);
-  console.table((body.batches ?? []).flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
-    customerId: item.customerId, type: item.type, status: item.status, version: item.version, target: item.targetObject || '', title: item.title }))));
+  const rows = (body.batches ?? []).flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
+    customerId: item.customerId, type: item.type, status: item.status, version: item.version, target: item.targetObject || '', title: item.title })));
+  if (!rows.length) console.log(includeAll ? '没有任何草稿批次' : '没有待处理草稿（csm-agent drafts --all 查看全部）');
+  else console.table(rows);
 }
 
 async function editBatchItems(batch: any): Promise<any> {
@@ -649,7 +656,7 @@ async function main(): Promise<void> {
   if (command === 'case') return caseCommand(args.shift() ?? '', args);
   if (command === 'sync') return sync(args.join(' ') || undefined);
   if (command === 'hemory') return hemoryCommand(args.shift() ?? '', args);
-  if (command === 'drafts') return showDrafts(args.join(' ') || undefined);
+  if (command === 'drafts') return showDrafts(args);
   if (command === 'draft') return draftCommand(args.shift() ?? '', args);
   if (command === 'service') return serviceCommand(args.shift() ?? 'status', args);
   if (command === 'wecom') return print(await request('/api/wecom/status'));

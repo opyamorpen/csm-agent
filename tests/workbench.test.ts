@@ -457,7 +457,8 @@ test('workbench: same-day fragments merge into one batch with a single followup 
     assert.equal(workhours.length, 1);
     const workhour = workhours[0];
     assert.equal(workhour.targetArguments.hours, 0.8);
-    assert.equal(workhour.targetArguments.date, '2026-08-25');
+    // startTime 为 ONES 要求的带时区偏移 ISO 8601，取当天未发布沟通的最早时刻（上海 13:00）。
+    assert.equal(workhour.targetArguments.startTime, '2026-08-25T13:00:00+08:00');
     assert.equal(workhour.targetArguments.description, followup.fields.one_line_summary);
     // LLM 返回同类型多条非 followup 草稿时不能被折叠：两条 ticket 都要保留。
     const third = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
@@ -845,6 +846,177 @@ test('workbench: ONES drafts fall back to same-name after-sales customer option 
     assert.ok(suggestion2.validationErrors.some((message) => /客户缺少已确认的 ONES 客户信息 option ID（.*请刷新客户同步.*）/.test(message)));
     assert.equal(suggestion2.status, 'draft');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// 模拟 ONES MCP 的工时工具面：get_manhour_mode 只读；add_workhour_in_{mode} 按实例模式写入。
+// create_new_issue 的描述刻意带 manhour 字样，复现宽松正则误绑的真实事故。
+function fakeOnesWorkhourMcp(options: { mode?: string; writeResponse?: string; failModeCall?: boolean } = {}): any {
+  const tools = [
+    { publicName: 'mcp__ones__create_new_issue', server: 'ones', rawName: 'create_new_issue', description: 'Create a new issue. Do not use add-work/manhour tools first.' },
+    { publicName: 'mcp__ones__get_manhour_mode', server: 'ones', rawName: 'get_manhour_mode', description: 'Get manhour mode (simple or summary)' },
+    { publicName: 'mcp__ones__add_workhour_in_simple_mode', server: 'ones', rawName: 'add_workhour_in_simple_mode', description: 'Add a manhour record in simple mode for a specific issue.' },
+    { publicName: 'mcp__ones__add_workhour_in_summary_mode', server: 'ones', rawName: 'add_workhour_in_summary_mode', description: 'Add a manhour record in summary mode for a specific issue.' },
+  ];
+  const calls: Array<{ publicName: string; args: any }> = [];
+  const mcp: any = {
+    listTools: () => tools,
+    isWrite: (_server: string, rawName: string) => /^(create_new_issue|add_workhour)/.test(rawName),
+    resolve: (publicName: string) => tools.find((tool) => tool.publicName === publicName),
+    call: async (publicName: string, args: any) => {
+      calls.push({ publicName, args });
+      if (publicName === 'mcp__ones__get_manhour_mode') {
+        if (options.failModeCall) return { text: 'mode tool error', isError: true };
+        return { text: JSON.stringify({ result: mcp.currentMode ?? options.mode ?? 'simple' }), isError: false };
+      }
+      return { text: options.writeResponse ?? JSON.stringify({ result: 'SUCCESS', data: { id: 'worklog-1' } }), isError: false };
+    },
+    calls,
+    currentMode: options.mode ?? 'simple',
+  };
+  return mcp;
+}
+
+function manhourIssue(db: WorkbenchDatabase, customerId: string) {
+  return db.upsertSourceEvent({ customerId, sourceSystem: 'ones', sourceType: 'customer_manhour', externalId: 'KHGS-9001',
+    title: '售后客户', occurredAt: '2026-08-20T00:00:00Z', attributionStatus: 'confirmed', payload: {} });
+}
+
+test('workbench: workhour drafts bind the mode-specific ONES tool and write with startTime', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-wh', name: '客户卫', sourceObject: 'object_Umwnn__c' });
+    manhourIssue(db, 'crm-wh');
+    const fragment = segment(db, 'crm-wh', 'rw:a', 'rw', '年费方案', '2026-08-25T05:00:00Z', '与客户讨论了年费方案，投入两小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T05:00:00Z','$.endAt','2026-08-25T05:30:00Z') WHERE id=?").run(fragment.id);
+    const mcp = fakeOnesWorkhourMcp({ mode: 'simple' });
+    const service = new HemoryDraftService(db, mcp, fakeModelRuntime([]));
+    const queued = service.enqueue('crm-wh', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-wh')[0];
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    // 工具按实例模式 rawName 精确绑定，绝不落在描述带 manhour 的 create_new_issue 上。
+    assert.equal(workhour.targetTool, 'mcp__ones__add_workhour_in_simple_mode');
+    assert.ok(!workhour.validationErrors.length, JSON.stringify(workhour.validationErrors));
+    assert.equal(workhour.targetArguments.issueID, 'KHGS-9001');
+    assert.equal(workhour.targetArguments.hours, 0.5);
+    assert.equal(workhour.targetArguments.startTime, '2026-08-25T13:00:00+08:00');
+    // 预览（含模式一致性预检）与确认写入：调用参数即草稿参数。
+    const preview = await service.preview(batch.id, [workhour.id]);
+    assert.equal(preview.items[0].validationErrors.length, 0);
+    const written = await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    assert.equal(written.items[0].status, 'written');
+    const writeCall = mcp.calls.find((call) => call.publicName === 'mcp__ones__add_workhour_in_simple_mode')!;
+    assert.deepEqual(writeCall.args, { issueID: 'KHGS-9001', hours: 0.5, startTime: '2026-08-25T13:00:00+08:00',
+      description: workhour.targetArguments.description });
+    // 实例模式切换后，旧绑定在预检时被拒绝，不允许带着错工具写入。
+    mcp.currentMode = 'summary';
+    db.upsertCustomer({ id: 'crm-wh2', name: '客户温', sourceObject: 'object_Umwnn__c' });
+    manhourIssue(db, 'crm-wh2');
+    const fragment2 = segment(db, 'crm-wh2', 'rw2:a', 'rw2', '扩容计划', '2026-08-25T07:00:00Z', '与客户讨论扩容，投入一小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T07:00:00Z','$.endAt','2026-08-25T08:00:00Z') WHERE id=?").run(fragment2.id);
+    const service2 = new HemoryDraftService(db, mcp, fakeModelRuntime([]));
+    const queued2 = service2.enqueue('crm-wh2', [fragment2.id]);
+    await waitDraftJob(db, queued2[0].jobId);
+    const batch2 = db.listDraftBatches('crm-wh2')[0];
+    const workhour2 = batch2.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour2.targetTool, 'mcp__ones__add_workhour_in_summary_mode');
+    // 模式与工具不一致（summary 草稿 + simple 实例）在预检报错，不允许带错工具写入。
+    mcp.currentMode = 'simple';
+    const mismatchPreview = await service2.preview(batch2.id, [workhour2.id]);
+    assert.ok(mismatchPreview.items[0].validationErrors.some((message) => message.includes('与草稿绑定工具不一致')));
+    // 把已生成草稿的工具改成历史误绑的 create_new_issue：validate 必须拒绝。
+    const legacyBound = db.updateDraftItem(workhour2.id, workhour2.version, { targetTool: 'mcp__ones__create_new_issue' })!;
+    const legacyPreview = await service2.preview(batch2.id, [legacyBound.id]);
+    assert.ok(legacyPreview.items[0].validationErrors.some((message) => message.includes('add_workhour_in_')));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: ONES business failure marks the draft failed and retryable instead of fake written', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-fail-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-fail', name: '客户费', sourceObject: 'object_Umwnn__c' });
+    manhourIssue(db, 'crm-fail');
+    const fragment = segment(db, 'crm-fail', 'rf:a', 'rf', '故障排查', '2026-08-25T06:00:00Z', '排查线上故障，投入一小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T06:00:00Z','$.endAt','2026-08-25T07:00:00Z') WHERE id=?").run(fragment.id);
+    // ONES 以 isError=false 的正常内容返回业务失败（真实事故载荷）。
+    const mcp = fakeOnesWorkhourMcp({ mode: 'simple',
+      writeResponse: '{"result":"FAIL","errorCode":"InvalidParameter","errorMsg":"InvalidParameter issue title empty"}' });
+    const service = new HemoryDraftService(db, mcp, fakeModelRuntime([]));
+    const queued = service.enqueue('crm-fail', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-fail')[0];
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    const preview = await service.preview(batch.id, [workhour.id]);
+    const result = await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
+    assert.equal(result.items[0].status, 'failed');
+    assert.match(result.items[0].error ?? '', /ONES 回写业务失败 FAIL/);
+    assert.match(result.items[0].error ?? '', /issue title empty/);
+    // 失败草稿可重试（仍失败但不再卡死在 written）。
+    const retried = await service.retry(workhour.id);
+    assert.equal(retried.status, 'failed');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: workhour mode fetch failure only degrades that draft, not the batch job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-mode-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-mode', name: '客户莫', sourceObject: 'object_Umwnn__c' });
+    manhourIssue(db, 'crm-mode');
+    const fragment = segment(db, 'crm-mode', 'rm:a', 'rm', '续约沟通', '2026-08-25T08:00:00Z', '沟通续约意向，投入半小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T08:00:00Z','$.endAt','2026-08-25T08:30:00Z') WHERE id=?").run(fragment.id);
+    const mcp = fakeOnesWorkhourMcp({ failModeCall: true });
+    const service = new HemoryDraftService(db, mcp, fakeModelRuntime([]));
+    const queued = service.enqueue('crm-mode', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-mode')[0];
+    // 生成任务整体成功；工时草稿带“无法获取工时模式”校验错误。
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour.status, 'draft');
+    assert.ok(workhour.validationErrors.some((message) => message.includes('无法获取 ONES 工时模式')));
+    // 其余草稿照常生成，不受工时模式获取失败影响。
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    assert.ok(!followup.validationErrors.some((message) => message.includes('工时模式')));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: reopening the database repairs fake-written drafts with failure payloads', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-draft-repair-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-rep', name: '客户任' });
+    const batch = db.createDraftBatch({ customerId: 'crm-rep', fingerprint: 'fp-repair-1', sourceEventIds: [], generationVersion: 'v', generator: 'test' });
+    const base = { batchId: batch.id, customerId: 'crm-rep', type: 'workhour' as const, title: '工时', summary: 's',
+      fields: {}, targetSystem: 'ones', targetObject: '客户工时管理 / 售后客户', targetTool: 'mcp__ones__create_new_issue',
+      targetArguments: { issueID: 'KHGS-9001' }, evidenceRefs: [], unknowns: [], validationErrors: [] };
+    // 历史事故两例：ONES FAIL 载荷与 CRM save_status 未落库，均被标为 written。
+    const badOnes = db.createDraftItem({ ...base,
+      status: 'written', result: { response: '{"result":"FAIL","errorCode":"InvalidParameter","errorMsg":"InvalidParameter issue title empty"}' } });
+    const badCrm = db.createDraftItem({ ...base, type: 'followup', targetSystem: 'crm', status: 'written',
+      result: { response: '{"resultCode":"SUCCESS","data":{"save_status":"VALIDATION_BLOCKED","failure_reason":"validation blocked"}}' } });
+    const good = db.createDraftItem({ ...base, status: 'written', result: { response: '{"result":"SUCCESS","data":{}}' } });
+    db.close();
+
+    const reopened = new WorkbenchDatabase(dir);
+    assert.equal(reopened.getDraftItem(badOnes.id)?.status, 'failed');
+    assert.match(reopened.getDraftItem(badOnes.id)?.error ?? '', /InvalidParameter issue title empty/);
+    assert.equal(reopened.getDraftItem(badCrm.id)?.status, 'failed');
+    assert.match(reopened.getDraftItem(badCrm.id)?.error ?? '', /VALIDATION_BLOCKED/);
+    assert.equal(reopened.getDraftItem(good.id)?.status, 'written');
+    const repairCount = (row: any) => Number(row.count);
+    const first = repairCount((reopened as any).db.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action='repair_written_draft_status'").get());
+    assert.equal(first, 2);
+    reopened.close();
+
+    // 幂等：再次打开不重复翻转、不重复审计。
+    const again = new WorkbenchDatabase(dir);
+    assert.equal(again.getDraftItem(badOnes.id)?.status, 'failed');
+    const second = repairCount((again as any).db.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action='repair_written_draft_status'").get());
+    assert.equal(second, 2);
+    again.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: parseOnesIssueFields tolerates unknown shapes and flags only caller-provided required fields', () => {

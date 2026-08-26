@@ -423,7 +423,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
 
       if (req.method === 'GET' && path === '/api/draft-batches') {
         const batches = workbench.db.listDraftBatches(url.searchParams.get('customer_id') ?? undefined);
-        return json(res, 200, { batches: batches.map(decorateDraftBatch) });
+        // 草稿箱只展示待处理草稿：已写入项默认剔除，全写入的批次整批隐藏；include=written 恢复全量（诊断口）。
+        const visible = url.searchParams.get('include') === 'written'
+          ? batches
+          : batches
+            .map((batch) => (batch.items ? { ...batch, items: batch.items.filter((item) => item.status !== 'written') } : batch))
+            .filter((batch) => (batch.items ? batch.items.length > 0 : true));
+        return json(res, 200, { batches: visible.map(decorateDraftBatch) });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);
       if (draftBatchMatch) {

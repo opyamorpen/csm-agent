@@ -3,7 +3,7 @@ import type { Runtime } from '../bootstrap.js';
 import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
-import { shanghaiDateKey } from './sync.js';
+import { shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
@@ -13,6 +13,9 @@ const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
 const ONES_DESK_ISSUE_TYPE_IDS: Record<OnesDeskDraftType, string> = { suggestion: 'A99xMfkg', ticket: '7sxvwZMY', operations: '943qpMX7' };
 const ONES_DESK_TARGET_OBJECTS: Record<OnesDeskDraftType, string> = { suggestion: 'ONES Desk / 建议和反馈', ticket: 'ONES Desk / 工单', operations: 'ONES Desk / 运维工单' };
+// ONES 工时按实例配置的模式二选一写工具；宽松正则匹配曾把 create_new_issue（描述里带 manhour 字样）误当工时工具。
+type OnesWorkhourMode = 'simple' | 'summary';
+const ONES_WORKHOUR_TOOLS: Record<OnesWorkhourMode, string> = { simple: 'add_workhour_in_simple_mode', summary: 'add_workhour_in_summary_mode' };
 // CRM 跟进记录（销售记录）必须关联的 CSM 售后客户对象；其 _id 是工作台唯一客户主键。
 const CRM_AFTER_SALES_OBJECT = 'object_Umwnn__c';
 const MAX_DRAFT_ITEMS = 12;
@@ -41,6 +44,12 @@ interface DraftProposal {
   fields?: Record<string, unknown>;
   evidenceRefs?: string[];
   unknowns?: string[];
+}
+
+/** 工时草稿的工具绑定依据：实例工时模式；获取失败时以 error 降级为校验错误。 */
+interface WorkhourToolBinding {
+  mode: OnesWorkhourMode | null;
+  error: string | null;
 }
 
 export interface OnesIssueField {
@@ -132,7 +141,7 @@ export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, custo
     return [
       { key: 'target', label: '目标工作项', value: item.targetArguments.issueID ? `客户工时管理 / 售后客户（${String(item.targetArguments.issueID)}）` : '客户工时管理 / 售后客户（未绑定）' },
       { key: 'hours', label: '工时时长', value: unknown(item.targetArguments.hours) },
-      { key: 'date', label: '日期', value: String(item.targetArguments.date ?? '') },
+      { key: 'startTime', label: '开始时间', value: String(item.targetArguments.startTime ?? '') },
       { key: 'description', label: '描述', value: String(item.targetArguments.description ?? item.summary) },
     ];
   }
@@ -371,12 +380,25 @@ export class HemoryDraftService {
         catch (error) { generator = `rules-fallback: ${(error as Error).message}`.slice(0, 160); }
       }
       const proposals = this.buildProposals(ai, customer, events, followupEvents, dateKey);
+      // 工时草稿的写工具按 ONES 实例工时模式绑定；模式获取失败只降级为该草稿的校验错误，不拖垮整个生成任务。
+      let workhourBinding: WorkhourToolBinding = { mode: null, error: null };
+      if (proposals.some((proposal) => proposal.type === 'workhour')) {
+        const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+        if (issue) {
+          try {
+            const mode = await this.fetchWorkhourMode(issue.externalId);
+            workhourBinding = mode ? { mode, error: null } : { mode: null, error: '无法识别 ONES 工时模式（simple/summary），请稍后重新生成' };
+          } catch (error) {
+            workhourBinding = { mode: null, error: `无法获取 ONES 工时模式: ${(error as Error).message.slice(0, 160)}` };
+          }
+        }
+      }
       const batch = this.db.createDraftBatch({ customerId: customer.id, fingerprint: job.fingerprint,
         sourceEventIds: events.map((event) => event.id), generationVersion: DRAFT_GENERATION_VERSION, generator });
       // 同客户同日只保留一个活跃批次：临创建前作废包含当天片段的其他批次（含并发任务先建者），已写入项不受影响。
       this.db.markDraftsStaleForEvents(events.map((event) => event.id), batch.id);
       if (!batch.items?.length) {
-        for (const proposal of proposals) this.createItem(batch, customer, events, proposal);
+        for (const proposal of proposals) this.createItem(batch, customer, events, proposal, workhourBinding);
       }
       this.db.refreshDraftBatchStatus(batch.id);
       this.db.updateDraftJob(jobId, 'succeeded');
@@ -445,7 +467,7 @@ export class HemoryDraftService {
       unknowns: hours == null ? ['工时时长（录音时间缺失，请人工补充）'] : [] };
   }
 
-  private createItem(batch: DraftBatch, customer: Customer, events: SourceEvent[], proposal: DraftProposal): DraftItem {
+  private createItem(batch: DraftBatch, customer: Customer, events: SourceEvent[], proposal: DraftProposal, workhourBinding?: WorkhourToolBinding): DraftItem {
     const available = new Map(events.map((event) => [event.id, event]));
     const itemEvents = (proposal.evidenceRefs ?? []).flatMap((id) => {
       const event = available.get(id);
@@ -456,11 +478,16 @@ export class HemoryDraftService {
     const evidenceRefs = evidence.map((event) => event.id);
     const fields = { ...(proposal.fields ?? {}), customer_id: customer.id, customer_name: customer.name,
       evidence_refs: evidenceRefs, evidence_quotes: evidence.map(textOf), occurred_at: evidence[0]?.occurredAt ?? new Date().toISOString() };
-    const target = this.buildTarget(proposal.type, customer, evidence, proposal, fields);
+    const target = this.buildTarget(proposal.type, customer, evidence, proposal, fields, workhourBinding);
     return this.db.createDraftItem({ batchId: batch.id, customerId: customer.id, type: proposal.type,
       status: target.validationErrors.length ? 'draft' : 'ready', title: proposal.title.slice(0, 160), summary: proposal.summary,
       fields, targetSystem: target.system, targetObject: target.object, targetTool: target.tool,
       targetArguments: target.arguments, evidenceRefs, unknowns: proposal.unknowns ?? [], validationErrors: target.validationErrors });
+  }
+
+  /** rawName 精确匹配已连接工具；工时/跟进等强契约写入不允许宽松正则误绑。 */
+  private exactTool(server: string, rawName: string): string | null {
+    return this.mcp.listTools().find((tool) => tool.server === server && tool.rawName === rawName)?.publicName ?? null;
   }
 
   private findWriteTool(serverHint: string, pattern: RegExp): string | null {
@@ -477,7 +504,17 @@ export class HemoryDraftService {
     return candidates[0]?.publicName ?? null;
   }
 
-  private buildTarget(type: DraftItemType, customer: Customer, events: SourceEvent[], proposal: DraftProposal, fields: Record<string, unknown>) {
+  /** 查询 ONES 实例工时模式；工具缺失或调用报错时抛错，返回值无法识别时为 null，均由调用方降级为校验错误。 */
+  private async fetchWorkhourMode(issueId: string): Promise<OnesWorkhourMode | null> {
+    const tool = this.findReadTool('ones', /(get.*manhour.*mode|manhour.*mode|工时.*模式)/i);
+    if (!tool) throw new Error('未找到 ONES 工时模式查询工具');
+    const response = await this.mcp.call(tool, { issueID: issueId });
+    if (response.isError) throw new Error(response.text.slice(0, 300));
+    const mode = String((cleanJson(response.text) as { result?: unknown } | null)?.result ?? '');
+    return mode === 'simple' || mode === 'summary' ? mode : null;
+  }
+
+  private buildTarget(type: DraftItemType, customer: Customer, events: SourceEvent[], proposal: DraftProposal, fields: Record<string, unknown>, workhourBinding?: WorkhourToolBinding) {
     const validationErrors: string[] = [];
     if (type === 'internal_todo') return { system: 'local' as const, object: 'CSM Agent / 待办', tool: 'local__create_action_item',
       arguments: { title: proposal.title, whyNow: proposal.summary, owner: fields.owner === 'unknown' ? null : fields.owner ?? null,
@@ -486,8 +523,8 @@ export class HemoryDraftService {
     if (type === 'followup') {
       // CRM 跟进记录的真实写路径是通用记录创建工具 data_record_create（执行标识 CreateRecordsByData），
       // 写入销售记录对象 ActiveRecordObj；关联业务对象必须是 CSM 售后客户（object_Umwnn__c）。
-      const exact = this.mcp.listTools().find((tool) => tool.server === 'crm' && tool.rawName === 'data_record_create');
-      const tool = exact?.publicName ?? this.findWriteTool('crm', /(record.*create|create.*record|跟进)/i);
+      const exact = this.exactTool('crm', 'data_record_create');
+      const tool = exact ?? this.findWriteTool('crm', /(record.*create|create.*record|跟进)/i);
       if (!tool) validationErrors.push('未找到 CRM 跟进记录写工具');
       // 客户主键就是售后客户对象的 _id；历史客户可能来自 AccountObj，按名称唯一解析同名售后客户后使用其 _id。
       let afterSales: { id: string; name: string } | undefined
@@ -517,15 +554,20 @@ export class HemoryDraftService {
     }
     if (type === 'workhour') {
       const manhour = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
-      const tool = this.findWriteTool('ones', /(manhour|work.?log|工时)/i);
+      // 工具按实例模式 rawName 精确绑定：宽松正则曾把描述里带 manhour 字样的 create_new_issue 误当工时工具。
+      const tool = workhourBinding?.mode ? this.exactTool('ones', ONES_WORKHOUR_TOOLS[workhourBinding.mode]) : null;
       if (!manhour) validationErrors.push('客户未绑定“客户工时管理 / 售后客户”工作项');
-      if (!tool) validationErrors.push('未找到 ONES 工时登记写工具');
+      else {
+        if (workhourBinding?.error) validationErrors.push(workhourBinding.error);
+        if (!tool) validationErrors.push('未找到 ONES 工时登记写工具');
+      }
       if (fields.hours === 'unknown' || fields.hours == null) validationErrors.push('请补充工时时长');
-      // 日期用上海自然日：occurred_at 前缀是 UTC，上海 0-8 点的会议会错到前一天。
-      const dateKey = String(fields.date_key ?? (events.length ? shanghaiEventDate(events[0]) : shanghaiDateKey()));
+      // ONES 工时登记要求 startTime 为带时区偏移的 ISO 8601（如 2026-08-26T14:30:00+08:00），取当天未发布沟通的最早时刻。
+      const startAt = new Date(String(fields.occurred_at ?? (events.length ? events[0].occurredAt : new Date().toISOString())));
       return { system: 'ones' as const, object: '客户工时管理 / 售后客户', tool,
         arguments: { issueID: manhour?.externalId ?? '', hours: fields.hours,
-          description: String(fields.description ?? proposal.summary), date: dateKey }, validationErrors };
+          startTime: shanghaiIsoOffset(Number.isNaN(startAt.getTime()) ? new Date() : startAt),
+          description: String(fields.description ?? proposal.summary) }, validationErrors };
     }
     const deskType = onesDeskTypeId(type);
     if (!deskType) throw new Error(`未知的草稿目标类型: ${type}`);
@@ -570,6 +612,12 @@ export class HemoryDraftService {
       const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
       if (!issue || item.targetArguments.issueID !== issue.externalId) errors.push('工时参数未绑定当前客户售后工时工作项');
       if (item.targetArguments.hours === 'unknown' || item.targetArguments.hours == null) errors.push('请补充工时时长');
+      // 历史草稿曾误绑 create_new_issue：只有两个模式化工时工具是合法写目标。
+      const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;
+      if (rawName !== ONES_WORKHOUR_TOOLS.simple && rawName !== ONES_WORKHOUR_TOOLS.summary) {
+        errors.push('工时草稿未绑定 ONES 工时登记工具（add_workhour_in_*_mode），请编辑修正或重新生成');
+      }
+      if (!item.targetArguments.startTime) errors.push('缺少工时开始时间（startTime，ISO 8601 带时区）');
     }
     if (item.type === 'suggestion' || item.type === 'ticket' || item.type === 'operations') {
       const option = resolveOnesOption(this.db, customer);
@@ -603,6 +651,14 @@ export class HemoryDraftService {
       else {
         const response = await this.mcp.call(tool, { issueID: item.targetArguments.issueID });
         if (response.isError) errors.push(`ONES 工时模式预检失败: ${response.text.slice(0, 300)}`);
+        else {
+          // 绑定工具必须与实例当前模式一致（simple/summary 各有专属写工具），不一致宁可拒绝也不让 ONES 端报错。
+          const mode = String((cleanJson(response.text) as { result?: unknown } | null)?.result ?? '');
+          const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;
+          if ((mode === 'simple' || mode === 'summary') && rawName && rawName !== ONES_WORKHOUR_TOOLS[mode]) {
+            errors.push(`ONES 工时模式（${mode}）与草稿绑定工具不一致，请重新生成`);
+          }
+        }
       }
     }
   }
@@ -665,6 +721,14 @@ export class HemoryDraftService {
       } else {
         const response = await this.mcp.call(item.targetTool!, item.targetArguments);
         if (response.isError) throw new Error(response.text);
+        // ONES 的 MCP 层同样不把业务失败标为 isError，{"result":"FAIL",...} 以正常内容返回；
+        // 曾导致工时登记失败仍被标为 written，且不可重试。result 字符串非 SUCCESS 即业务失败。
+        if (item.targetSystem === 'ones') {
+          const parsed = cleanJson(response.text) as { result?: unknown; errorCode?: unknown; errorMsg?: unknown } | null;
+          if (typeof parsed?.result === 'string' && parsed.result !== 'SUCCESS') {
+            throw new Error(`ONES 回写业务失败 ${parsed.result}: ${String(parsed.errorMsg ?? parsed.errorCode ?? '').slice(0, 200)}`);
+          }
+        }
         // CRM 的 MCP 层不把业务失败标为 isError，resultCode/save_status 藏在 payload 里
         //（如 USER_TOOL_NOT_EXIST、VALIDATION_BLOCKED 且 write_db=false）。
         if (item.targetSystem === 'crm') {
