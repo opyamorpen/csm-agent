@@ -4,10 +4,11 @@ import { extractText } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, HemorySegmentationJob, SourceEvent } from './types.js';
 
-// v2：事件级切片。同一业务对象 + 同一核心问题/请求/决定为一段；版本进入外部 ID，
-// 避免边界相同的 v2 片段继承 v1 片段的人工归属（hemory_attributions 按 event_id 回放）。
-export const HEMORY_SEGMENTATION_VERSION = 'hemory-topic-segments-v2';
-export const HEMORY_SEGMENTATION_VERSION_PREFIX = 'v2';
+// v3.1：v3 解决了长会议过切（173→93 片段），但出现过整场单段（204 行）与上限缺失；
+// 增加单段 40 条发言上限锚点，复核阶段对超长段和标题双主题信号做针对性拆分。
+// 主边界 = 业务对象变化；次边界 = 同一对象内明显独立的新请求/新决策流。
+export const HEMORY_SEGMENTATION_VERSION = 'hemory-topic-segments-v3.1';
+export const HEMORY_SEGMENTATION_VERSION_PREFIX = 'v3.1';
 export const HEMORY_MIN_FRAGMENT_LINES = 3;
 export const HEMORY_MIN_FRAGMENT_CHARS = 40;
 export const HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS = 3;
@@ -126,11 +127,13 @@ async function completeStage(runtime: Runtime, stageName: string, buildPrompt: (
   throw new Error(`${stageName}失败（已重试 ${HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS} 次）：${lastError?.message ?? '模型未返回有效分段'}`);
 }
 
-const SEGMENT_SCHEMA_DOC = '{"segments":[{"start_index":0,"end_index":2,"topic":"话题标题","summary":"忠于原文的摘要","subject":"业务对象（如具体项目/系统/合同/团队）","focus":"核心问题、请求或决定","topic_key":"录音内唯一事件键（同一事件复现时必须复用）","include":true,"discard_reason":""}]}';
+const SEGMENT_SCHEMA_DOC = '{"segments":[{"start_index":0,"end_index":2,"topic":"话题标题","summary":"忠于原文的摘要","subject":"业务对象（如具体项目/系统/合同/团队）","focus":"本段核心问题的概括（描述用，不触发切分）","topic_key":"录音内唯一事件键（同一事件复现时必须复用）","include":true,"discard_reason":""}]}';
 
-const EVENT_SLICING_RULES = `事件级切分规则：
-- 一个片段 = 同一业务对象 + 同一核心问题/请求/决定。原因、方案、决定、后续行动与对应对象属同一事件，不拆开。
-- 业务对象变化或核心问题变化时必须切段；时间间隔不是切分依据。
+const EVENT_SLICING_RULES = `事件切分规则（层级式，避免两个极端）：
+- 主切割边界：业务对象变化（项目/系统/合同/团队等切换）必须切段。
+- 次切割边界：同一对象内开始了明显独立的新请求或新决策流才切段。
+- 以下情况一律不切，保持在同一段：同一请求的原因、方案、细节澄清、追问、排期、决定、后续行动；话题内的自然漂移与深入；插话；时间间隔。
+- 粒度期望：围绕同一对象的连续讨论保持为大片段，一场长会议通常只有少数几个片段；但单段一般不超过 40 条发言——超过时按其中明显独立的子请求/子决策再拆。
 - 同一事件被其他话题打断后再次出现时，保持多个连续片段，但 topic_key 必须相同；不把中间无关原文并入。
 - topic_key 在录音内唯一标识事件；不同事件禁止共用。`;
 
@@ -140,17 +143,18 @@ async function proposeSegments(runtime: Runtime, recordingId: string, lines: Tra
   const partitionPrompt = (retryError?: string) => `整理一场 Hemory 录音的完整转写，按事件切片。每条输入必须且只能属于一个片段，索引必须连续覆盖 0 到 ${lines.length - 1}。\n`
     + `${EVENT_SLICING_RULES}\n`
     + `只输出 JSON：${SEGMENT_SCHEMA_DOC}。\n`
-    + `include 规则：至少包含 3 条有实际信息的发言且合计不少于 40 字，形成独立、完整的客户业务事件；寒暄、环境音、零散的一两句话、无明确业务信息的内容必须为 false。`
-    + `不得为了达到门槛合并不相关短句。摘要不得补造客户、负责人、日期、时长或结论。\n`
+    + `include 规则：片段必须构成独立、完整的客户业务事件（例如一个完整请求及其讨论闭环）；寒暄、环境音、零散的一两句话、无明确业务信息的内容必须为 false，且不得为凑门槛把它并入相邻事件。摘要不得补造客户、负责人、日期、时长或结论。\n`
     + `${retryError ? `上一次输出校验失败：${retryError}。请修正后重新输出完整 JSON。\n` : ''}`
     + `录音 ID：${recordingId}\n完整转写：${transcriptJson}`;
   const partitioned = await completeStage(runtime, '事件分区', partitionPrompt, lines.length);
 
-  const reviewPrompt = (retryError?: string) => `复核以下 Hemory 录音的事件切片结果，专查单一主题性：是否存在把多个事件混进一个片段的情况——例如“还有一件事”引出的新话题、业务对象（客户/项目/系统）切换、核心问题或请求变化。
+  const reviewPrompt = (retryError?: string) => `复核以下 Hemory 录音的事件切片结果，双向调整：
+1. 拆开确实混合的片段——一个片段里混进了不同业务对象，或同一对象内明显独立的新请求/新决策流（如“还有一件事”引出的新话题、问题 A 的讨论里夹着问题 B 的结论）；标题里出现两个不相关主题是混合信号。
+2. 合并被过度切分的相邻片段——相邻片段属于同一对象且围绕同一请求展开（例如原因与方案被切开、方案与决定被切开、细节追问被单独切开），必须合并回一个片段；切分过细是错误。
+3. 超长片段（远超 40 条发言）按其中明显独立的子请求/子决策再拆。
 ${EVENT_SLICING_RULES}
-- 仅拆开确实混合的片段；单事件内部的原因、方案、决定、后续行动保持一段。
-- 拆分后必须重新输出全部片段的完整 JSON（不是增量），索引连续覆盖 0 到 ${lines.length - 1}。
-- include 与 topic_key 一并复核：被拆出的新片段若不足门槛则 include=false；同一事件的多个片段共用 topic_key。
+- 调整后必须重新输出全部片段的完整 JSON（不是增量），索引连续覆盖 0 到 ${lines.length - 1}。
+- include 与 topic_key 一并复核：合并后的片段沿用其中更有代表性的一组字段；同一事件的多个片段共用 topic_key；不足门槛的独立碎片 include=false。
 只输出 JSON：${SEGMENT_SCHEMA_DOC}。
 ${retryError ? `上一次输出校验失败：${retryError}。请修正后重新输出完整 JSON。\n` : ''}
 录音 ID：${recordingId}

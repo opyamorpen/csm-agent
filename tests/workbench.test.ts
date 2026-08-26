@@ -294,11 +294,11 @@ test('workbench: Hemory AI segmentation persists topics and suppresses one or tw
     assert.equal(fragments.length, 1);
     assert.equal(fragments[0].sourceType, 'ai_topic_segment');
     assert.equal(fragments[0].title, '审批阻塞排查');
-    assert.equal(fragments[0].payload?.generationVersion, 'hemory-topic-segments-v2');
+    assert.equal(fragments[0].payload?.generationVersion, 'hemory-topic-segments-v3.1');
     assert.equal(fragments[0].payload?.topicGroupId, 'recording-1:approval-block');
     assert.equal(fragments[0].payload?.topicPartIndex, 1);
     assert.equal(fragments[0].payload?.topicPartCount, 1);
-    assert.ok(fragments[0].externalId.startsWith('v2:'));
+    assert.ok(fragments[0].externalId.startsWith('v3.1:'));
     assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
     assert.equal((await service.segmentRecording(recording)).length, 1);
     assert.equal(fake.calls(), 2);
@@ -958,7 +958,7 @@ test('workbench: adjacent same-topic_key segments are defensively merged; v2 ids
     db.attributeHemoryFragments([db.findSourceEvent('hemory', 'ai_topic_segment', `rec-ver:${lines[0].spokenAt}:0:${lines[2].spokenAt}:2`)!.id],
       'crm-x', {}, 'csm');
     // v2 片段的外部 ID 带版本前缀，归属状态不受 v1 override 影响。
-    assert.ok(fragments[0].externalId.startsWith('v2:rec-ver:'));
+    assert.ok(fragments[0].externalId.startsWith('v3.1:rec-ver:'));
     assert.notEqual(fragments[0].attributionStatus, 'confirmed');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -979,7 +979,7 @@ test('workbench: timeline and draft regeneration ignore superseded fragments', a
 
     // v2 重切产出新片段后激活：v1 停用，时间线不再显示。
     const v2 = db.upsertSourceEvent({ customerId: 'crm-c', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
-      externalId: 'v2:rec-old:2026-08-25T05:00:00Z:0:2026-08-25T05:01:40Z:5', title: 'v2 话题', occurredAt: '2026-08-25T05:00:00Z',
+      externalId: 'v3.1:rec-old:2026-08-25T05:00:00Z:0:2026-08-25T05:01:40Z:5', title: 'v2 话题', occurredAt: '2026-08-25T05:00:00Z',
       attributionStatus: 'confirmed', payload: { recordingId: 'rec-old', topic: 'v2 话题', summary: 'v2 摘要', transcript: '客户丙: 新内容' } });
     db.activateHemoryFragments(raw.id, 'fp-v2', [v2.id]);
     const timelineTopics = db.listTimeline('crm-c').filter((item) => item.sourceType === 'ai_topic_segment');
@@ -1067,7 +1067,73 @@ test('workbench: resegment-all succeeds when every recording passes', async () =
     assert.equal(summary.count, 2);
     assert.equal(summary.discardedSegments, 0);
     assert.equal(db.listHemoryFragments({ status: 'all' }).length, 2);
-    assert.ok(db.listHemoryFragments({ status: 'all' }).every((item) => item.externalId.startsWith('v2:rec-ok:')));
+    assert.ok(db.listHemoryFragments({ status: 'all' }).every((item) => item.externalId.startsWith('v3.1:rec-ok:')));
     assert.ok(db.findSourceEvent('hemory', 'raw_transcript', 'rec-ok') && recording);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: v3 prompts carry hierarchical slicing rules with anti-over-split guidance', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-v3-prompts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const lines = v2Lines();
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-p3',
+      title: '原始转写', occurredAt: lines[0].spokenAt, payload: { recordingId: 'rec-p3', lines }, attributionStatus: 'unattributed' });
+    const prompts: string[] = [];
+    const output = { segments: [
+      { start_index: 0, end_index: 2, topic: '人为效能项目延期', summary: '延期处理。', subject: '人为效能项目', focus: '二期延期', topic_key: 'delay', include: true },
+      { start_index: 3, end_index: 5, topic: 'BI 报表配色调整', summary: '配色调整。', subject: 'BI 报表', focus: '配色调整', topic_key: 'bi-color', include: true },
+    ] };
+    const runtime = { models: { complete: async (_model: unknown, request: any) => {
+      prompts.push(request.messages[0].content);
+      return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(output) }] };
+    } }, model: {}, llm: { provider: 'fake', model: 'segmenter' } } as any;
+    const service = new HemorySegmentationService(db, runtime);
+    await service.segmentRecording(recording);
+    assert.equal(prompts.length, 2);
+    // 阶段 1：层级式规则 + 不切割清单 + 少数大片段期望。
+    assert.match(prompts[0], /主切割边界：业务对象变化/);
+    assert.match(prompts[0], /次切割边界：同一对象内开始了明显独立的新请求或新决策流/);
+    assert.match(prompts[0], /以下情况一律不切/);
+    assert.match(prompts[0], /一场长会议通常只有少数几个片段/);
+    assert.match(prompts[0], /单段一般不超过 40 条发言/);
+    assert.match(prompts[0], /避免两个极端/);
+    // 阶段 2：双向复核（拆混合 + 合并过切）。
+    assert.match(prompts[1], /双向调整/);
+    assert.match(prompts[1], /合并被过度切分的相邻片段/);
+    assert.match(prompts[1], /切分过细是错误/);
+    assert.match(prompts[1], /远超 40 条发言/);
+    assert.match(prompts[1], /标题里出现两个不相关主题是混合信号/);
+    // focus 降级为描述性字段。
+    assert.match(prompts[0], /focus.*描述用，不触发切分/s);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: adjacent segments of same object but distinct requests stay separate in v3', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-v3-boundary-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 同一对象（人为效能项目）内的两个独立请求：延期处理 与 权限模型改造——合法切割，防御合并不得合并。
+    const lines = [
+      { spokenAt: '2026-08-25T05:00:00Z', speaker: '客户', text: '人为效能项目二期延期了，联调卡住需要新排期。' },
+      { spokenAt: '2026-08-25T05:00:20Z', speaker: 'CSM', text: '本周内给出新排期并同步张总。' },
+      { spokenAt: '2026-08-25T05:00:40Z', speaker: '客户', text: '延期结论更新到项目计划里。' },
+      { spokenAt: '2026-08-25T05:01:00Z', speaker: '客户', text: '另外希望对人为效能项目启动权限模型改造，按部门隔离数据。' },
+      { spokenAt: '2026-08-25T05:01:20Z', speaker: 'CSM', text: '权限改造我先出方案初稿，下周评审。' },
+      { spokenAt: '2026-08-25T05:01:40Z', speaker: '客户', text: '方案确认后再评估改造周期。' },
+    ];
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-b3',
+      title: '原始转写', occurredAt: lines[0].spokenAt, payload: { recordingId: 'rec-b3', lines }, attributionStatus: 'unattributed' });
+    const output = { segments: [
+      { start_index: 0, end_index: 2, topic: '人为效能项目二期延期', summary: '延期排期安排。', subject: '人为效能项目', focus: '二期延期排期', topic_key: 'delay', include: true },
+      { start_index: 3, end_index: 5, topic: '人为效能项目权限模型改造', summary: '权限改造新请求。', subject: '人为效能项目', focus: '权限模型改造', topic_key: 'perm-redesign', include: true },
+    ] };
+    const fake = fakeSegmentationRuntime([output]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const fragments = await service.segmentRecording(recording);
+    assert.equal(fragments.length, 2);
+    assert.notEqual(fragments[0].payload?.topicKey, fragments[1].payload?.topicKey);
+    assert.equal(fragments[0].payload?.topicGroupId, 'rec-b3:delay');
+    assert.equal(fragments[1].payload?.topicGroupId, 'rec-b3:perm-redesign');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
