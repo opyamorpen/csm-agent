@@ -137,6 +137,32 @@ export function parseOnesManhourPage(text: string): OnesManhourPage {
   };
 }
 
+// get_manhour_mode 的真实返回是 ONES 状态信封（{"result":"SUCCESS","data":{"mode":"summary"}} 一类），
+// 顶层 result 是状态码而非模式值；历史版本只读顶层 result 导致模式永远识别失败。宽容兼容多种形状，
+// 无法识别返回 null（FAIL 信封也返回 null，由调用方决定按业务失败还是降级处理）。
+export function parseOnesManhourMode(text: string): 'simple' | 'summary' | null {
+  const value = parseJson(text);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const envelope = value as Record<string, unknown>;
+  const candidate = (raw: unknown): 'simple' | 'summary' | null =>
+    raw === 'simple' || raw === 'summary' ? raw : null;
+  const direct = candidate(envelope.result) ?? candidate(envelope.mode);
+  if (direct) return direct;
+  const data = envelope.data;
+  if (typeof data === 'string') return candidate(data);
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const nested = data as Record<string, unknown>;
+    const inner = candidate(nested.result) ?? candidate(nested.mode) ?? candidate(nested.manhourMode) ?? candidate(nested.manhour_mode);
+    if (inner) return inner;
+    // 浅层扫描：模式值可能藏在任意键下（如 {data:{workhourMode:{value:'summary'}}}）。
+    for (const raw of Object.values(nested)) {
+      const found = candidate(unwrap(raw));
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function recordsIn(value: any): Record<string, unknown>[] {
   if (!value) return [];
   if (Array.isArray(value)) {
@@ -405,7 +431,7 @@ export class PortfolioSyncService {
   private async fetchWorkhourRecords(issueId: string): Promise<WorkhourRecord[]> {
     const modeResult = await this.mcp.call('mcp__ones__get_manhour_mode', {});
     if (modeResult.isError) return [];
-    const mode = asText(parseJson(modeResult.text)?.result) ?? 'summary';
+    const mode = parseOnesManhourMode(modeResult.text) ?? 'summary';
     const tool = mode === 'simple'
       ? 'mcp__ones__get_manhour_list_in_simple_mode'
       : 'mcp__ones__get_manhour_list_in_summary_mode';

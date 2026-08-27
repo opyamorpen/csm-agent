@@ -382,7 +382,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
       console.log(`录音总数 ${summary.recordings ?? '?'}，成功 ${summary.recordings != null ? Number(summary.recordings) - Number(summary.failedRecordings ?? 0) : '?'}，`
         + `失败 ${summary.failedRecordings ?? 0}，新片段 ${summary.count ?? '?'}，丢弃段 ${summary.discardedSegments ?? '?'}。`);
       if (summary.backupPath) console.log(`备份：${summary.backupPath}`);
-      console.log('超过 7 个上海自然日的录音，其待归属片段需用 hermory inbox --days=N 或日期过滤查看。');
+      console.log('超过 7 个上海自然日的录音，其待归属片段需用 heremory inbox --days=N 或日期过滤查看。');
     }
     print(completed);
     if (completed.status !== 'succeeded') process.exitCode = 2;

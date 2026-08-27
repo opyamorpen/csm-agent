@@ -3,7 +3,7 @@ import type { Runtime } from '../bootstrap.js';
 import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
-import { shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
+import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
@@ -302,6 +302,12 @@ function textOf(event: SourceEvent): string {
   return String(event.payload?.transcript ?? event.title);
 }
 
+/** 片段的分节正文：分段器摘要（措辞规整）优先，缺失时回退转写原文。 */
+function segmentSummaryOf(event: SourceEvent): string {
+  const summary = typeof event.payload?.summary === 'string' ? event.payload.summary.trim() : '';
+  return summary || textOf(event);
+}
+
 function cleanJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try { return JSON.parse(trimmed); } catch { /* inspect embedded JSON below */ }
@@ -313,14 +319,37 @@ function cleanJson(text: string): unknown {
   return null;
 }
 
+// ONES 工作项信号门控：LLM 语义提案之外，证据文本还必须命中该类型的业务信号才放行。
+// 宁缺毋滥——方案/workaround 讨论、商务付费话题、客户内部流程、泛泛不满只进沟通记录，不建工作项。
+// operations 最谨慎：请求标记必须与运维操作名词邻近出现（短语级合取，防止长转写里两个词各自孤立命中）。
+const ONES_SIGNAL_PATTERNS: Record<OnesDeskDraftType, RegExp> = {
+  suggestion: /还不满足|满足不了|还不支持|标品.{0,8}(不支持|没有|缺|做不到)|目前.{0,6}(不支持|没有|做不到)|暂时不支持|没有这个(功能|报表|能力|模块|选项)|缺少|缺失|反馈.{0,8}需求|提个?需求|新需求|核心需求|有个需求|希望.{0,24}(支持|增加|提供|开放|加上|实现|纳入|加到|加进)|建议.{0,12}(增加|支持|提供|开放|纳入)|(加入|放到?|放进?|纳入|整合到?).{0,6}标品|标品(里面|中|里)?(没有|不支持|缺|做不到)|能不能.{0,16}(支持|加|做|提供|开放)/i,
+  // 转写口语噪声大（今晨 10K 字转写里 bug/故障几乎必有偶现命中）：ticket 信号只采标题、分段摘要与 focus，
+  // 不扫转写原文——片段级兜底只求保守召回，误判代价比漏报高。
+  ticket: /bug|缺陷|不符合预期|跟预期不一致|不正常|不对劲|算错|算不对|统计错|逻辑错|逻辑有问题|数据不对|数据错|数据不准|显示错|展示不对|无法使用|不可用|用不了|没法用|报错|出错|故障|白屏|卡死|崩溃|挂了/i,
+  // operations 误判主因是「配置」：改报表筛选/插件配置是产品使用行为，不是运维操作，不纳入信号词。
+  operations: /(需要|得|请|麻烦|帮忙|协助|能不能|可不可以|要不要|想|安排|提交|申请|要).{0,20}(环境重装|重装|数据迁移|迁移|备份|还原|恢复|搭建环境|搭环境|初始化|运维?配置|改配置|调整配置|证书|https?|域名|服务器|磁盘|扩容|巡检|重建索引|升级|部署)|(重装|迁移|备份|恢复|运维?配置|证书|域名|服务器|磁盘|扩容|巡检|索引|升级|部署).{0,12}(一下|需要|帮忙|协助|处理)/i,
+};
+
+/** 信号检测的文本范围：标题 + 分段摘要 + focus（分段摘要措辞更规整，弥补口语转写噪声）；ticket 不扫转写。 */
+function onesSignalText(events: SourceEvent[], includeTranscript = true): string {
+  return events.map((event) => [event.title, event.payload?.summary, event.payload?.focus,
+    includeTranscript ? textOf(event) : ''].filter((part) => typeof part === 'string' && part.trim()).join('\n')).join('\n');
+}
+
+function hasOnesDraftSignal(type: OnesDeskDraftType, events: SourceEvent[]): boolean {
+  return ONES_SIGNAL_PATTERNS[type].test(onesSignalText(events, type !== 'ticket'));
+}
+
 export function classifyDraftTypes(events: SourceEvent[]): DraftItemType[] {
   const text = events.map(textOf).join('\n');
   const types = new Set<DraftItemType>(['followup']);
   if (/(待办|需要|请.{0,12}(负责|跟进|准备|确认)|下周|月底|之前.{0,12}(完成|给到)|action\s*item|todo)/i.test(text)) types.add('internal_todo');
   if (/(工时|小时|人天|投入.{0,8}(时间|天)|耗时|花了.{0,8}(小时|天))/i.test(text)) types.add('workhour');
-  if (/(需求|建议|希望|需要.{0,20}(功能|能力|模块|支持)|优化|增购|扩容)/i.test(text)) types.add('suggestion');
-  if (/(工单|故障|报错|异常|无法|失败|阻塞|投诉|不可用)/i.test(text)) types.add('ticket');
-  if (/(运维|部署|升级|巡检|迁移|上线变更)/i.test(text)) types.add('operations');
+  // suggestion/ticket/operations 与信号门控共用同一套判定，规则兜底与 LLM 门控口径一致。
+  for (const type of Object.keys(ONES_SIGNAL_PATTERNS) as OnesDeskDraftType[]) {
+    if (hasOnesDraftSignal(type, events)) types.add(type);
+  }
   return [...types];
 }
 
@@ -341,9 +370,9 @@ function defaultProposal(type: DraftItemType, customer: Customer, events: Source
     fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
   if (type === 'operations') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户运维事项`, summary: quote,
     fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
-  // followup：天粒度合并——全天片段按【话题】分节汇总，标题带日期。
+  // followup：天粒度合并——全天片段按【话题】分节汇总，标题带日期；分节正文优先片段自带分段摘要。
   return { type, title: `${customer.name} ${dateKey} 沟通记录`,
-    summary: events.map((event) => `【${event.title}】\n${textOf(event)}`).join('\n\n').slice(0, 3000),
+    summary: events.map((event) => `【${event.title}】\n${segmentSummaryOf(event)}`).join('\n\n').slice(0, 3000),
     fields: { ...base, date_key: dateKey, method: '会议', participants: speakers, key_topics: topics,
       one_line_summary: `与${customer.name}就${topics.slice(0, 3).join('、')}等进行沟通`, next_steps: 'unknown' }, unknowns: ['下一步计划'] };
 }
@@ -357,9 +386,13 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
     .map((type) => `- ${type}：${ONES_DESK_FIELD_SPECS[type].map((spec) => `${spec.label}（${spec.options ? Object.keys(spec.options).join('|') : '成员名'}）`).join('、')}`)
     .join('\n');
   const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
-    + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段，按话题分节汇总全天沟通；其 fields 必须包含 one_line_summary（一句话总结当天沟通）。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
-    + `workhour 不必输出（系统按录音时长自动计算并连带生成）。其他类型同一类型可以输出多条草稿，但每条必须对应独立的话题或行动；只返回有证据支持的草稿。\n`
-    + `suggestion/ticket/operations 是要写入 ONES 的工作项，其 fields 必须包含 ones_required 对象（键=字段名，值=选项名，从选项列表中选）。这些是 ONES 必填字段，你要根据沟通证据理解后给出提案，不得留空、不得写 unknown：\n`
+    + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段；其 fields 必须包含 one_line_summary（一句话总结当天沟通）和 sections 数组——published=false 的每个片段恰好一项 {"evidence_id":"片段id","summary":"该片段的摘要"}。每段 summary 2~4 句，忠于该片段自己的转写，写明该话题的关键结论、决定与后续行动，不得与其他片段的 summary 雷同、不得写成全天综述。sections 必须覆盖全部 published=false 片段，不得遗漏。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
+    + `workhour 不必输出（系统按录音时长自动计算并连带生成）。internal_todo 可以输出多条，每条对应独立的行动；只返回有证据支持的草稿。\n`
+    + `suggestion/ticket/operations 是要写入 ONES 的工作项，宁缺毋滥：必须严格满足以下判定标准，沟通证据不足以判定就不输出该草稿（相关内容仍会保留在沟通记录里）。\n`
+    + `- suggestion（建议和反馈）：客户明确表达产品能力不满足——如“现在还满足不了我们的需求”“标品还不支持这个”“这个需求我反馈一下”“希望以后支持/增加某功能”。方案讨论、workaround、客户内部流程、商务与付费话题、对交付节奏的不满都不算。\n`
+    + `- ticket（工单）：客户明确指认产品缺陷——如“这是个 bug”“这不符合预期”“行为不正常”“数据算错了”。单纯的疑问、配置咨询、使用方法讨论、性能慢的抱怨不算。\n`
+    + `- operations（运维工单）：客户明确提出需要运维服务操作——如环境重装、数据迁移、配置变更、证书/域名/服务器/备份等基础设施操作请求。只在客户明确提出操作请求时才输出，三者中最谨慎；一般的系统问题反馈、索引慢查询、插件交付都不算。\n`
+    + `suggestion/ticket/operations 的 fields 必须包含 ones_required 对象（键=字段名，值=选项名，从选项列表中选）。这些是 ONES 必填字段，你要根据沟通证据理解后给出提案，不得留空、不得写 unknown：\n`
     + `${requiredGuide}\n`
     + `ones_required 证据不足时的保守默认：服务类目→其他、是否客户付费→否、运维工程师→吴孟淋、优先级→P2、实例部署类型→私有云、环境类型→PRD（生产环境）、是否稳定复现→偶现、建议类型→新需求；所属模块/所属产品必须从选项中选最接近的一项。\n`
     + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
@@ -519,10 +552,8 @@ export class HemoryDraftService {
       if (proposals.some((proposal) => proposal.type === 'workhour')) {
         const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
         if (issue) {
-          try {
-            const mode = await this.fetchWorkhourMode(issue.externalId);
-            workhourBinding = mode ? { mode, error: null } : { mode: null, error: '无法识别 ONES 工时模式（simple/summary），请稍后重新生成' };
-          } catch (error) {
+          try { workhourBinding = { mode: await this.fetchWorkhourMode(issue.externalId), error: null }; }
+          catch (error) {
             workhourBinding = { mode: null, error: `无法获取 ONES 工时模式: ${(error as Error).message.slice(0, 160)}` };
           }
         }
@@ -555,10 +586,18 @@ export class HemoryDraftService {
       proposals.push(followup, this.workhourProposal(customer, followupEvents, dateKey, followup));
     }
     const seen = new Set<string>();
+    const byId = new Map(events.map((event) => [event.id, event]));
     for (const proposal of ai) {
       if (proposal.type === 'followup' || proposal.type === 'workhour') continue; // 这两类结构化生成，不信任模型多条输出
       const key = `${proposal.type}::${proposal.title}`;
       if (seen.has(key) || proposals.length >= MAX_DRAFT_ITEMS) continue;
+      // ONES 工作项宁缺毋滥：LLM 语义判定之外，其证据片段文本还必须命中该类型的业务信号；
+      // 无信号即丢弃（内容仍保留在沟通记录里），证据引用缺失时按整批事件判定。
+      const deskType = onesDeskTypeId(proposal.type);
+      if (deskType) {
+        const referenced = (proposal.evidenceRefs ?? []).flatMap((id) => { const event = byId.get(id); return event ? [event] : []; });
+        if (!hasOnesDraftSignal(deskType, referenced.length ? referenced : events)) continue;
+      }
       seen.add(key);
       proposals.push(proposal);
     }
@@ -579,10 +618,23 @@ export class HemoryDraftService {
       && (proposal.evidenceRefs ?? []).some((id) => ids.has(id)));
     const oneLine = valid.map((proposal) => String(proposal.fields?.one_line_summary ?? '')).find(Boolean)
       ?? `与${customer.name}就${followupEvents.map((event) => event.title).slice(0, 3).join('、')}等进行沟通`;
-    // 每个片段一节：优先用 LLM 对该片段的摘要，无命中时回退片段原文，保证全天覆盖无遗漏。
+    // 每个片段一节，回退链：LLM 对该片段的分节摘要 → 分段器摘要 → 转写原文，保证全天覆盖无遗漏且节节有实义。
+    const sectionSummaries = new Map<string, string>();
+    for (const proposal of valid) {
+      const sections = Array.isArray(proposal.fields?.sections) ? proposal.fields.sections : [];
+      for (const raw of sections) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+        const entry = raw as Record<string, unknown>;
+        const evidenceId = typeof entry.evidence_id === 'string' ? entry.evidence_id : '';
+        const summary = typeof entry.summary === 'string' ? entry.summary.trim() : '';
+        // 只收当天未发布片段的条目；LLM 综述句对全部片段重复一次就够，绝不当分节正文。
+        if (!ids.has(evidenceId) || !summary) continue;
+        if (!sectionSummaries.has(evidenceId)) sectionSummaries.set(evidenceId, summary);
+      }
+    }
     const sections = followupEvents.map((event) => {
-      const own = valid.find((proposal) => (proposal.evidenceRefs ?? []).includes(event.id));
-      return `【${event.title}】\n${own ? own.summary : textOf(event)}`;
+      const own = sectionSummaries.get(event.id);
+      return `【${event.title}】\n${own ?? segmentSummaryOf(event)}`;
     });
     const speakers = [...new Set(followupEvents.flatMap((event) =>
       (Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : []).filter(Boolean)))];
@@ -638,14 +690,16 @@ export class HemoryDraftService {
     return candidates[0]?.publicName ?? null;
   }
 
-  /** 查询 ONES 实例工时模式；工具缺失或调用报错时抛错，返回值无法识别时为 null，均由调用方降级为校验错误。 */
-  private async fetchWorkhourMode(issueId: string): Promise<OnesWorkhourMode | null> {
+  /** 查询 ONES 实例工时模式；工具缺失、调用报错或返回无法识别时抛错，由调用方降级为该草稿的校验错误。 */
+  private async fetchWorkhourMode(issueId: string): Promise<OnesWorkhourMode> {
     const tool = this.findReadTool('ones', /(get.*manhour.*mode|manhour.*mode|工时.*模式)/i);
     if (!tool) throw new Error('未找到 ONES 工时模式查询工具');
     const response = await this.mcp.call(tool, { issueID: issueId });
     if (response.isError) throw new Error(response.text.slice(0, 300));
-    const mode = String((cleanJson(response.text) as { result?: unknown } | null)?.result ?? '');
-    return mode === 'simple' || mode === 'summary' ? mode : null;
+    // ONES 返回状态信封（result=SUCCESS、模式值嵌在 data 里），必须用宽容解析而非只读顶层 result。
+    const mode = parseOnesManhourMode(response.text);
+    if (!mode) throw new Error(`无法解析 ONES 工时模式返回: ${response.text.slice(0, 120)}`);
+    return mode;
   }
 
   private buildTarget(type: DraftItemType, customer: Customer, events: SourceEvent[], proposal: DraftProposal, fields: Record<string, unknown>, workhourBinding?: WorkhourToolBinding) {
@@ -796,9 +850,10 @@ export class HemoryDraftService {
         if (response.isError) errors.push(`ONES 工时模式预检失败: ${response.text.slice(0, 300)}`);
         else {
           // 绑定工具必须与实例当前模式一致（simple/summary 各有专属写工具），不一致宁可拒绝也不让 ONES 端报错。
-          const mode = String((cleanJson(response.text) as { result?: unknown } | null)?.result ?? '');
+          // 模式返回无法识别（含 FAIL 信封）时静默跳过一致性检查，保持原有降级行为。
+          const mode = parseOnesManhourMode(response.text);
           const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;
-          if ((mode === 'simple' || mode === 'summary') && rawName && rawName !== ONES_WORKHOUR_TOOLS[mode]) {
+          if (mode && rawName && rawName !== ONES_WORKHOUR_TOOLS[mode]) {
             errors.push(`ONES 工时模式（${mode}）与草稿绑定工具不一致，请重新生成`);
           }
         }
