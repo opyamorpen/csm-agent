@@ -98,12 +98,14 @@
       <section id="hemoryInbox" class="agent-mode-panel hidden">
         <div class="agent-work-head">
           <div><h1>Hemory 待归属</h1><p>按片段绑定 CRM 售后客户，默认保留最近 7 天</p></div>
-          <div class="row-actions"><input id="hemoryDate" type="date" /><button id="hemorySync" class="quiet-command">增量同步</button></div>
-        </div>
-        <div class="hemory-assign-bar">
+        <div class="row-actions"><input id="hemoryDate" type="date" /><input id="hemoryTimeFrom" type="time" title="开始时间（上海）" /><input id="hemoryTimeTo" type="time" title="结束时间（上海）" /><button id="hemorySync" class="quiet-command">增量同步</button></div>
+      </div>
+      <div class="hemory-assign-bar">
           <label><span>状态</span><select id="hemoryStatus"><option value="pending">待归属</option><option value="all">全部片段</option><option value="confirmed">已归属</option><option value="ignored">已忽略</option></select></label>
           <label><span>归属客户</span><input id="hemoryCustomer" list="hemoryCustomerOptions" placeholder="搜索 CRM 客户" /></label>
           <datalist id="hemoryCustomerOptions"></datalist>
+          <label class="hemory-select-all"><input id="hemorySelectAll" type="checkbox" /><span>全选</span></label>
+          <span id="hemorySelectedCount" class="hemory-selected-count"></span>
           <button id="hemoryAssign" class="primary-command">归属所选片段</button>
           <button id="hemoryClear" class="quiet-command">清除归属</button>
           <button id="hemoryIgnore" class="quiet-command">忽略所选</button>

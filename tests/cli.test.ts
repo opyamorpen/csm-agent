@@ -52,7 +52,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent hemory assign/);
   assert.match(help.stdout, /csm-agent hemory ignore/);
   assert.match(help.stdout, /csm-agent hemory resegment --all/);
-  assert.match(help.stdout, /csm-agent hemory inbox \[YYYY-MM-DD\] \[--days N\]/);
+  assert.match(help.stdout, /csm-agent hemory inbox \[YYYY-MM-DD\] \[--days N\] \[--from HH:MM\] \[--to HH:MM\]/);
   assert.match(help.stdout, /csm-agent draft review/);
   assert.match(help.stdout, /csm-agent draft regenerate/);
   assert.match(help.stdout, /csm-agent service install/);
@@ -83,6 +83,20 @@ test('hemory CLI covers ignore restore and incremental sync semantics', () => {
   assert.match(handler, /\/api\/hemory\/sync/);
   assert.match(handler, /--days=/);
   assert.match(handler, /sync\/resegment\/inbox\/assign\/clear\/ignore/);
+});
+
+test('hemory inbox supports Shanghai time-of-day range filters with since/until', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const handler = source.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
+  assert.ok(handler, 'hemoryCommand source was not found');
+  // --from/--to 解析 HH:MM、必须与日期同用，并按上海时区组装 since/until 闭区间（与 Web 同一契约）。
+  assert.match(handler, /--from=\\d\{2\}:\\d\{2\}/);
+  assert.match(handler, /--to=\\d\{2\}:\\d\{2\}/);
+  assert.match(handler, /--from\/--to 时间段过滤需要同时指定日期/);
+  assert.match(handler, /`\$\{date\}T\$\{from\.slice\(7\)\}:00\+08:00`/);
+  assert.match(handler, /`\$\{date\}T\$\{to\.slice\(5\)\}:59\+08:00`/);
+  assert.match(handler, /&since=\$\{encodeURIComponent\(since\)\}/);
+  assert.match(handler, /&until=\$\{encodeURIComponent\(until\)\}/);
 });
 
 test('hemory resegment waits for the async run and reports v2 resegment statistics', () => {

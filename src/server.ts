@@ -342,8 +342,14 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
       if (req.method === 'GET' && path === '/api/hemory/fragments') {
         const daysParam = url.searchParams.get('days');
+        // since/until 为 ISO 时刻（如 2026-08-27T14:00:00+08:00），垃圾输入直接 400，避免静默得到空列表。
+        const since = url.searchParams.get('since')?.trim() || undefined;
+        const until = url.searchParams.get('until')?.trim() || undefined;
+        if (since != null && Number.isNaN(Date.parse(since))) return json(res, 400, { error: 'since 必须是合法的 ISO 日期时间，例如 2026-08-27T14:00:00+08:00' });
+        if (until != null && Number.isNaN(Date.parse(until))) return json(res, 400, { error: 'until 必须是合法的 ISO 日期时间，例如 2026-08-27T15:30:00+08:00' });
         const fragments = workbench.db.listHemoryFragments({ status: url.searchParams.get('status') ?? 'pending',
-          date: url.searchParams.get('date') ?? undefined, recordingId: url.searchParams.get('recording_id') ?? undefined,
+          date: url.searchParams.get('date') ?? undefined, since, until,
+          recordingId: url.searchParams.get('recording_id') ?? undefined,
           cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100),
           days: daysParam == null ? undefined : Math.max(0, Number(daysParam) || 0) });
         return json(res, 200, { fragments, nextCursor: fragments.at(-1)?.occurredAt ?? null });

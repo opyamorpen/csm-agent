@@ -119,7 +119,8 @@ function help(): void {
   csm-agent sync [客户ID或名称]
   csm-agent hemory sync [YYYY-MM-DD]
   csm-agent hemory resegment --all
-  csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--json]
+  csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--from HH:MM] [--to HH:MM] [--json]
+    （--from/--to 按上海时区收窄到当天时间段，需与日期同用）
   csm-agent hemory assign <客户ID或名称> <片段ID...>
   csm-agent hemory clear <片段ID...>
   csm-agent hemory ignore <片段ID...>
@@ -395,8 +396,18 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
   }
   if (subcommand === 'inbox') {
     const days = values.find((value) => /^--days=\d+$/.test(value));
+    const from = values.find((value) => /^--from=\d{2}:\d{2}$/.test(value));
+    const to = values.find((value) => /^--to=\d{2}:\d{2}$/.test(value));
+    const badTime = values.find((value) => /^--(from|to)=/.test(value) && !/^--(from|to)=\d{2}:\d{2}$/.test(value));
+    if (badTime) throw new Error(`时间参数格式应为 HH:MM，例如 --from=14:00（收到: ${badTime}）`);
     const date = values.find((value) => !value.startsWith('--') && /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? '';
-    const body = await request<any>(`/api/hemory/fragments?status=pending&limit=500${date ? `&date=${encodeURIComponent(date)}` : ''}${days ? `&days=${days.slice(7)}` : ''}`);
+    if ((from || to) && !date) throw new Error('--from/--to 时间段过滤需要同时指定日期，例如 csm-agent hermory inbox 2026-08-27 --from=14:00 --to=15:30');
+    // 闭区间：只填一边时另一边取全天边界；与 Web 界面一致按上海时区组装 since/until。
+    const since = from ? `${date}T${from.slice(7)}:00+08:00` : undefined;
+    const until = to ? `${date}T${to.slice(5)}:59+08:00` : undefined;
+    const query = `/api/hemory/fragments?status=pending&limit=500${date ? `&date=${encodeURIComponent(date)}` : ''}${days ? `&days=${days.slice(7)}` : ''}`
+      + `${since ? `&since=${encodeURIComponent(since)}` : ''}${until ? `&until=${encodeURIComponent(until)}` : ''}`;
+    const body = await request<any>(query);
     if (jsonOutput) return print(body.fragments);
     console.table((body.fragments ?? []).map((item: any) => ({ id: item.id, start: item.payload?.startAt ?? item.occurredAt,
       end: item.payload?.endAt ?? item.occurredAt, recording: item.payload?.recordingId, topic: item.payload?.topic ?? item.title,

@@ -703,7 +703,7 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow);
   }
 
-  listHemoryFragments(filters: { status?: string; date?: string; recordingId?: string; limit?: number; cursor?: string; days?: number } = {}): SourceEvent[] {
+  listHemoryFragments(filters: { status?: string; date?: string; since?: string; until?: string; recordingId?: string; limit?: number; cursor?: string; days?: number } = {}): SourceEvent[] {
     const clauses = ["source_system='hemory'", "source_type='ai_topic_segment'", 'g.active=1'];
     const args: Array<string | number | null> = [];
     if (filters.status && filters.status !== 'all') {
@@ -716,8 +716,11 @@ export class WorkbenchDatabase {
       clauses.push('datetime(occurred_at)>=datetime(?)', 'datetime(occurred_at)<=datetime(?)');
       args.push(range.start, range.end);
     }
-    // 待归属默认只保留最近 7 个上海自然日，避免长期不处理导致列表堆积；显式日期/全部状态不受限。
-    if (filters.status === 'pending' && !filters.date) {
+    // 时间段过滤（since/until，ISO 时刻、闭区间）：与 date 一样必须经 datetime() 归一化，支持只填一边的开区间。
+    if (filters.since) { clauses.push('datetime(occurred_at)>=datetime(?)'); args.push(filters.since); }
+    if (filters.until) { clauses.push('datetime(occurred_at)<=datetime(?)'); args.push(filters.until); }
+    // 待归属默认只保留最近 7 个上海自然日，避免长期不处理导致列表堆积；显式日期/时间段/全部状态不受限。
+    if (filters.status === 'pending' && !filters.date && !filters.since && !filters.until) {
       const days = Math.max(0, filters.days ?? HEMORY_PENDING_WINDOW_DAYS);
       if (days > 0) {
         const start = new Date(shanghaiTodayStart().getTime() - (days - 1) * 86_400_000);

@@ -645,10 +645,14 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .agent-work-head h1 { margin: 0; font-size: 22px; }
 .agent-work-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .agent-work-head input { min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; }
-.hemory-assign-bar { display: grid; grid-template-columns: 150px minmax(240px, 1fr) auto auto; gap: 8px; align-items: end; margin-bottom: 12px; padding: 11px; border: 1px solid var(--border); background: #f7f8fa; }
+/* 归属栏冻结在 tab 条之下：与 .agent-mode-tabs 同款 sticky 手法（负边距全幅 + 不透明背景 + z-index 低于 tab 条）。 */
+.hemory-assign-bar { position: sticky; top: 35px; z-index: 7; display: grid; grid-template-columns: 150px minmax(220px, 1fr) auto auto auto auto; gap: 8px; align-items: end; margin: 0 -18px 12px; padding: 11px 18px; border: 1px solid var(--border); border-bottom: 1px solid var(--border); background: #f7f8fa; }
 .hemory-assign-bar label { min-width: 0; }
 .hemory-assign-bar label span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; }
 .hemory-assign-bar input, .hemory-assign-bar select { width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+.hemory-select-all { display: flex; align-items: center; gap: 5px; min-height: 34px; white-space: nowrap; }
+.hemory-select-all input { width: 16px; height: 16px; accent-color: var(--accent); }
+.hemory-selected-count { align-self: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .hemory-fragment-list, .draft-batch-list { display: grid; gap: 8px; }
 .fragment-group-title { margin-top: 6px; padding: 6px 0 2px; color: #5d6875; font-size: 11px; font-weight: 700; }
 .hemory-fragment { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 11px 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
@@ -719,7 +723,8 @@ footer { background: #fff; }
   .agent-mode-tabs { top: 0; margin: -14px -10px 12px; padding-left: 10px; padding-right: 10px; overflow-x: auto; }
   .agent-mode-tab { flex: 0 0 auto; }
   .agent-work-head { align-items: flex-start; flex-direction: column; }
-  .hemory-assign-bar { grid-template-columns: 1fr 1fr; }
+  .agent-work-head .row-actions { flex-wrap: wrap; }
+  .hemory-assign-bar { top: 49px; grid-template-columns: 1fr 1fr; margin: 0 -10px 12px; padding: 11px 10px; }
   .hemory-assign-bar label:nth-child(2) { grid-column: 1 / -1; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
 }

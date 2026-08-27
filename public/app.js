@@ -52,9 +52,13 @@
   const archivedListEl = document.getElementById('archivedList');
   const archivedCount = document.getElementById('archivedCount');
   const hemoryDate = document.getElementById('hemoryDate');
+  const hemoryTimeFrom = document.getElementById('hemoryTimeFrom');
+  const hemoryTimeTo = document.getElementById('hemoryTimeTo');
   const hemoryStatus = document.getElementById('hemoryStatus');
   const hemoryCustomer = document.getElementById('hemoryCustomer');
   const hemoryCustomerOptions = document.getElementById('hemoryCustomerOptions');
+  const hemorySelectAll = document.getElementById('hemorySelectAll');
+  const hemorySelectedCount = document.getElementById('hemorySelectedCount');
   const hemoryFragmentList = document.getElementById('hemoryFragmentList');
   const draftBatchList = document.getElementById('draftBatchList');
   const globalSync = document.getElementById('globalSync');
@@ -860,10 +864,32 @@
     return [...hemoryFragmentList.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.eventId);
   }
 
+  /** 已选计数与全选勾选态跟随列表勾选变化（change 冒泡到列表容器，一次委托即可，重渲染无需重挂）。 */
+  function updateHemorySelection() {
+    const checks = [...hemoryFragmentList.querySelectorAll('input[type="checkbox"]')];
+    const selected = checks.filter((input) => input.checked).length;
+    hemorySelectedCount.textContent = checks.length ? `已选 ${selected}/${checks.length}` : '';
+    hemorySelectAll.checked = checks.length > 0 && selected === checks.length;
+  }
+
+  /** 组装时间段查询参数：已选日期且填了任一时刻时按上海时区收窄到当天时段；返回 null 表示不筛选。 */
+  function hemoryTimeRangeParams() {
+    const from = hemoryTimeFrom.value;
+    const to = hemoryTimeTo.value;
+    if (!from && !to) return {};
+    if (!hemoryDate.value) return { error: '时间段筛选需先选择日期' };
+    if (from && to && from > to) return { error: '开始时间不能晚于结束时间' };
+    // 闭区间：只填一边时另一边取全天边界。
+    return { since: `${hemoryDate.value}T${from || '00:00'}:00+08:00`, until: `${hemoryDate.value}T${to || '23:59'}:59+08:00` };
+  }
+
   async function loadHemoryInbox() {
     await ensureCustomerOptions();
     const params = new URLSearchParams({ status: hemoryStatus.value, limit: '500' });
-    if (hemoryDate.value) params.set('date', hemoryDate.value);
+    if (hemoryDate.value && !hemoryTimeFrom.value && !hemoryTimeTo.value) params.set('date', hemoryDate.value);
+    const range = hemoryTimeRangeParams();
+    if (range.error) { await alertDialog(range.error); return; }
+    if (range.since) { params.set('since', range.since); params.set('until', range.until); }
     const data = await api(`/api/hemory/fragments?${params}`);
     const fragments = data.fragments || [];
     if (hemoryStatus.value === 'pending') hemoryPendingCount.textContent = fragments.length || '';
@@ -921,6 +947,7 @@
         el('div', 'cell-sub', `${formatDateTime(fragment.payload?.startAt || fragment.occurredAt)} - ${formatDateTime(fragment.payload?.endAt || fragment.occurredAt)} · ${speakers} · ${fragment.customerId ? `CRM ${fragment.customerId}` : '未绑定客户'} · ${fragment.id}`));
       row.append(check, body); hemoryFragmentList.append(row);
     }
+    updateHemorySelection();
   }
 
   async function ignoreHemoryFragments(eventIds) {
@@ -1077,6 +1104,15 @@
   for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.onclick = () => void showAgentMode(tab.dataset.agentMode);
   hemoryStatus.onchange = () => void loadHemoryInbox();
   hemoryDate.onchange = () => void loadHemoryInbox();
+  hemoryTimeFrom.onchange = () => void loadHemoryInbox();
+  hemoryTimeTo.onchange = () => void loadHemoryInbox();
+  hemoryFragmentList.addEventListener('change', (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') updateHemorySelection();
+  });
+  hemorySelectAll.onchange = () => {
+    for (const input of hemoryFragmentList.querySelectorAll('input[type="checkbox"]')) input.checked = hemorySelectAll.checked;
+    updateHemorySelection();
+  };
   document.getElementById('hemoryAssign').onclick = () => void updateHemoryAttribution(false);
   document.getElementById('hemoryClear').onclick = () => void updateHemoryAttribution(true);
   document.getElementById('hemoryIgnore').onclick = async () => {

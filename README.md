@@ -62,7 +62,8 @@ csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <preview返回的�
 csm-agent sync [CRM客户ID]
 csm-agent hemory sync [YYYY-MM-DD]
 csm-agent hemory resegment --all
-csm-agent hemory inbox [YYYY-MM-DD] [--days N]
+csm-agent hemory inbox [YYYY-MM-DD] [--days N] # 待归属片段；--from/--to 按上海时区收窄到当天时间段（需与日期同用）
+csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30
 csm-agent hemory assign <客户ID或名称> <片段ID...>
 csm-agent hemory clear <片段ID...>
 csm-agent hemory ignore <片段ID...>
@@ -143,7 +144,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
-- `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`
+- `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
@@ -155,7 +156,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 - CRM `_id` 是客户主键；CRM「客户名称」（`field_n1qN0__c__r`）或「售后客户名称」（`field_83f4l__c`）必须与 ONES「客户信息」选项精确且唯一匹配，Hemory 也只在唯一匹配时自动归属，歧义与未归属内容不会进入客户判断。
 - Hemory MCP 当前只提供词法和时间窗口转写搜索，不返回 Hemory 页面中的原生摘要、话题或 section ID；CSM Agent 保存原始转写后使用当前配置的大模型生成自己的话题片段，页面会明确展示话题、摘要和可展开原文证据。
-- Hemory 同步是滚动 7 天增量：自动（13:00/20:00）与手动同步都扫描最近 7 个上海自然日，已入库片段按外部 ID 去重、已归属/已忽略状态在重同步后保持。待归属列表默认只显示最近 7 天（`days=0` 关闭，指定日期或全部状态不受限），超过 7 天的片段不删除，可按日期找回。
+- Hemory 同步是滚动 7 天增量：自动（13:00/20:00）与手动同步都扫描最近 7 个上海自然日，已入库片段按外部 ID 去重、已归属/已忽略状态在重同步后保持。待归属列表默认只显示最近 7 天（`days=0` 关闭，指定日期、时间段或全部状态不受限），超过 7 天的片段不删除，可按日期找回。
 - 片段支持「忽略」：忽略后不再出现在待归属列表、重同步也不会重新进入，可在「已忽略」状态下查看并通过「恢复」（清除归属语义）回到待归属。
 - 片段按「事件级切片 v3.2」生成（合并优先）：主切割边界是业务对象变化，次边界是同一对象内明显独立的新请求/新决策流；同一对象/同一诉求的连续讨论（含原因、方案、细节澄清、演示、结论与后续安排）保持一个大片段——30 分钟录音通常 1~4 个片段、2 小时会议通常 5~8 个片段，单段一般不超过 100 条发言。同一事件被打断后再次出现时保留多个片段并共享话题组（`topicGroupId`，收件箱显示「同话题 m/n」）。低于门槛（3 条有效发言且合计 40 字）的段独立丢弃，不与相邻话题合并。
 - `csm-agent hemory resegment --all` 对库内全部录音按当前分段版本全量重切：先 `VACUUM INTO` 备份数据库，逐录音成功即切换新代际（失败的录音保持旧片段，重跑命令收敛），与增量同步互斥。重切后旧人工归属与忽略状态不继承（仅按名称规则自动归属），旧片段停用但保留审计；切换到重新归属完成之间，客户证据与风险「客户声音」维度可能临时降级。超过 7 个上海自然日的录音，其待归属片段需用 `--days=N` 或日期过滤查看。

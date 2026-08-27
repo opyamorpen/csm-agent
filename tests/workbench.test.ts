@@ -307,6 +307,32 @@ test('workbench: pending Hemory list defaults to a 7-day Shanghai window and dat
   assert.ok(db.listHemoryFragments({ status: 'pending' }).map((item) => item.id).includes(nowPlusOffset.id));
 }));
 
+test('workbench: Hemory since/until filters by Shanghai wall-clock range and lifts the pending window', () => withDb((db) => {
+  const upsert = (externalId: string, occurredAt: string) => db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+    externalId, title: '时段片段', occurredAt, payload: { recordingId: 'r-range', rawRecordingEventId: 'rec-raw-range', transcript: '时段片段' }, attributionStatus: 'unattributed' });
+  // 同一上海日的三个时刻：14:00（区间内）、16:30（区间外）、+08:00 与 Z 两种格式混存。
+  const inside = upsert('r-range:t0:x', '2026-08-25T14:00:00+08:00');
+  const outside = upsert('r-range:t1:x', '2026-08-25T16:30:00+08:00');
+  const insideZ = upsert('r-range:t2:x', '2026-08-25T07:00:00Z'); // 上海 15:00，区间内
+  // 8 天前的窗口外片段：显式 since/until 必须解除 7 天窗口限制。
+  const oldInside = upsert('r-range:t3:x', '2026-08-17T15:00:00+08:00');
+  const rawEvent = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'r-range', title: '原始转写',
+    occurredAt: inside.occurredAt, payload: { recordingId: 'r-range' }, attributionStatus: 'unattributed' });
+  db.activateHemoryFragments(rawEvent.id, 'fingerprint-range', [inside.id, outside.id, insideZ.id, oldInside.id]);
+  const range = (since?: string, until?: string) => db.listHemoryFragments({ status: 'pending', since, until }).map((item) => item.id);
+  // 闭区间 14:00–15:30：+08:00 与 Z 归一化后都按上海时刻判定。
+  assert.ok(range('2026-08-25T14:00:00+08:00', '2026-08-25T15:30:00+08:00').includes(inside.id));
+  assert.ok(range('2026-08-25T14:00:00+08:00', '2026-08-25T15:30:00+08:00').includes(insideZ.id));
+  assert.equal(range('2026-08-25T14:00:00+08:00', '2026-08-25T15:30:00+08:00').includes(outside.id), false);
+  // 只填一边的开区间。
+  assert.ok(range('2026-08-25T16:00:00+08:00').includes(outside.id));
+  // until=14:30：上海 14:00 的片段在界内，上海 15:00（Z 格式）的片段在界外。
+  assert.ok(range(undefined, '2026-08-25T14:30:00+08:00').includes(inside.id));
+  assert.equal(range(undefined, '2026-08-25T14:30:00+08:00').includes(insideZ.id), false);
+  // 显式 since 解除 pending 7 天窗口：8 天前 15:00 的片段在 14:00–16:00 区间内可见。
+  assert.ok(range('2026-08-17T14:00:00+08:00', '2026-08-17T16:00:00+08:00').includes(oldInside.id));
+}));
+
 // v2 两阶段分段：outputs 按调用序消耗（阶段 1 分区在前，阶段 2 复核在后）；
 // 复核输出省略时直接沿用分区结果（等价于模型复核后未修改）。
 function fakeSegmentationRuntime(outputs: Array<Record<string, unknown>>) {

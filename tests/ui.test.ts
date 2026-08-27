@@ -182,6 +182,52 @@ test('hemory inbox shows topic-part badges for recurring events', () => {
   assert.match(styles, /\.fragment-topic-part \{[^}]*border: 1px dashed/);
 });
 
+test('hemory inbox filters by a Shanghai time-of-day range on the selected date', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+  const range = source.match(/function hemoryTimeRangeParams[\s\S]*?\n  }\n\n  async function loadHemoryInbox/)?.[0];
+
+  // 显示契约：日期旁有起止时间输入；填了任一时刻即按上海时区收窄到当天时段（since/until 闭区间），并解除 7 天窗口。
+  assert.match(html, /id="hemoryTimeFrom"/);
+  assert.match(html, /id="hemoryTimeTo"/);
+  assert.match(html, /<input id="hemoryTimeFrom" type="time"/);
+  assert.match(html, /<input id="hemoryTimeTo" type="time"/);
+  assert.ok(range, 'hemoryTimeRangeParams source was not found');
+  assert.match(range, /时间段筛选需先选择日期/);
+  assert.match(range, /开始时间不能晚于结束时间/);
+  assert.match(range, /`\$\{hemoryDate\.value\}T\$\{from \|\| '00:00'\}:00\+08:00`/);
+  assert.match(range, /`\$\{hemoryDate\.value\}T\$\{to \|\| '23:59'\}:59\+08:00`/);
+  assert.ok(loader, 'loadHemoryInbox source was not found');
+  // 只选日期仍走整天 date 参数；填了时刻才切换到 since/until。
+  assert.match(loader, /if \(hemoryDate\.value && !hemoryTimeFrom\.value && !hemoryTimeTo\.value\) params\.set\('date', hemoryDate\.value\)/);
+  assert.match(loader, /params\.set\('since', range\.since\)/);
+  assert.match(loader, /params\.set\('until', range\.until\)/);
+});
+
+test('hemory assign bar stays frozen with select-all and a live selected count', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+  const updater = source.match(/function updateHemorySelection[\s\S]*?\n  }\n\n  \/\*\* 组装时间段查询参数/)?.[0];
+
+  // 显示契约：归属栏 sticky 冻结在 tab 条下（z-index 低于 tab 条），勾选后无需滚回顶部即可归属。
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*position: sticky/);
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*z-index: 7/);
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*background: #f7f8fa/);
+  // 全选当前筛选结果的全部片段 + 已选计数（m/n）。
+  assert.match(html, /id="hemorySelectAll"/);
+  assert.match(html, /id="hemorySelectedCount"/);
+  assert.ok(updater, 'updateHemorySelection source was not found');
+  assert.match(updater, /已选 \$\{selected\}\/\$\{checks\.length\}/);
+  assert.match(updater, /hemorySelectAll\.checked = checks\.length > 0 && selected === checks\.length/);
+  // 计数通过列表上的 change 委托更新，重渲染后由 loadHemoryInbox 收尾刷新。
+  assert.match(source, /hemoryFragmentList\.addEventListener\('change'/);
+  assert.match(loader, /updateHemorySelection\(\)/);
+  assert.match(source, /hemorySelectAll\.onchange/);
+});
+
 test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   // 显示契约：「询问 Agent」必须复用/新建绑定当前客户的会话（ensureCustomerSession），
