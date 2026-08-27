@@ -58,7 +58,7 @@ const CLI_CAPABILITIES = [
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore'] },
-  { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written'] },
+  { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
@@ -130,13 +130,15 @@ function help(): void {
   csm-agent hemory resegment --all
   csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--from HH:MM] [--to HH:MM] [--json]
     （--from/--to 按上海时区收窄到当天时间段，需与日期同用）
-  csm-agent hemory assign <客户ID或名称> <片段ID...>
+  csm-agent hemory assign <客户ID或名称> <片段ID...> [--wait]
+    （--wait 轮询触发的草稿生成任务直到完成/失败，默认立即返回任务句柄）
   csm-agent hemory clear <片段ID...>
   csm-agent hemory ignore <片段ID...>
   csm-agent drafts [客户ID或名称] [--all] [--json]
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
   csm-agent draft regenerate <批次ID>
+  csm-agent draft jobs <任务ID...>
   csm-agent service install [端口]
   csm-agent service status|restart|uninstall|logs
   csm-agent update
@@ -409,6 +411,34 @@ async function waitSync(id: string, maxAttempts = 600): Promise<any> {
   throw new Error('等待同步超时，任务仍可能在后台运行');
 }
 
+/** 轮询草稿生成任务到终态（每 2 秒，默认上限 180 秒）；返回最终任务列表。失败任务不创建批次，只能通过任务状态感知。 */
+async function waitDraftJobs(jobIds: string[], maxAttempts = 90): Promise<any[]> {
+  const pending = new Set(jobIds);
+  const finished: any[] = [];
+  for (let attempt = 0; attempt < maxAttempts && pending.size; attempt++) {
+    const ids = [...pending].join(',');
+    const { jobs } = await request<any>(`/api/draft-jobs?ids=${encodeURIComponent(ids)}`);
+    const byId = new Map<string, any>((jobs ?? []).map((job: any) => [job.id, job]));
+    for (const id of [...pending]) {
+      const job = byId.get(id);
+      if (!job || job.status === 'succeeded' || job.status === 'failed') {
+        pending.delete(id);
+        finished.push(job ?? { id, status: 'unknown' });
+      }
+    }
+    if (pending.size) await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (pending.size) throw new Error(`等待草稿生成超时（${pending.size} 个任务仍在后台运行，可稍后运行 csm-agent drafts 查看）`);
+  return finished;
+}
+
+function printDraftJobSummary(jobs: any[]): void {
+  const failed = jobs.filter((job) => job.status === 'failed');
+  for (const job of failed) console.log(`草稿生成任务 ${job.id} 失败：${job.error ?? '未知原因'}`);
+  if (!failed.length) console.log(`草稿生成完成（${jobs.length} 个任务）。运行 csm-agent drafts 查看新草稿。`);
+  if (failed.length) process.exitCode = 2;
+}
+
 async function sync(input?: string): Promise<void> {
   const run = input
     ? await resolveCustomer(input).then((customer) => request<any>(`/api/customers/${encodeURIComponent(customer.id)}/refresh`, { method: 'POST' }))
@@ -464,8 +494,11 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     return;
   }
   if (subcommand === 'assign' || subcommand === 'clear' || subcommand === 'ignore') {
-    const customer = subcommand === 'assign' ? await resolveCustomer(values.shift() ?? '') : null;
-    const eventIds = values;
+    const wait = values.includes('--wait');
+    // 第一个非选项参数是客户 ID/名称（assign），其余非选项参数是片段 ID；--wait/--json 不参与。
+    const positional = values.filter((value) => !value.startsWith('--'));
+    const customer = subcommand === 'assign' ? await resolveCustomer(positional[0] ?? '') : null;
+    const eventIds = subcommand === 'assign' ? positional.slice(1) : positional;
     if (!eventIds.length) throw new Error(`hemory ${subcommand} 缺少片段 ID`);
     const all = await request<any>('/api/hemory/fragments?status=all&limit=500');
     const expectedHashes = Object.fromEntries((all.fragments ?? []).filter((item: any) => eventIds.includes(item.id)).map((item: any) => [item.id, item.payloadHash]));
@@ -473,8 +506,17 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
       return print(await request('/api/hemory/fragments/ignore', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventIds, expectedHashes }) }));
     }
-    return print(await request('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventIds, customerId: customer?.id ?? null, expectedHashes }) }));
+    const result = await request<any>('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventIds, customerId: customer?.id ?? null, expectedHashes }) });
+    // --wait：轮询生成任务到终态（jobId 为空的幂等复用任务无新生成，直接跳过）。
+    if (wait) {
+      const jobIds = (result.jobs ?? []).map((job: any) => job.jobId).filter(Boolean);
+      if (jsonOutput) print(result);
+      if (jobIds.length) printDraftJobSummary(await waitDraftJobs(jobIds));
+      else if (!jsonOutput) console.log('没有新触发的草稿生成任务（同指纹批次已存在）。');
+      return;
+    }
+    return print(result);
   }
   throw new Error('hemory 子命令只允许 sync/resegment/inbox/assign/clear/ignore');
 }
@@ -575,8 +617,16 @@ async function regenerateDraftBatch(batchId: string): Promise<void> {
   const original = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}`);
   // 批次已按客户+上海日组织；跨天批次重生成会按天各建一个新批次，逐个等待。
   const { jobs } = await request<any>(`/api/draft-batches/${encodeURIComponent(batchId)}/regenerate`, { method: 'POST' });
+  const jobIds: string[] = (jobs ?? []).map((job: any) => job.jobId).filter(Boolean);
   if (jsonOutput) return print({ jobs, supersededBatchId: original.id, customerId: original.customerId });
   console.log(`已提交 ${jobs.length} 个重新生成任务（旧批次 ${original.id} 的未写入草稿已作废），等待新批次生成…`);
+  // 先等任务终态：失败任务不创建批次，只轮询批次列表会永远等不到结果。
+  let finalJobs: any[] = [];
+  try { finalJobs = await waitDraftJobs(jobIds); }
+  catch (error) { console.log((error as Error).message); }
+  const failed = finalJobs.filter((job) => job.status === 'failed');
+  for (const job of failed) console.log(`草稿生成任务 ${job.id} 失败：${job.error ?? '未知原因'}`);
+  if (failed.length) process.exitCode = 2;
   const fingerprints: string[] = jobs.map((job: any) => job.fingerprint);
   const printed = new Set<string>();
   for (const fingerprint of fingerprints) {
@@ -609,7 +659,17 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!id) throw new Error('draft regenerate 缺少批次 ID');
     return regenerateDraftBatch(id);
   }
-  throw new Error('draft 子命令只允许 review/retry/regenerate');
+  if (subcommand === 'jobs') {
+    const ids = values.filter(Boolean);
+    if (!ids.length) throw new Error('draft jobs 缺少任务 ID');
+    const { jobs } = await request<any>(`/api/draft-jobs?ids=${encodeURIComponent(ids.join(','))}`);
+    if (jsonOutput) return print(jobs);
+    console.table(jobs.map((job: any) => ({ id: job.id, customerId: job.customerId, status: job.status,
+      attempts: job.attempts, error: job.error ?? '', updatedAt: job.updatedAt })));
+    if (!jobs.length) console.log('任务不存在（可能已清理或 ID 有误）');
+    return;
+  }
+  throw new Error('draft 子命令只允许 review/retry/regenerate/jobs');
 }
 
 function serviceCommand(subcommand: string, values: string[]): void {

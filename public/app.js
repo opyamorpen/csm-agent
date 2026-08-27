@@ -66,6 +66,8 @@
   const hemorySelectedCount = document.getElementById('hemorySelectedCount');
   const hemoryFragmentList = document.getElementById('hemoryFragmentList');
   const draftBatchList = document.getElementById('draftBatchList');
+  const draftGenerationNotice = document.getElementById('draftGenerationNotice');
+  const draftGenerationText = document.getElementById('draftGenerationText');
   const globalSync = document.getElementById('globalSync');
   const customerSearch = document.getElementById('customerSearch');
   const customerSort = document.getElementById('customerSort');
@@ -100,6 +102,8 @@
   let maxSeq = 0;
   let mcpFailures = [];
   let archivedExpanded = false;
+  const draftJobTracking = new Map();
+  let draftJobTimer = null;
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -1009,6 +1013,11 @@
     await loadHemoryInbox();
   }
 
+  /** 归属/清除归属期间冻结归属栏操作，防止重复提交。 */
+  function setAssignBarBusy(busy) {
+    for (const id of ['hemoryAssign', 'hemoryClear', 'hemoryIgnore']) document.getElementById(id).disabled = busy;
+  }
+
   async function updateHemoryAttribution(clear) {
     const eventIds = selectedHemoryFragments();
     if (!eventIds.length) return alertDialog('请先选择片段');
@@ -1020,9 +1029,64 @@
       customerId = customer.id;
     }
     const expectedHashes = Object.fromEntries([...hemoryFragmentList.querySelectorAll('input[type="checkbox"]:checked')].map((input) => [input.dataset.eventId, input.dataset.payloadHash]));
-    await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventIds, customerId, expectedHashes }) });
-    await Promise.all([loadHemoryInbox(), loadDraftBatches()]);
+    setAssignBarBusy(true);
+    try {
+      // 归属请求即触发后台草稿生成任务；响应里的 jobs 交给轮询跟踪，让「生成中」对用户可见。
+      const { jobs } = await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventIds, customerId, expectedHashes }) });
+      await Promise.all([loadHemoryInbox(), loadDraftBatches()]);
+      trackDraftGeneration(jobs || []);
+    } catch (error) { await alertDialog(error.message); } finally { setAssignBarBusy(false); }
+  }
+
+  /**
+   * 轮询草稿生成任务直到终态：进行中在草稿箱顶部显示 spinner 横幅；全部结束后自动刷新草稿列表。
+   * 失败任务不会创建批次，只能在这里感知；jobId 为空的幂等复用任务（草稿已存在）不轮询。
+   */
+  function trackDraftGeneration(jobs) {
+    for (const job of jobs || []) if (job.jobId) draftJobTracking.set(job.jobId, job.fingerprint);
+    if (!draftJobTracking.size) return;
+    if (draftJobTimer) return;
+    const startedAt = Date.now();
+    const tick = async () => {
+      let running = 0;
+      const failed = [];
+      const finished = new Set();
+      try {
+        const ids = [...draftJobTracking.keys()];
+        const { jobs: fresh } = await api(`/api/draft-jobs?ids=${encodeURIComponent(ids.join(','))}`);
+        const byId = new Map((fresh || []).map((job) => [job.id, job]));
+        for (const id of ids) {
+          const job = byId.get(id);
+          // 查不到的任务按终态处理，避免轮询空转。
+          if (!job || job.status === 'succeeded' || job.status === 'failed') {
+            finished.add(id);
+            if (job?.status === 'failed') failed.push(job.error || '未知原因');
+          } else running++;
+        }
+      } catch (error) { /* 轮询失败保持现状，下一轮重试 */ }
+      if (running) {
+        draftGenerationNotice.classList.remove('hidden');
+        draftGenerationText.textContent = `正在生成草稿（${running} 个任务）…`;
+        setStatus('', `正在生成草稿（${running} 个任务）…`);
+      } else {
+        for (const id of finished) draftJobTracking.delete(id);
+        draftJobTimer = null;
+        draftGenerationNotice.classList.add('hidden');
+        if (failed.length) setStatus('warn', `草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}`);
+        else setStatus('', '草稿生成完成');
+        void loadDraftBatches();
+        return;
+      }
+      if (Date.now() - startedAt > 180000) {
+        draftJobTimer = null;
+        draftGenerationNotice.classList.add('hidden');
+        setStatus('warn', '草稿生成仍在后台进行，稍后点「刷新」查看');
+        return;
+      }
+      draftJobTimer = setTimeout(() => void tick(), 2000);
+    };
+    draftJobTimer = setTimeout(() => void tick(), 1500);
   }
 
   function draftTypeLabel(type) {
@@ -1088,7 +1152,11 @@
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.onclick = async () => {
           if (!await confirmDialog('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
-          try { await api(`/api/draft-batches/${batch.id}/regenerate`, { method: 'POST' }); await loadDraftBatches(); }
+          try {
+            const { jobs } = await api(`/api/draft-batches/${batch.id}/regenerate`, { method: 'POST' });
+            await loadDraftBatches();
+            trackDraftGeneration(jobs || []);
+          }
           catch (error) { alertDialog(error.message); }
         };
         head.append(regenerate);

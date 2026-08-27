@@ -21,7 +21,7 @@ import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from 
 import { CaseService } from './workbench/cases.js';
 import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
 import { HemoryDraftService, draftDisplayFields } from './workbench/drafts.js';
-import type { DraftBatch, DraftItem } from './workbench/types.js';
+import type { DraftBatch, DraftItem, DraftGenerationJob } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -496,6 +496,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             .map((batch) => (batch.items ? { ...batch, items: batch.items.filter((item) => item.status !== 'written') } : batch))
             .filter((batch) => (batch.items ? batch.items.length > 0 : true));
         return json(res, 200, { batches: visible.map(decorateDraftBatch) });
+      }
+      // 生成任务状态查询：归属/重生成响应里的 jobId 在此轮询。失败任务不会创建批次，只能通过任务状态感知。
+      if (req.method === 'GET' && path === '/api/draft-jobs') {
+        const ids = (url.searchParams.get('ids') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+        const jobs = ids.map((id) => workbench.db.getDraftJob(id)).filter((job): job is DraftGenerationJob => !!job);
+        return json(res, 200, { jobs });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);
       if (draftBatchMatch) {

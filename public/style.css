@@ -682,6 +682,10 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .draft-errors { margin: 7px 0; padding: 7px 9px; border-left: 3px solid #c64b45; background: #fff0f0; color: #952e2a; font-size: 12px; overflow-wrap: anywhere; }
 .draft-fields { margin: 7px 0; display: grid; gap: 3px; }
 .draft-field-row { font-size: 12.5px; color: #36414e; overflow-wrap: anywhere; }
+/* 生成中横幅：归属/重生成提交后轮询任务状态，spinner + 文案让「正在生成草稿」对用户可见。 */
+.draft-generation-notice { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid #8ba8de; border-radius: 6px; background: #eaf0fa; color: #174a9d; font-size: 13px; }
+.draft-generation-notice .spinner { flex: none; width: 14px; height: 14px; border: 2px solid #8ba8de; border-top-color: transparent; border-radius: 50%; animation: draft-spin 0.8s linear infinite; }
+@keyframes draft-spin { to { transform: rotate(360deg); } }
 
 /* Existing Agent surface follows the same quiet operational system. */
 #chat { background: var(--bg); }

@@ -367,3 +367,44 @@ test('settings modal exposes custom OpenAI-compatible endpoint configuration', (
   assert.ok(saver, 'saveConfigBtn handler was not found');
   assert.match(saver, /if \(llmPayload\.provider === 'custom'\) llmPayload\.baseUrl = llmBaseUrl\.value\.trim\(\)/);
 });
+
+test('draft generation shows a loading banner and polls job status after attribution', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 显示契约：归属确认即触发后台草稿生成（秒到几十秒），必须对用户可见——
+  // 草稿箱顶部 spinner 横幅 + 顶部状态栏文案 + 终态后自动刷新列表。
+  const updater = source.match(/async function updateHemoryAttribution[\s\S]*?\n  }\n\n  \/\*\*\n   \* 轮询草稿生成任务/)?.[0];
+  assert.ok(updater, 'updateHemoryAttribution source was not found');
+  // 归属请求读取响应里的 jobs 并交给轮询跟踪；失败必须弹窗（曾静默 unhandled rejection）。
+  assert.match(updater, /const \{ jobs \} = await api\('\/api\/hemory\/fragments\/attribution'/);
+  assert.match(updater, /trackDraftGeneration\(jobs \|\| \[\]\)/);
+  assert.match(updater, /catch \(error\) \{ await alertDialog\(error\.message\); \}/);
+  // 归属请求进行中冻结归属栏三个按钮，防止重复提交。
+  assert.match(source, /function setAssignBarBusy\(busy\)/);
+  assert.match(updater, /setAssignBarBusy\(true\)/);
+  assert.match(updater, /finally \{ setAssignBarBusy\(false\); \}/);
+
+  const tracker = source.match(/function trackDraftGeneration\(jobs\) \{[\s\S]*?\n  \}\n\n  async function showAgentMode/)?.[0];
+  assert.ok(tracker, 'trackDraftGeneration source was not found');
+  assert.match(tracker, /\/api\/draft-jobs\?ids=/);
+  assert.match(tracker, /正在生成草稿（\$\{running\} 个任务）…/);
+  assert.match(tracker, /draftGenerationNotice\.classList\.remove\('hidden'\)/);
+  assert.match(tracker, /draftGenerationText\.textContent/);
+  // 失败任务不创建批次，只能靠任务状态感知；终态后刷新草稿列表与角标。
+  assert.match(tracker, /草稿生成失败/);
+  assert.match(tracker, /void loadDraftBatches\(\)/);
+  assert.match(tracker, /180000/);
+  // 重新生成同样接入轮询（响应同样返回 jobs）。
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  assert.match(renderer, /const \{ jobs \} = await api\(`\/api\/draft-batches\/\$\{batch\.id\}\/regenerate`/);
+  assert.match(renderer, /trackDraftGeneration\(jobs \|\| \[\]\)/);
+
+  // 横幅 DOM 与 spinner 样式（纯 CSS 动画，WKWebView 安全）。
+  assert.match(html, /id="draftGenerationNotice" class="draft-generation-notice hidden"/);
+  assert.match(html, /id="draftGenerationText"/);
+  assert.match(styles, /\.draft-generation-notice \{[^}]*display: flex/);
+  assert.match(styles, /\.draft-generation-notice \.spinner \{[^}]*animation: draft-spin/);
+  assert.match(styles, /@keyframes draft-spin/);
+});

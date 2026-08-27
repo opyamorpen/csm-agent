@@ -15,7 +15,7 @@
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
 - Hemory 收件箱：每天中国时间 13:00/20:00 通过 MCP 拉取当天完整逐句转写，按录音持久化后由当前 Agent 大模型整理为话题、摘要和连续证据片段；唯一客户名称自动归属，其他片段由 CSM 在 Agent 页面批量标记。
 - 片段质量门槛：寒暄、环境音、零散的一两句话，以及少于 3 条有效发言或信息量不足的分段只保留在原始转写中，不进入待归属；模型不得合并不相关短句来绕过门槛。
-- 自动草稿箱：客户归属后，AI 只生成证据支持的 Agent 待办、沟通记录、需求或工单草稿；勾选后一次批准、逐项执行，失败项单独重试。每个客户每个上海自然日一个批次，沟通记录草稿有且仅有一条（按【话题】分节合并当天全部沟通），并连带一条工时草稿（时长按录音片段时间计算、描述为一句话总结）；当天已在 CRM 发布过沟通（含手动录入的跟进）后，新草稿只合并发布之后的新沟通，全天发布完毕则不再生成沟通记录与工时草稿（其他类型不受影响）。同日补充归属会按全天内容重建当天批次（未写入草稿作废，已写入记录不动）。草稿箱（Web 与 `csm-agent drafts`）默认不显示已写入草稿；`csm-agent drafts --all` 或 `GET /api/draft-batches?include=written` 可查看全量。
+- 自动草稿箱：客户归属后，AI 只生成证据支持的 Agent 待办、沟通记录、需求或工单草稿；勾选后一次批准、逐项执行，失败项单独重试。归属（或重新生成）触发的后台生成任务对用户可见：Web 草稿箱顶部显示「正在生成草稿」spinner 横幅并在完成后自动刷新（任务状态经 `GET /api/draft-jobs` 轮询，失败任务不创建批次、只会在此暴露），CLI 侧 `csm-agent hemory assign --wait` 等待终态、`csm-agent draft jobs` 随时查询。每个客户每个上海自然日一个批次，沟通记录草稿有且仅有一条（按【话题】分节合并当天全部沟通），并连带一条工时草稿（时长按录音片段时间计算、描述为一句话总结）；当天已在 CRM 发布过沟通（含手动录入的跟进）后，新草稿只合并发布之后的新沟通，全天发布完毕则不再生成沟通记录与工时草稿（其他类型不受影响）。同日补充归属会按全天内容重建当天批次（未写入草稿作废，已写入记录不动）。草稿箱（Web 与 `csm-agent drafts`）默认不显示已写入草稿；`csm-agent drafts --all` 或 `GET /api/draft-batches?include=written` 可查看全量。
 
 ## 安装（macOS 一键安装）
 
@@ -93,13 +93,14 @@ csm-agent hemory sync [YYYY-MM-DD]
 csm-agent hemory resegment --all
 csm-agent hemory inbox [YYYY-MM-DD] [--days N] # 待归属片段；--from/--to 按上海时区收窄到当天时间段（需与日期同用）
 csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30
-csm-agent hemory assign <客户ID或名称> <片段ID...>
+csm-agent hemory assign <客户ID或名称> <片段ID...> # 归属即触发后台草稿生成；--wait 轮询任务直到完成/失败
 csm-agent hemory clear <片段ID...>
 csm-agent hemory ignore <片段ID...>
 csm-agent drafts [客户ID或名称] [--all]
 csm-agent draft review <批次ID>
 csm-agent draft retry <草稿ID>
 csm-agent draft regenerate <批次ID>
+csm-agent draft jobs <任务ID...> # 查询草稿生成任务状态
 csm-agent service install 3210
 csm-agent service status
 csm-agent service logs
@@ -175,7 +176,7 @@ ONES_TEAM_ID=RDjYMhKq
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
 - `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
-- `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`
+- `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`、`GET /api/draft-jobs?ids=`（生成任务状态；归属/重生成响应返回 jobId，失败任务不创建批次只能在此查询）
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
 - `POST /api/action-items/:id/wecom-todo-intents`、`POST /api/wecom/todo-created`
 - `POST /api/case-drafts`、`PATCH /api/case-drafts/:id`、`POST /api/case-drafts/:id/publish`
