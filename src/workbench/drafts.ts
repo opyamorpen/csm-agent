@@ -7,12 +7,112 @@ import { shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
-export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v2-day-merge';
+export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-required-fields';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
 const ONES_DESK_ISSUE_TYPE_IDS: Record<OnesDeskDraftType, string> = { suggestion: 'A99xMfkg', ticket: '7sxvwZMY', operations: '943qpMX7' };
 const ONES_DESK_TARGET_OBJECTS: Record<OnesDeskDraftType, string> = { suggestion: 'ONES Desk / 建议和反馈', ticket: 'ONES Desk / 工单', operations: 'ONES Desk / 运维工单' };
+
+// ONES Desk 三类工作项除标题/项目/类型外的人工必填字段规格（2026-08-27 经 get_issue_fields 与
+// search_for_issue_field_options 核实）。create_new_issue 的 schema 是 additionalProperties:false，
+// 只有 title/projectID/issueTypeID 三个顶层参数，其余必填项一律走 fieldValues：
+// 选项字段的 value 是选项 UUID，模块/产品（multi_reference）是对象 UUID，成员字段是用户 UUID。
+// options 即 label→UUID 映射，供生成时翻译 AI 提案；预检会用实时字段表复核选项 UUID 是否仍有效。
+export interface OnesDeskFieldSpec {
+  uuid: string;
+  label: string;
+  /** label → 选项/对象 UUID；成员类字段无法穷举全表，只含默认成员。 */
+  options?: Record<string, string>;
+  /** 成员字段：允许 8 位用户 UUID 直填（CSM 手工编辑指定其他工程师）。 */
+  member?: boolean;
+  /** AI 未提案或无法映射时的兜底（业务指定：是否客户付费=否、运维工程师=吴孟淋）。 */
+  defaultValue?: string;
+}
+
+// 所属模块（建议和反馈）：必须用 search_for_modules 的 UUID（工具说明明确指定，且 2026-08-27 逐个
+// 试写验证 50/50 全部有效）。search_for_issue_field_options 对 field054 的返回混入约 40 个无效 UUID
+//（如 QVtmNu5r 会报 InvalidParameter invalidOption），不可采用。
+const ONES_DESK_MODULE_OPTIONS: Record<string, string> = {
+  '事件': 'HhvtUuNJ',
+  '平台开放能力（OpenAPI、功能扩展、事件）': 'K21NYczY', '功能扩展': 'RbrMxh1n',
+  '甘特图属性': 'HBCFxdSD', '甘特图性能问题': 'LiUTxk93', '导入导出': '7UrGLPKZ',
+  '基线': 'Dd3YVhjo', '页面组分类': 'N3PEm4a4', '页面属性': 'J2pFBfU9',
+  '模版管理': 'Pj5TM5ii', '搜索+筛选': 'QMKwmJLi', '移动端': 'FWMr6KX6',
+  '页面通知': 'Rb6xGxRR', '附件管理': 'VQEN9ujx', '审批业务场景': '4PZG5h2H',
+  '审批配置': 'EUDLYiHj', 'Wiki+Project': 'LcMQhTkj', '页面标签': '5mMbyUGz',
+  '页面复制移动等操作': 'WXVm4nue', '页面导入': 'Y1mmnuBF', '页面导出': 'LUgM6TKk',
+  '页面操作': 'RR4cBGRA', '权限配置': 'VeZfQC4e', '工时审批': '5ykWtsNF',
+  '工作台-工时日历': 'DZwpkKqi', '燃尽图': '4iN3LVJg', '规划与跟踪': 'PuvUvoEA',
+  '计算属性': 'VARew4eQ', '项目集管理': '5mzB3MTu',
+  'Project 项目管理 -- 父子工作项（层级关系）': 'SjAPKztR', '甘特图列表和操作': 'KSjNJ3Zc',
+  '前后置和排期规则': '4J5Twcvi', '里程碑和交付物': 'QSVA12xn', '甘特图配置': 'J6Bz1JBX',
+  '模块组件': '8uWY6XbB', '表单详情': 'VoQt7sGp',
+  'Project 项目管理 -- 瀑布组件（甘特图、里程碑...)': '5WswRWSv', '外部门户': '3mhZk41U',
+  '表单组件': 'EiqH8C2x', 'OpenAPI': '4udPkSYK', '多数据中心': 'Uf6KenG1',
+  '插件（标品插件不要选此项）': '9wUeS6tR', '资源管理配置（工时表单&登记规则&工时提醒）': 'D5d2rcK2',
+  '工时报表': 'WsbzjX5T', '工时管理（登记工时&预估工时）': 'AC5rA1w8', '运行历史日志': '4nFayDF8',
+  '管理自动化规则': 'ATcQ6cso', '新建自动化规则': 'RiDwmLXr', '条件判断': 'Ef4Bo8BC', '条件分支': 'SV5PSU14',
+};
+
+// 所属产品（工单）候选。
+const ONES_DESK_PRODUCT_OPTIONS: Record<string, string> = {
+  '审批管理': 'PmVnWRqCKtyzjQEh', 'ONES Assistant': 'FFpmuURA2QM2qhGa', 'ONES 运维工具箱': '9eTpLRF6Ux2eMoTc',
+  '证书平台': '9eTpLRF6Q6gq859i', 'ONES Note': 'FFpmuURA9GHkpk9z', 'ONES Plan 项目集管理': 'FFpmuURAU2G2JQj1',
+  'ONES Task 任务协作': 'FFpmuURA5fzbpGHD', 'ONES Resource 资源管理': 'FFpmuURAQi5L5oed', 'CN 信创': 'FFpmuURANcLJhUB7',
+  '零号应用中心与 License 管理': 'FFpmuURA1pbys9vE', '插件': 'HAbxwpBCTwpYZCEC', '海外官网': 'FFpmuURATcQ8xPw5',
+  'Automation 流程自动化': 'FFpmuURA8iWR2KZA', 'ONES Design 组件库': 'FFpmuURA9kqPRKBd', 'Desk 工单管理': 'FFpmuURAFJfgSqQ1',
+  '基础设施（非业务需求）': 'FFpmuURA8m4XVNyb', 'Dashboard 仪表盘能力': 'FFpmuURAADS2Ybew', 'Jira&Confluence 数据导入': 'FFpmuURAARangPnQ',
+  'CRM': 'FFpmuURAV1boyedW', 'Admin-订单中心': 'FFpmuURAXH3s9BYp', '帮助中心与产品手册': 'FFpmuURAVjqznD8G',
+  'Admin-系统业务配置': 'FFpmuURAYVNA1Htj', 'Open 开放平台': 'KuZfE9scJNc8ShWY', 'Mobile 手机网页与客户端': 'UPYjaEgNG3ovVqEx',
+  'Core 基础平台能力': 'KuZfE9scKYpijpKk', 'Performance 效能管理场景': 'KuZfE9scA5YrpqEX', 'CN Official Website 官网': 'UPYjaEgN17w216os',
+  'Account 基础平台能力': 'UPYjaEgNXnPN4Jy6', 'Pipeline DevOps 场景': 'UPYjaEgNYYEBx2tf', 'TestCase 测试管理场景': 'UPYjaEgNQX1K9R3L',
+  'Wiki 知识库管理场景': 'UPYjaEgN6cnLBfGR', 'Project 场景与平台': 'UPYjaEgNUpcFp3Av',
+};
+
+// 运维工程师默认成员（业务指定吴孟淋）；search_for_users 命中且唯一。
+const ONES_DESK_MEMBER_DEFAULTS: Record<string, string> = { '吴孟淋': '5dP9HWdX' };
+
+export const ONES_DESK_FIELD_SPECS: Record<OnesDeskDraftType, OnesDeskFieldSpec[]> = {
+  suggestion: [
+    { uuid: 'PYbGEZmN', label: '建议类型', options: { '新需求': '5qUVAY7m', '产品缺陷': 'XgCJbGc6', '交互问题': 'Q1JBwNUt' } },
+    { uuid: 'HS5u8PNB', label: '实例部署类型', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
+    { uuid: 'field054', label: '所属模块', options: ONES_DESK_MODULE_OPTIONS },
+    { uuid: 'field012', label: '优先级', options: { 'P0': 'KhZpaAXJ', 'P1': '762U6awQ', 'P2': 'Lv5Tbmih', 'P3': 'A7UyroWi', 'P4': '5kbJ4VYT' } },
+  ],
+  ticket: [
+    { uuid: 'CATNfrrF', label: '环境类型', options: { 'PRD（生产环境）': 'JuTTumjJ', 'UAT（用户验收环境）': 'SMti68WG', 'SIT（集成测试环境）': 'SmLA83rN', 'DEV（开发环境）': 'RT2kJk9i', 'POC（概念验证环境）': 'U58FbojT' } },
+    { uuid: 'HS5u8PNB', label: '实例部署类型', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
+    { uuid: 'Su4v8xFs', label: '是否稳定复现', options: { '稳定复现': 'M1eT99eW', '偶现': 'SyPTtJdW', '无法复现': '6v9NtC12' } },
+    { uuid: 'field029', label: '所属产品', options: ONES_DESK_PRODUCT_OPTIONS },
+  ],
+  operations: [
+    { uuid: 'KcwE8f1Y', label: '服务类目', defaultValue: '其他', options: {
+      '数据备份与恢复': 'T5HrFS7o', '服务器环境迁移': 'CXALZFMb', '运维配置变更': '3Yn7VQLh', '客户定制操作': 'EHo9vBso',
+      '客户技术咨询与会议交流': '4RHPPnhp', '售前响应': '82uArj3Y', '系统巡检': 'E8jFkZn6', '脚本编写': 'TohxYFhQ', '其他': 'PYmJmnwg' } },
+    { uuid: 'M9vaUBPP', label: '是否客户付费', defaultValue: '否', options: { '是': 'PUd4Ea28', '否': 'LLiv2UfC' } },
+    { uuid: 'TioFkeZn', label: '运维工程师', member: true, defaultValue: '吴孟淋', options: ONES_DESK_MEMBER_DEFAULTS },
+  ],
+};
+
+// 描述字段落点：create_new_issue 无顶层 description 参数，Hemory 摘要写入 field016（rich_desc，
+// 运维工单上为必填；建议/工单上选填但保持一致，便于 ONES 端阅读）。
+const ONES_DESK_DESC_FIELD_ID = 'field016';
+
+/** 把 AI 提案（字段名→选项名/成员名）映射成 fieldValues；带 defaultValue 的字段在缺省或映射失败时兜底。 */
+export function mapOnesDeskRequiredFields(deskType: OnesDeskDraftType, proposed: Record<string, unknown> | undefined): Array<Record<string, string>> {
+  const values: Array<Record<string, string>> = [];
+  for (const spec of ONES_DESK_FIELD_SPECS[deskType]) {
+    const label = typeof proposed?.[spec.label] === 'string' ? String(proposed[spec.label]).trim() : '';
+    let uuid = '';
+    if (label && spec.options?.[label]) uuid = spec.options[label];
+    else if (label && spec.member && /^[A-Za-z0-9]{8}$/.test(label)) uuid = label; // 成员字段支持用户 UUID 直填
+    else if (label && Object.values(spec.options ?? {}).includes(label)) uuid = label; // 选项字段 UUID 直填（CSM 手工编辑）
+    if (!uuid && spec.defaultValue) uuid = spec.options?.[spec.defaultValue] ?? '';
+    if (uuid) values.push({ fieldID: spec.uuid, value: uuid });
+  }
+  return values;
+}
 // ONES 工时按实例配置的模式二选一写工具；宽松正则匹配曾把 create_new_issue（描述里带 manhour 字样）误当工时工具。
 type OnesWorkhourMode = 'simple' | 'summary';
 const ONES_WORKHOUR_TOOLS: Record<OnesWorkhourMode, string> = { simple: 'add_workhour_in_simple_mode', summary: 'add_workhour_in_summary_mode' };
@@ -89,19 +189,39 @@ export function parseOnesIssueFields(text: string): OnesIssueField[] | null {
   return fields;
 }
 
-// 平台自动填充的字段（创建者/状态等）不必出现在写参数里。
+// 平台自动填充的字段（创建者/状态/负责人等）不必出现在写参数里。
 const ONES_AUTOFILLED_FIELD_TYPES = new Set(['creator', 'status', 'assign']);
-// 标题/所属项目/工作项类型由 create_new_issue 的顶层参数（summary/projectID/issueTypeID）满足，
-// 描述类必填字段由顶层 description（Hemory 摘要）满足，都不必出现在 fieldValues 中。
+// 标题/所属项目/工作项类型由 create_new_issue 的顶层参数（title/projectID/issueTypeID）满足；
+// 其余必填项（含描述 field016，schema 无顶层 description 参数）必须出现在 fieldValues 中。
 const ONES_TOP_LEVEL_FIELD_UUIDS = new Set(['field001', 'field006', 'field007']);
 // 建议和反馈等类型上标了 required 但 can_be_created=false 的展示字段（如反馈类型），实际由 ONES 内部规则处理，跳过。
-export function missingOnesRequiredFields(fields: OnesIssueField[], fieldValues: Array<Record<string, unknown>>, described = true): OnesIssueField[] {
+export function missingOnesRequiredFields(fields: OnesIssueField[], fieldValues: Array<Record<string, unknown>>): OnesIssueField[] {
   const provided = new Set(fieldValues.filter((value) => value.value != null && value.value !== '').map((value) => String(value.fieldID)));
   return fields.filter((field) => field.required && field.canBeCreated
     && !ONES_AUTOFILLED_FIELD_TYPES.has(field.fieldTypeUuid)
     && !ONES_TOP_LEVEL_FIELD_UUIDS.has(field.uuid)
-    && !(described && /描述|desc/i.test(field.name))
     && !provided.has(field.uuid));
+}
+
+/**
+ * fieldValues 中带选项表的字段：值必须是该字段当前有效选项 UUID 之一（配置漂移防护）。
+ * get_issue_fields 对大选项集字段（客户信息 100+ 选项）只返回前 30/50 条且不保证覆盖目标值，
+ * 这类截断表（字段返回的 options 恰好达到截断上限）无法证伪，跳过校验；
+ * 小选项集（服务类目/优先级等）返回完整，UUID 不在表内即可判定失效。
+ */
+export function invalidOnesOptionValues(fields: OnesIssueField[], fieldValues: Array<Record<string, unknown>>): string[] {
+  // get_issue_fields 截断上限 30；达到该数即视为可能截断。
+  const TRUNCATED_OPTION_COUNT = 30;
+  const byId = new Map(fields.map((field) => [field.uuid, field]));
+  const invalid: string[] = [];
+  for (const value of fieldValues) {
+    const field = byId.get(String(value.fieldID));
+    if (!field || !field.options.length) continue;
+    if (field.options.length >= TRUNCATED_OPTION_COUNT) continue;
+    const option = String(value.value ?? '');
+    if (!field.options.some((entry) => entry.uuid === option)) invalid.push(`${field.name}(${field.uuid})=${option}`);
+  }
+  return invalid;
 }
 
 export interface DraftPreview {
@@ -120,13 +240,20 @@ const ONES_DESK_TYPE_LABELS: Record<OnesDeskDraftType, string> = { suggestion: '
 
 /**
  * 草稿确认时的最小必填项展示：每种类型一组键值行，Web 卡片与 CLI 共用同一份结构。
- * ONES 工作项按“所属项目 / 工作项类型 / 标题 / 客户信息 / 描述”展示，Hemory 摘要写入描述。
+ * ONES 工作项按“所属项目 / 工作项类型 / 标题 / 客户信息 / 必填项 / 描述”展示；必填项把选项 UUID 反解成名称。
  */
 export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, customer: Customer): DraftDisplayField[] {
   const unknown = (value: unknown) => value == null || value === '' || value === 'unknown' ? '待补充' : String(value);
   if (onesDeskTypeId(item.type)) {
     const deskType = onesDeskTypeId(item.type)!;
     const option = resolveOnesOption(db, customer);
+    const values = Array.isArray(item.targetArguments.fieldValues) ? item.targetArguments.fieldValues as Array<Record<string, unknown>> : [];
+    const valueOf = (uuid: string) => values.find((value) => value.fieldID === uuid)?.value;
+    const requiredRows: DraftDisplayField[] = ONES_DESK_FIELD_SPECS[deskType].map((spec) => {
+      const raw = valueOf(spec.uuid);
+      const label = spec.options ? (Object.entries(spec.options).find(([, uuid]) => uuid === raw)?.[0] ?? (raw ? String(raw) : '')) : String(raw ?? '');
+      return { key: spec.uuid, label: spec.label, value: label || '待补充' };
+    });
     return [
       { key: 'project', label: '所属项目', value: `${ONES_DESK_PROJECT_LABEL}（${String(item.targetArguments.projectID ?? '')}）` },
       { key: 'issueType', label: '工作项类型', value: `${ONES_DESK_TYPE_LABELS[deskType]}（${String(item.targetArguments.issueTypeID ?? '')}）` },
@@ -134,7 +261,8 @@ export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, custo
       { key: 'customer', label: '客户信息', value: option
         ? option.label && option.label !== customer.name ? `${customer.name} → ${option.label}` : (option.label || customer.name)
         : `${customer.name}（ONES 客户信息未解析）` },
-      { key: 'description', label: '描述', value: String(item.targetArguments.description ?? item.summary) },
+      ...requiredRows,
+      { key: 'description', label: '描述', value: String(values.find((value) => value.fieldID === ONES_DESK_DESC_FIELD_ID)?.value ?? item.summary) },
     ];
   }
   if (item.type === 'workhour') {
@@ -225,10 +353,16 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
     published: !unpublished.has(event.id),
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [], text: textOf(event) }));
+  const requiredGuide = (Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[])
+    .map((type) => `- ${type}：${ONES_DESK_FIELD_SPECS[type].map((spec) => `${spec.label}（${spec.options ? Object.keys(spec.options).join('|') : '成员名'}）`).join('、')}`)
+    .join('\n');
   const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
     + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段，按话题分节汇总全天沟通；其 fields 必须包含 one_line_summary（一句话总结当天沟通）。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
     + `workhour 不必输出（系统按录音时长自动计算并连带生成）。其他类型同一类型可以输出多条草稿，但每条必须对应独立的话题或行动；只返回有证据支持的草稿。\n`
-    + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns。\n`
+    + `suggestion/ticket/operations 是要写入 ONES 的工作项，其 fields 必须包含 ones_required 对象（键=字段名，值=选项名，从选项列表中选）。这些是 ONES 必填字段，你要根据沟通证据理解后给出提案，不得留空、不得写 unknown：\n`
+    + `${requiredGuide}\n`
+    + `ones_required 证据不足时的保守默认：服务类目→其他、是否客户付费→否、运维工程师→吴孟淋、优先级→P2、实例部署类型→私有云、环境类型→PRD（生产环境）、是否稳定复现→偶现、建议类型→新需求；所属模块/所属产品必须从选项中选最接近的一项。\n`
+    + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
     + `只输出 JSON：{"drafts":[{"type":"...","title":"...","summary":"...","fields":{},"evidence_refs":["..."],"unknowns":[]}]}。\n`
     + `客户：${customer.name}（CRM ${customer.id}）\n证据：${JSON.stringify(evidence)}`;
   const response = await runtime.models.complete(runtime.model, {
@@ -580,9 +714,13 @@ export class HemoryDraftService {
       validationErrors.push(`客户缺少已确认的 ONES 客户信息 option ID（${hint}）`);
     }
     if (!tool) validationErrors.push('未找到 ONES 新建工作项写工具');
+    // create_new_issue 的 schema 为 additionalProperties:false：标题只能走顶层 title（旧代码传 summary
+    // 曾导致「FAIL: InvalidParameter issue title empty」），描述与人工必填项（服务类目/优先级等）全部走 fieldValues。
+    const fieldValues: Array<Record<string, string>> = option ? [{ fieldID: ONES_CUSTOMER_FIELD_ID, value: option.id }] : [];
+    fieldValues.push(...mapOnesDeskRequiredFields(deskType, proposal.fields?.ones_required as Record<string, unknown> | undefined));
+    fieldValues.push({ fieldID: ONES_DESK_DESC_FIELD_ID, value: proposal.summary });
     return { system: 'ones' as const, object: ONES_DESK_TARGET_OBJECTS[deskType], tool,
-      arguments: { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[deskType], summary: proposal.title, description: proposal.summary,
-        fieldValues: option ? [{ fieldID: ONES_CUSTOMER_FIELD_ID, value: option.id }] : [] }, validationErrors };
+      arguments: { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[deskType], title: proposal.title, fieldValues }, validationErrors };
   }
 
   private validate(item: DraftItem): string[] {
@@ -632,15 +770,20 @@ export class HemoryDraftService {
       const tool = this.findReadTool('ones', /(get.*issue.*fields|issue.*fields|工作项.*字段)/i);
       if (!tool) errors.push('未找到 ONES 工作项字段查询工具');
       else {
-        const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: onesDeskTypeId(item.type)! });
+        // issueTypeID 必须传类型 UUID：旧代码传类型名字符串，get_issue_fields 返回 404 业务错误
+        //（isError=false），解析失败后静默跳过必填项检查，草稿带病写入才在 ONES 端报错。
+        const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[onesDeskTypeId(item.type)!] });
         if (response.isError) errors.push(`ONES 字段预检失败: ${response.text.slice(0, 300)}`);
         else {
-          // 最小必填项校验：标题/项目/类型/描述由 create_new_issue 顶层参数满足，其余必填项必须出现在 fieldValues。
           const fields = parseOnesIssueFields(response.text);
-          if (fields) {
+          if (!fields) errors.push(`ONES 字段预检失败: 无法解析字段表（${response.text.slice(0, 120)}）`);
+          else {
             const values = Array.isArray(item.targetArguments.fieldValues) ? item.targetArguments.fieldValues as Array<Record<string, unknown>> : [];
-            const missing = missingOnesRequiredFields(fields, values, String(item.targetArguments.description ?? '') !== '');
+            const missing = missingOnesRequiredFields(fields, values);
             if (missing.length) errors.push(`ONES 必填字段未填写: ${missing.map((field) => `${field.name}(${field.uuid})`).join('、')}`);
+            // 选项字段的 UUID 可能随 ONES 配置变化：实时校验草稿携带的选项 UUID 仍有效。
+            const invalid = invalidOnesOptionValues(fields, values);
+            if (invalid.length) errors.push(`ONES 字段值无效（选项 UUID 已失效，请重新生成）: ${invalid.join('、')}`);
           }
         }
       }

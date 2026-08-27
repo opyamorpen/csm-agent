@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { classifyDraftTypes, draftDisplayFields, HemoryDraftService, missingOnesRequiredFields, parseOnesIssueFields } from '../src/workbench/drafts.js';
+import { classifyDraftTypes, draftDisplayFields, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesRequiredFields, parseOnesIssueFields } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 function withDb(fn: (db: WorkbenchDatabase) => void): void {
@@ -823,12 +823,16 @@ test('workbench: ONES work-item drafts carry minimal required arguments with opt
     await waitDraftJob(db, queued[0].jobId);
     const batch = db.listDraftBatches('crm-o')[0];
     const suggestion = batch.items!.find((item) => item.type === 'suggestion')!;
-    // 最小必填参数集：项目/类型/标题/客户字段/描述（Hemory 摘要）。
+    // 最小必填参数集：项目/类型/标题（顶层 title）+ 客户字段/描述/必填项（fieldValues）。
     assert.equal(suggestion.targetTool, 'mcp__ones__create_new_issue');
     assert.equal(suggestion.targetArguments.projectID, 'GL3ysesFPdnAQNIU');
     assert.equal(suggestion.targetArguments.issueTypeID, 'A99xMfkg');
-    assert.equal(suggestion.targetArguments.summary, suggestion.title);
-    assert.deepEqual(suggestion.targetArguments.fieldValues, [{ fieldID: 'JrvswW8P', value: 'opt-77' }]);
+    // create_new_issue 无 summary/description 顶层参数：标题走 title，Hemory 摘要写入 field016。
+    assert.equal(suggestion.targetArguments.title, suggestion.title);
+    assert.equal(suggestion.targetArguments.summary, undefined);
+    const sugValues = suggestion.targetArguments.fieldValues as Array<Record<string, string>>;
+    assert.ok(sugValues.some((value) => value.fieldID === 'JrvswW8P' && value.value === 'opt-77'));
+    assert.ok(sugValues.some((value) => value.fieldID === 'field016' && value.value === suggestion.summary));
     assert.ok(!suggestion.validationErrors.length);
     // 预览触发 get_issue_fields 预检：必填项已覆盖时不报错。
     const preview = await service.preview(batch.id, [suggestion.id]);
@@ -837,13 +841,18 @@ test('workbench: ONES work-item drafts carry minimal required arguments with opt
     const written = await service.confirm(batch.id, preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })));
     assert.equal(written.items[0].status, 'written');
     const createCall = mcp.calls.find((call) => call.publicName === 'mcp__ones__create_new_issue')!;
-    assert.deepEqual(createCall.args, { projectID: 'GL3ysesFPdnAQNIU', issueTypeID: 'A99xMfkg',
-      summary: suggestion.title, description: suggestion.summary, fieldValues: [{ fieldID: 'JrvswW8P', value: 'opt-77' }] });
-    // displayFields：最小必填项结构化展示；客户信息在名称与选项名一致时只显示一个名字。
+    assert.equal(createCall.args.title, suggestion.title);
+    assert.equal(createCall.args.summary, undefined);
+    const callValues = createCall.args.fieldValues as Array<Record<string, string>>;
+    assert.ok(callValues.some((value) => value.fieldID === 'JrvswW8P' && value.value === 'opt-77'));
+    assert.ok(callValues.some((value) => value.fieldID === 'field016' && value.value === suggestion.summary));
+    // displayFields：最小必填项结构化展示；客户信息在名称与选项名一致时只显示一个名字；必填项 UUID 反解成名称。
     const customer = db.getCustomer('crm-o')!;
     const fields = draftDisplayFields(db, suggestion, customer);
-    assert.deepEqual(fields.map((field) => field.label), ['所属项目', '工作项类型', '标题', '客户信息', '描述']);
+    assert.deepEqual(fields.map((field) => field.label), ['所属项目', '工作项类型', '标题', '客户信息', '建议类型', '实例部署类型', '所属模块', '优先级', '描述']);
     assert.equal(fields.find((field) => field.key === 'customer')!.value, '客户欧');
+    // 无 AI 提案的建议草稿：必填项展示为待补充（无默认值类型），预检会拦截。
+    assert.equal(fields.find((field) => field.key === 'PYbGEZmN')!.value, '待补充');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -866,7 +875,8 @@ test('workbench: ONES drafts fall back to same-name after-sales customer option 
     const batch = db.listDraftBatches('crm-legacy-o')[0];
     const ticket = batch.items!.find((item) => item.type === 'ticket')!;
     // 同名回退：fieldValues 使用同名售后客户的 option。
-    assert.deepEqual(ticket.targetArguments.fieldValues, [{ fieldID: 'JrvswW8P', value: 'opt-88' }]);
+    const ticketValues = ticket.targetArguments.fieldValues as Array<Record<string, string>>;
+    assert.ok(ticketValues.some((value) => value.fieldID === 'JrvswW8P' && value.value === 'opt-88'));
     assert.ok(!ticket.validationErrors.length);
     // 预检发现 get_issue_fields 的额外必填字段未填写。
     const preview = await service.preview(batch.id, [ticket.id]);
@@ -1065,15 +1075,53 @@ test('workbench: parseOnesIssueFields tolerates unknown shapes and flags only ca
     { uuid: 'JrvswW8P', name: '客户信息', required: true, built_in: false, can_be_created: true, field_type_uuid: 'single_option',
       options: [{ uuid: 'opt-1', value: '客户一' }] },
     { uuid: 'PYbGEZmN', name: '建议类型', required: true, built_in: false, can_be_created: false, field_type_uuid: 'single_option' },
+    { uuid: 'field016', name: '描述', required: true, built_in: true, can_be_created: true, field_type_uuid: 'rich_desc' },
   ] } }))!;
-  assert.equal(fields.length, 4);
+  assert.equal(fields.length, 5);
   assert.deepEqual(fields[2].options, [{ uuid: 'opt-1', value: '客户一' }]);
-  // 自动填充（创建者）与 can_be_created=false 的字段不算缺失；客户信息已提供不缺失。
-  const missing = missingOnesRequiredFields(fields, [{ fieldID: 'JrvswW8P', value: 'opt-1' }]);
+  // 自动填充（创建者）与 can_be_created=false 的字段不算缺失；描述 field016 必须出现在 fieldValues（无顶层 description 参数）。
+  const missing = missingOnesRequiredFields(fields, [{ fieldID: 'JrvswW8P', value: 'opt-1' }, { fieldID: 'field016', value: 'x' }]);
   assert.equal(missing.length, 0);
-  // 客户信息缺值时才报缺失。
+  // 客户信息/描述缺值时报缺失。
   const missing2 = missingOnesRequiredFields(fields, []);
-  assert.deepEqual(missing2.map((field) => field.uuid), ['JrvswW8P']);
+  assert.deepEqual(missing2.map((field) => field.uuid), ['JrvswW8P', 'field016']);
+  // 选项 UUID 失效防护：字段带完整选项表（<30 条，未被 get_issue_fields 截断）时值必须在表内；
+  // 客户信息等大选项集字段（30 条截断）无法证伪，跳过。
+  assert.deepEqual(invalidOnesOptionValues(fields, [{ fieldID: 'JrvswW8P', value: 'opt-gone' }]), ['客户信息(JrvswW8P)=opt-gone']);
+  assert.deepEqual(invalidOnesOptionValues(fields, [{ fieldID: 'JrvswW8P', value: 'opt-1' }]), []);
+  const truncated = parseOnesIssueFields(JSON.stringify({ result: 'SUCCESS', data: { list: [
+    { uuid: 'field900', name: '大选项集', required: false, built_in: false, can_be_created: true, field_type_uuid: 'single_option',
+      options: Array.from({ length: 30 }, (_, i) => ({ uuid: `big-${i}`, value: `选项${i}` })) },
+  ] } }))!;
+  assert.deepEqual(invalidOnesOptionValues(truncated, [{ fieldID: 'field900', value: 'not-in-list' }]), []);
+});
+
+test('workbench: mapOnesDeskRequiredFields maps proposals and applies business defaults', () => {
+  // AI 提案按字段名→选项名映射；运维工单缺省兜底（是否客户付费=否、运维工程师=吴孟淋、服务类目=其他）。
+  const ops = mapOnesDeskRequiredFields('operations', { '服务类目': '系统巡检' });
+  assert.deepEqual(ops, [
+    { fieldID: 'KcwE8f1Y', value: 'E8jFkZn6' },
+    { fieldID: 'M9vaUBPP', value: 'LLiv2UfC' },
+    { fieldID: 'TioFkeZn', value: '5dP9HWdX' },
+  ]);
+  // 全缺省时兜底仍然生效（服务类目回退「其他」）。
+  assert.deepEqual(mapOnesDeskRequiredFields('operations', undefined), [
+    { fieldID: 'KcwE8f1Y', value: 'PYmJmnwg' },
+    { fieldID: 'M9vaUBPP', value: 'LLiv2UfC' },
+    { fieldID: 'TioFkeZn', value: '5dP9HWdX' },
+  ]);
+  // 无法识别的提案值回退默认值，而不是带病写入。
+  assert.deepEqual(mapOnesDeskRequiredFields('operations', { '是否客户付费': '也许' })[1], { fieldID: 'M9vaUBPP', value: 'LLiv2UfC' });
+  // 建议和反馈：优先级支持选项名与 UUID 直填。
+  const sug = mapOnesDeskRequiredFields('suggestion', { '建议类型': '新需求', '优先级': 'P1', '实例部署类型': '私有云' });
+  assert.ok(sug.some((value) => value.fieldID === 'PYbGEZmN' && value.value === '5qUVAY7m'));
+  assert.ok(sug.some((value) => value.fieldID === 'field012' && value.value === '762U6awQ'));
+  assert.ok(sug.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'KFewLptQ'));
+  // 所属模块名映射到 search_for_modules 验证过的模块 UUID。
+  assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '事件' }).some((value) => value.fieldID === 'field054' && value.value === 'HhvtUuNJ'));
+  // 工单：所属产品名映射；成员字段允许 8 位 UUID 直填。
+  assert.ok(mapOnesDeskRequiredFields('ticket', { '所属产品': 'Desk 工单管理' }).some((value) => value.fieldID === 'field029' && value.value === 'FFpmuURAFJfgSqQ1'));
+  assert.ok(mapOnesDeskRequiredFields('operations', { '运维工程师': 'abcd1234' }).some((value) => value.fieldID === 'TioFkeZn' && value.value === 'abcd1234'));
 });
 
 // 模拟 ONES search_for_issue_field_options：按输入返回固定选项集，覆盖客户名称/售后客户名称两级解析。
