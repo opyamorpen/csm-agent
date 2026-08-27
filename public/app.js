@@ -55,6 +55,9 @@
   const hemoryTimeFrom = document.getElementById('hemoryTimeFrom');
   const hemoryTimeTo = document.getElementById('hemoryTimeTo');
   const hemoryStatus = document.getElementById('hemoryStatus');
+  const hemoryFilterPanel = document.getElementById('hemoryFilterPanel');
+  const hemoryFilterToggle = document.getElementById('hemoryFilterToggle');
+  const hemoryFilterChip = document.getElementById('hemoryFilterChip');
   const hemoryCustomer = document.getElementById('hemoryCustomer');
   const hemoryCustomerOptions = document.getElementById('hemoryCustomerOptions');
   const hemorySelectAll = document.getElementById('hemorySelectAll');
@@ -872,31 +875,65 @@
     hemorySelectAll.checked = checks.length > 0 && selected === checks.length;
   }
 
-  /** 组装时间段查询参数：已选日期且填了任一时刻时按上海时区收窄到当天时段；返回 null 表示不筛选。 */
-  function hemoryTimeRangeParams() {
-    const from = hemoryTimeFrom.value;
-    const to = hemoryTimeTo.value;
-    if (!from && !to) return {};
-    if (!hemoryDate.value) return { error: '时间段筛选需先选择日期' };
-    if (from && to && from > to) return { error: '开始时间不能晚于结束时间' };
-    // 闭区间：只填一边时另一边取全天边界。
-    return { since: `${hemoryDate.value}T${from || '00:00'}:00+08:00`, until: `${hemoryDate.value}T${to || '23:59'}:59+08:00` };
+  /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；面板控件只是草稿，点「筛选」才生效。 */
+  let hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
+
+  /** 把已应用筛选同步到面板控件（打开面板时预填当前生效值）。 */
+  function syncHemoryFilterDrafts() {
+    hemoryStatus.value = hemoryFilter.status;
+    hemoryDate.value = hemoryFilter.date;
+    hemoryTimeFrom.value = hemoryFilter.from;
+    hemoryTimeTo.value = hemoryFilter.to;
+  }
+
+  const HEMORY_STATUS_LABELS = { pending: '待归属', all: '全部片段', confirmed: '已归属', ignored: '已忽略' };
+
+  /** 激活非默认筛选时在归属栏展示 chip（点击清除回到默认）。 */
+  function updateHemoryFilterChip() {
+    const { status, date, from, to } = hemoryFilter;
+    const active = status !== 'pending' || date || from || to;
+    hemoryFilterChip.classList.toggle('hidden', !active);
+    if (!active) return;
+    const parts = [HEMORY_STATUS_LABELS[status] ?? status];
+    if (date) parts.push(date);
+    if (from || to) parts.push(`${from || '00:00'}–${to || '23:59'}`);
+    hemoryFilterChip.textContent = `✕ ${parts.join(' · ')}`;
+  }
+
+  /** 校验草稿并返回错误信息；通过则把草稿升级为已应用筛选。 */
+  async function applyHemoryFilter() {
+    const draft = { status: hemoryStatus.value, date: hemoryDate.value, from: hemoryTimeFrom.value, to: hemoryTimeTo.value };
+    if ((draft.from || draft.to) && !draft.date) return alertDialog('时间段筛选需先选择日期');
+    if (draft.from && draft.to && draft.from > draft.to) return alertDialog('开始时间不能晚于结束时间');
+    hemoryFilter = draft;
+    hemoryFilterPanel.classList.add('hidden');
+    await loadHemoryInbox();
+  }
+
+  async function resetHemoryFilter() {
+    hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
+    syncHemoryFilterDrafts();
+    hemoryFilterPanel.classList.add('hidden');
+    await loadHemoryInbox();
   }
 
   async function loadHemoryInbox() {
     await ensureCustomerOptions();
-    const params = new URLSearchParams({ status: hemoryStatus.value, limit: '500' });
-    if (hemoryDate.value && !hemoryTimeFrom.value && !hemoryTimeTo.value) params.set('date', hemoryDate.value);
-    const range = hemoryTimeRangeParams();
-    if (range.error) { await alertDialog(range.error); return; }
-    if (range.since) { params.set('since', range.since); params.set('until', range.until); }
+    updateHemoryFilterChip();
+    const params = new URLSearchParams({ status: hemoryFilter.status, limit: '500' });
+    // 只选日期走整天 date 参数；填了时刻则按上海时区组装 since/until 闭区间（只填一边为开区间）。
+    if (hemoryFilter.date && !hemoryFilter.from && !hemoryFilter.to) params.set('date', hemoryFilter.date);
+    if (hemoryFilter.date && (hemoryFilter.from || hemoryFilter.to)) {
+      params.set('since', `${hemoryFilter.date}T${hemoryFilter.from || '00:00'}:00+08:00`);
+      params.set('until', `${hemoryFilter.date}T${hemoryFilter.to || '23:59'}:59+08:00`);
+    }
     const data = await api(`/api/hemory/fragments?${params}`);
     const fragments = data.fragments || [];
-    if (hemoryStatus.value === 'pending') hemoryPendingCount.textContent = fragments.length || '';
+    if (hemoryFilter.status === 'pending') hemoryPendingCount.textContent = fragments.length || '';
     updateAgentNavCount();
     hemoryFragmentList.innerHTML = '';
     if (!fragments.length) {
-      hemoryFragmentList.append(el('div', 'workspace-empty', hemoryStatus.value === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段'));
+      hemoryFragmentList.append(el('div', 'workspace-empty', hemoryFilter.status === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段'));
       return;
     }
     let recording = '';
@@ -1102,10 +1139,15 @@
   }
 
   for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.onclick = () => void showAgentMode(tab.dataset.agentMode);
-  hemoryStatus.onchange = () => void loadHemoryInbox();
-  hemoryDate.onchange = () => void loadHemoryInbox();
-  hemoryTimeFrom.onchange = () => void loadHemoryInbox();
-  hemoryTimeTo.onchange = () => void loadHemoryInbox();
+  // 筛选面板：打开时预填当前已应用筛选；草稿不实时生效，点「筛选」应用、点「重置」回默认。
+  hemoryFilterToggle.onclick = () => {
+    const opening = hemoryFilterPanel.classList.contains('hidden');
+    if (opening) syncHemoryFilterDrafts();
+    hemoryFilterPanel.classList.toggle('hidden', !opening);
+  };
+  document.getElementById('hemoryFilterApply').onclick = () => void applyHemoryFilter();
+  document.getElementById('hemoryFilterReset').onclick = () => void resetHemoryFilter();
+  hemoryFilterChip.onclick = () => void resetHemoryFilter();
   hemoryFragmentList.addEventListener('change', (event) => {
     if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') updateHemorySelection();
   });
@@ -1122,8 +1164,8 @@
   };
   document.getElementById('refreshDrafts').onclick = () => void loadDraftBatches();
   document.getElementById('hemorySync').onclick = async () => {
-    // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日。
-    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryDate.value || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }
+    // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日（取已应用筛选的日期）。
+    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryFilter.date || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }
     catch (error) { await alertDialog(error.message); }
   };
 

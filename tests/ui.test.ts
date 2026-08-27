@@ -182,47 +182,74 @@ test('hemory inbox shows topic-part badges for recurring events', () => {
   assert.match(styles, /\.fragment-topic-part \{[^}]*border: 1px dashed/);
 });
 
-test('hemory inbox filters by a Shanghai time-of-day range on the selected date', () => {
+test('hemory inbox filters via an explicit panel: drafts apply on submit only', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const range = source.match(/function hemoryTimeRangeParams[\s\S]*?\n  }\n\n  async function loadHemoryInbox/)?.[0];
+  const apply = source.match(/async function applyHemoryFilter[\s\S]*?\n  }\n\n  async function resetHemoryFilter/)?.[0];
+  const state = source.match(/let hemoryFilter = \{[\s\S]*?\};/)?.[0];
 
-  // 显示契约：日期旁有起止时间输入；填了任一时刻即按上海时区收窄到当天时段（since/until 闭区间），并解除 7 天窗口。
-  assert.match(html, /id="hemoryTimeFrom"/);
-  assert.match(html, /id="hemoryTimeTo"/);
-  assert.match(html, /<input id="hemoryTimeFrom" type="time"/);
-  assert.match(html, /<input id="hemoryTimeTo" type="time"/);
-  assert.ok(range, 'hemoryTimeRangeParams source was not found');
-  assert.match(range, /时间段筛选需先选择日期/);
-  assert.match(range, /开始时间不能晚于结束时间/);
-  assert.match(range, /`\$\{hemoryDate\.value\}T\$\{from \|\| '00:00'\}:00\+08:00`/);
-  assert.match(range, /`\$\{hemoryDate\.value\}T\$\{to \|\| '23:59'\}:59\+08:00`/);
+  // 显示契约：默认无筛选（pending 全量）；头部是「筛选」按钮，条件在面板里编辑为草稿，点「筛选」才应用。
+  assert.match(html, /id="hemoryFilterToggle"[^>]*>筛选</);
+  assert.match(html, /id="hemoryFilterPanel" class="hemory-filter-panel hidden"/);
+  assert.match(html, /id="hemoryFilterApply"[^>]*>筛选</);
+  assert.match(html, /id="hemoryFilterReset"[^>]*>重置</);
+  assert.ok(state, 'hemoryFilter state was not found');
+  assert.match(state, /status: 'pending', date: '', from: '', to: ''/);
+  assert.ok(apply, 'applyHemoryFilter source was not found');
+  assert.match(apply, /时间段筛选需先选择日期/);
+  assert.match(apply, /开始时间不能晚于结束时间/);
+  // 应用 = 校验草稿 → 拷入已应用状态 → 收起面板 → 重载；重置回默认。
+  assert.match(apply, /hemoryFilter = draft/);
+  assert.match(apply, /hemoryFilterPanel\.classList\.add\('hidden'\)/);
   assert.ok(loader, 'loadHemoryInbox source was not found');
-  // 只选日期仍走整天 date 参数；填了时刻才切换到 since/until。
-  assert.match(loader, /if \(hemoryDate\.value && !hemoryTimeFrom\.value && !hemoryTimeTo\.value\) params\.set\('date', hemoryDate\.value\)/);
-  assert.match(loader, /params\.set\('since', range\.since\)/);
-  assert.match(loader, /params\.set\('until', range\.until\)/);
+  // 列表只读已应用状态（hemoryFilter），面板草稿不实时生效；控件 onchange 自动重载必须移除。
+  assert.match(loader, /status: hemoryFilter\.status/);
+  assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.from \|\| '00:00'\}:00\+08:00`/);
+  assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.to \|\| '23:59'\}:59\+08:00`/);
+  assert.doesNotMatch(source, /hemoryStatus\.onchange/);
+  assert.doesNotMatch(source, /hemoryDate\.onchange/);
+  assert.doesNotMatch(source, /hemoryTimeFrom\.onchange/);
+  assert.doesNotMatch(source, /hemoryTimeTo\.onchange/);
+  // 打开面板时预填当前已应用值；同步按钮用已应用筛选的日期而非草稿。
+  assert.match(source, /syncHemoryFilterDrafts\(\)/);
+  assert.match(source, /date: hemoryFilter\.date \|\| undefined/);
+  // 激活筛选时归属栏出现可点击清除的 chip。
+  assert.match(source, /function updateHemoryFilterChip/);
+  assert.match(source, /hemoryFilterChip\.onclick = \(\) => void resetHemoryFilter\(\)/);
 });
 
-test('hemory assign bar stays frozen with select-all and a live selected count', () => {
+test('hemory assign bar aligns controls on one centered row with select-all and count', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const updater = source.match(/function updateHemorySelection[\s\S]*?\n  }\n\n  \/\*\* 组装时间段查询参数/)?.[0];
+  const updater = source.match(/function updateHemorySelection[\s\S]*?\n  }\n\n  \/\*\* 已应用的筛选条件/)?.[0];
 
-  // 显示契约：归属栏 sticky 冻结在 tab 条下（z-index 低于 tab 条），勾选后无需滚回顶部即可归属。
+  // 显示契约：归属栏是单行 flex 垂直居中的操作条（统一 34px 控件高、13px 辅助文字），sticky 冻结在 tab 条下。
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*display: flex/);
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*align-items: center/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*position: sticky/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*z-index: 7/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*background: #f7f8fa/);
-  // 全选当前筛选结果的全部片段 + 已选计数（m/n）。
+  // 全选 checkbox 保持 16px、不再被输入框规则拉伸；输入框选择器收窄为 input[list]。
+  assert.match(styles, /\.hemory-assign-bar input\[list\] \{[^}]*min-height: 34px/);
+  assert.match(styles, /\.hemory-select-all input \{[^}]*width: 16px/);
+  assert.match(styles, /\.hemory-select-all input \{[^}]*height: 16px/);
+  assert.match(styles, /\.hemory-select-all \{[^}]*font-size: 13px/);
+  assert.match(styles, /\.hemory-selected-count \{[^}]*font-size: 13px/);
+  // 状态筛选已移入面板；归属栏只剩归属操作（客户输入 + 全选 + 计数 + 三个按钮）。
+  const assignBar = html.match(/<div class="hemory-assign-bar">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(assignBar, 'hemory-assign-bar markup was not found');
+  assert.doesNotMatch(assignBar, /hemoryStatus/);
+  assert.match(html, /id="hemoryFilterPanel"[\s\S]*?<select id="hemoryStatus"/);
+  assert.match(html, /placeholder="归属客户：搜索 CRM 客户"/);
   assert.match(html, /id="hemorySelectAll"/);
   assert.match(html, /id="hemorySelectedCount"/);
+  // 全选当前筛选结果的全部片段 + 已选计数（m/n），列表 change 委托更新，重渲染后由 loadHemoryInbox 收尾刷新。
   assert.ok(updater, 'updateHemorySelection source was not found');
   assert.match(updater, /已选 \$\{selected\}\/\$\{checks\.length\}/);
   assert.match(updater, /hemorySelectAll\.checked = checks\.length > 0 && selected === checks\.length/);
-  // 计数通过列表上的 change 委托更新，重渲染后由 loadHemoryInbox 收尾刷新。
   assert.match(source, /hemoryFragmentList\.addEventListener\('change'/);
   assert.match(loader, /updateHemorySelection\(\)/);
   assert.match(source, /hemorySelectAll\.onchange/);
