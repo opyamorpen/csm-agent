@@ -59,6 +59,32 @@ test('draft cards render structured minimal required fields instead of a summary
   assert.match(styles, /\.draft-field-row \{/);
 });
 
+test('draft cards toggle selection from the whole card and enlarge the checkbox', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // 卡片整体是 label：点击卡片任意位置即切换勾选，不再只依赖小勾选框。
+  assert.match(renderer, /el\('label', 'draft-item'\)/);
+  // 勾选框禁用态（written/dismissed/stale/writing）卡片去掉手型提示。
+  assert.match(renderer, /row\.classList\.add\('draft-item-disabled'\)/);
+  // 卡内按钮须 type=button 并阻断 label 默认勾选与冒泡，避免点按钮误切换选择。
+  assert.match(renderer, /edit\.type = 'button';/);
+  assert.match(renderer, /retry\.type = 'button';/);
+  assert.match(renderer, /open\.type = 'button';/);
+  const guardedHandlers = renderer.match(/event\.preventDefault\(\); event\.stopPropagation\(\);/g) || [];
+  assert.strictEqual(guardedHandlers.length, 3);
+
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.draft-item \{[^}]*cursor: pointer/);
+  assert.match(styles, /\.draft-item:not\(\.draft-item-disabled\):hover \{[^}]*border-color/);
+  assert.match(styles, /\.draft-item-disabled \{[^}]*cursor: default/);
+  assert.match(styles, /\.draft-item > input \{[^}]*width: 16px/);
+  assert.match(styles, /\.draft-item > input \{[^}]*height: 16px/);
+  // Hemory 片段卡片勾选框保持同样尺寸，Agent 面板内两种卡片一致。
+  assert.match(styles, /\.hemory-fragment input \{[^}]*width: 16px/);
+});
+
 test('customer overview summary grid drops product and contract status, shows aggregated last interaction', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const summary = source.match(/const summary = el\('div', 'definition-grid'\);[\s\S]*?customerOverview\.append\(summary\);/)?.[0];

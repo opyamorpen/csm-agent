@@ -1017,9 +1017,11 @@
       }
       section.append(head);
       for (const item of batch.items || []) {
-        const row = el('article', 'draft-item');
+        // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing）点击无效，仅去掉手型提示。
+        const row = el('label', 'draft-item');
         const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id;
         selector.disabled = ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
+        if (selector.disabled) row.classList.add('draft-item-disabled');
         const body = el('div', 'draft-item-body');
         const itemHead = el('div', 'draft-item-head'); itemHead.append(badge(draftTypeLabel(item.type), 'accent'), el('strong', null, item.title), badge(item.status, item.status === 'written' ? 'success' : item.status === 'failed' ? 'risk-high' : 'warning'));
         body.append(itemHead);
@@ -1034,9 +1036,25 @@
         if (item.error) body.append(el('div', 'draft-errors', item.error));
         if (item.unknowns?.length) body.append(el('div', 'cell-sub', `待确认: ${item.unknowns.join('、')}`));
         const actions = el('div', 'row-actions');
-        if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) { const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editableDraft(item); actions.append(edit); }
-        if (item.status === 'failed') { const retry = el('button', 'quiet-command small', '重试'); retry.onclick = async () => { try { await api(`/api/draft-items/${item.id}/retry`, { method: 'POST' }); await loadDraftBatches(); } catch (error) { await alertDialog(error.message); } }; actions.append(retry); }
-        if (item.result?.actionItemId) { const open = el('button', 'quiet-command small', '打开 Agent 待办'); open.onclick = () => showView('actions'); actions.append(open); }
+        // 卡片是 label，按钮须 type=button 并阻断默认勾选与冒泡，避免点按钮误切换选择。
+        if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) {
+          const edit = el('button', 'quiet-command small', '编辑'); edit.type = 'button';
+          edit.onclick = (event) => { event.preventDefault(); event.stopPropagation(); editableDraft(item); };
+          actions.append(edit);
+        }
+        if (item.status === 'failed') {
+          const retry = el('button', 'quiet-command small', '重试'); retry.type = 'button';
+          retry.onclick = async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            try { await api(`/api/draft-items/${item.id}/retry`, { method: 'POST' }); await loadDraftBatches(); } catch (error) { await alertDialog(error.message); }
+          };
+          actions.append(retry);
+        }
+        if (item.result?.actionItemId) {
+          const open = el('button', 'quiet-command small', '打开 Agent 待办'); open.type = 'button';
+          open.onclick = (event) => { event.preventDefault(); event.stopPropagation(); showView('actions'); };
+          actions.append(open);
+        }
         body.append(actions); row.append(selector, body); section.append(row);
       }
       draftBatchList.append(section);
