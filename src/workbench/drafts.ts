@@ -692,7 +692,10 @@ export class HemoryDraftService {
 
   /** 查询 ONES 实例工时模式；工具缺失、调用报错或返回无法识别时抛错，由调用方降级为该草稿的校验错误。 */
   private async fetchWorkhourMode(issueId: string): Promise<OnesWorkhourMode> {
-    const tool = this.findReadTool('ones', /(get.*manhour.*mode|manhour.*mode|工时.*模式)/i);
+    // 工具按 rawName 精确绑定：get_issue_fields 的描述文本含 "manhour mode" 字样，宽松正则会误选它
+    // （返回 issueTypeID cannot be empty），与 create_new_issue 误绑工时工具是同款事故。
+    const exact = this.exactTool('ones', 'get_manhour_mode');
+    const tool = exact ?? this.findReadTool('ones', /^(get_)?manhour_mode$/i);
     if (!tool) throw new Error('未找到 ONES 工时模式查询工具');
     const response = await this.mcp.call(tool, { issueID: issueId });
     if (response.isError) throw new Error(response.text.slice(0, 300));
@@ -843,7 +846,8 @@ export class HemoryDraftService {
       }
     }
     if (item.type === 'workhour') {
-      const tool = this.findReadTool('ones', /(get.*manhour.*mode|manhour.*mode|工时.*模式)/i);
+      const exact = this.exactTool('ones', 'get_manhour_mode');
+      const tool = exact ?? this.findReadTool('ones', /^(get_)?manhour_mode$/i);
       if (!tool) errors.push('未找到 ONES 工时模式查询工具');
       else {
         const response = await this.mcp.call(tool, { issueID: item.targetArguments.issueID });
