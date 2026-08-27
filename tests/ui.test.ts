@@ -197,16 +197,20 @@ test('session list supports share, archive and an archived fold with restore', (
   assert.match(archiver, /归档该会话/);
   assert.match(archiver, /list\[0\]\.id/);
 
-  // 分享：导出接口 + 剪贴板 API 优先、execCommand 回落（WKWebView 兼容），不使用原生对话框。
-  const sharer = source.match(/async function shareSession[\s\S]*?\n  }\n\n  async function loadHemoryInbox/)?.[0] ?? source.match(/async function shareSession[\s\S]*?\n  }\n/)?.[0];
+  // 分享按钮挂在每个会话行（会话名称旁），导出接口 + 剪贴板 API 优先、execCommand 回落（WKWebView 兼容）。
+  const listRenderer2 = source.match(/function renderSessionList[\s\S]*?\n  }\n\n  function renderArchivedList/)?.[0];
+  assert.ok(listRenderer2, 'renderSessionList source was not found');
+  assert.match(listRenderer2, /const share = el\('button', 'sh', '分享'\)/);
+  assert.match(listRenderer2, /shareSession\(s\.id, share\)/);
+  const sharer = source.match(/async function shareSession[\s\S]*?\n  }\n/)?.[0];
   assert.ok(sharer, 'shareSession source was not found');
-  assert.match(sharer, /\/api\/sessions\/\$\{sessionId\}\/export/);
+  assert.match(sharer, /\/api\/sessions\/\$\{id\}\/export/);
   assert.match(sharer, /copyText\(data\.transcript\)/);
+  assert.match(sharer, /已复制/);
   const copier = source.match(/async function copyText[\s\S]*?\n  }\n\n  async function shareSession/)?.[0];
   assert.ok(copier, 'copyText source was not found');
   assert.match(copier, /navigator\.clipboard\?\.writeText/);
   assert.match(copier, /document\.execCommand\('copy'\)/);
-  assert.match(html, /id="shareSession"/);
   assert.match(html, /id="archivedToggle"/);
   assert.match(html, /id="archivedList"/);
 });

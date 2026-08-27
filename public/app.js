@@ -48,7 +48,6 @@
   const hemoryPendingCount = document.getElementById('hemoryPendingCount');
   const draftPendingCount = document.getElementById('draftPendingCount');
   const agentNavCount = document.getElementById('agentNavCount');
-  const shareSessionBtn = document.getElementById('shareSession');
   const archivedToggle = document.getElementById('archivedToggle');
   const archivedListEl = document.getElementById('archivedList');
   const archivedCount = document.getElementById('archivedCount');
@@ -386,14 +385,17 @@
       const item = el('div', 'session-item' + (s.id === sessionId ? ' active' : ''));
       const t = el('span', 't', s.title || '新对话');
       const ops = el('span', 'ops');
+      const share = el('button', 'sh', '分享');
+      share.title = '分享会话（复制全文）';
       const rename = el('button', 'ren', '✎');
       const archive = el('button', 'arc', '⤓');
       archive.title = '归档会话';
       const del = el('button', 'del', '✕');
+      share.onclick = (ev) => { ev.stopPropagation(); shareSession(s.id, share); };
       rename.onclick = (ev) => { ev.stopPropagation(); renameSession(s.id, s.title); };
       archive.onclick = (ev) => { ev.stopPropagation(); archiveSession(s.id); };
       del.onclick = (ev) => { ev.stopPropagation(); deleteSession(s.id); };
-      ops.append(rename, archive, del);
+      ops.append(share, rename, archive, del);
       item.append(t, ops);
       item.onclick = () => switchSession(s.id);
       sessionListEl.appendChild(item);
@@ -522,18 +524,20 @@
     } catch (_) { return false; }
   }
 
-  async function shareSession() {
-    if (!sessionId) return;
+  async function shareSession(id, btn) {
+    if (!id) return;
     let data;
     try {
-      data = await api(`/api/sessions/${sessionId}/export`);
+      data = await api(`/api/sessions/${id}/export`);
     } catch (error) { return alertDialog(error.message); }
     if (!data.transcript?.trim()) return alertDialog('当前会话还没有内容');
     const ok = await copyText(data.transcript);
     if (!ok) return alertDialog('复制失败，请手动重试');
-    const original = shareSessionBtn.textContent;
-    shareSessionBtn.textContent = '已复制';
-    setTimeout(() => { shareSessionBtn.textContent = original; }, 2000);
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    }
   }
 
   // ── records ────────────────────────────────────────────────────
@@ -1677,7 +1681,6 @@
   });
 
   newSessionBtn.addEventListener('click', newSession);
-  shareSessionBtn.addEventListener('click', shareSession);
   archivedToggle.addEventListener('click', () => {
     archivedExpanded = !archivedExpanded;
     archivedListEl.classList.toggle('hidden', !archivedExpanded);
