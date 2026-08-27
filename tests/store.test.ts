@@ -31,6 +31,27 @@ test('store: save/load/list/delete sessions', () => {
   assert.equal(store.loadSession('a'), undefined);
 });
 
+test('store: archived sessions persist the flag and listSessions surfaces it', () => {
+  const store = tmpStore();
+  const now = Date.now();
+  store.saveSession({ id: 'active', title: '进行中', createdAt: now, updatedAt: now, messages: [], events: [] });
+  store.saveSession({ id: 'done', title: '已完结', createdAt: now - 1, updatedAt: now - 1, messages: [], events: [], archived: true });
+
+  // listSessions 不过滤（可见性策略在 API 层），但必须带出 archived 标记。
+  const list = store.listSessions();
+  assert.equal(list.length, 2);
+  assert.equal(list.find((s) => s.id === 'active')!.archived, undefined);
+  assert.equal(list.find((s) => s.id === 'done')!.archived, true);
+
+  const loaded = store.loadSession('done');
+  assert.ok(loaded);
+  assert.equal(loaded!.archived, true);
+
+  // 旧会话文件缺省该字段时视为未归档。
+  const legacy = store.loadSession('active');
+  assert.equal(legacy!.archived, undefined);
+});
+
 test('store: records persist and reload across instances', () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-store-'));
   const rec: RecordEntry = {

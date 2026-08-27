@@ -23,11 +23,13 @@
           <button class="nav-item active" data-view="portfolio">客户组合</button>
           <button class="nav-item" data-view="actions">本周行动 <span id="actionNavCount" class="nav-count"></span></button>
           <button class="nav-item" data-view="cases">案例库</button>
-          <button class="nav-item" data-view="agent">Agent</button>
+          <button class="nav-item" data-view="agent">Agent <span id="agentNavCount" class="nav-count"></span></button>
         </nav>
         <div id="agentSessions" class="agent-sessions hidden">
           <button id="newSession" class="new-session">新对话</button>
           <div id="sessionList"></div>
+          <button id="archivedToggle" class="archived-toggle hidden">已归档 <span id="archivedCount" class="nav-count"></span></button>
+          <div id="archivedList" class="archived-list hidden"></div>
         </div>
       </div>
       <button id="settingsBtn" class="settings-bottom" title="连接与模型设置">设置</button>
@@ -89,6 +91,9 @@
         <button class="chip" data-template="生成「客户名称」的客户档案">生成客户档案</button>
         <button class="chip" data-template="把「客户名称」的成功实践沉淀成案例">沉淀客户案例</button>
         <button class="chip" data-template="解析「客户名称」在三套系统里的身份">解析客户身份</button>
+      </div>
+      <div id="conversationOps">
+        <button id="shareSession" class="quiet-command small" type="button">分享</button>
       </div>
       <div id="messages"></div>
       </section>

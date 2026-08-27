@@ -60,6 +60,7 @@ const CLI_CAPABILITIES = [
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
   { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'web_search', 'record_web_intelligence'] },
+  { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
 
@@ -132,6 +133,11 @@ function help(): void {
     （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
      落库 record_web_intelligence）
+  csm-agent sessions [list] [--all] [--json]
+  csm-agent sessions show <会话ID> [--json]
+    （导出会话全文：对话 + 工具轨迹，与网页「分享」同源）
+  csm-agent sessions archive|unarchive <会话ID>
+    （归档后会话从列表隐藏；--all 或网页「已归档」区可查看并恢复）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
   csm-agent capabilities [--json]
   csm-agent version
@@ -631,6 +637,50 @@ async function runCustomerAgent(customerInput: string, prompt: string): Promise<
   await stream;
 }
 
+async function showSessions(rawArgs: string[]): Promise<void> {
+  // --all 与网页已归档区显示契约一致：默认剔除已归档会话，--all 恢复全量（诊断/恢复用）。
+  const includeAll = rawArgs.includes('--all');
+  const body = await request<any>(`/api/sessions${includeAll ? '?include=archived' : ''}`);
+  if (jsonOutput) return print(body.sessions);
+  const rows = (body.sessions ?? []).map((s: any) => ({
+    id: s.id, title: s.title, customer: s.customerName || s.customerId || '', updatedAt: new Date(s.updatedAt).toLocaleString('zh-CN', { hour12: false }),
+    archived: s.archived === true ? '是' : '',
+  }));
+  if (!rows.length) console.log(includeAll ? '没有任何会话' : '没有活跃会话（csm-agent sessions --all 查看含已归档）');
+  else console.table(rows);
+}
+
+async function showSessionTranscript(sessionId: string): Promise<void> {
+  const body = await request<any>(`/api/sessions/${encodeURIComponent(sessionId)}/export`);
+  if (jsonOutput) return print(body);
+  if (body.archived) console.log(`（已归档会话，可用 csm-agent sessions unarchive ${sessionId} 恢复）\n`);
+  console.log(body.transcript ?? '（无内容）');
+}
+
+async function setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
+  const result = await request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ archived }),
+  });
+  print(result);
+}
+
+async function sessionsCommand(subcommand: string, values: string[], rawArgs: string[]): Promise<void> {
+  if (subcommand === 'list') return showSessions(rawArgs);
+  if (subcommand === 'show') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error('sessions show 缺少会话 ID');
+    return showSessionTranscript(id);
+  }
+  if (subcommand === 'archive' || subcommand === 'unarchive') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error(`sessions ${subcommand} 缺少会话 ID`);
+    return setSessionArchived(id, subcommand === 'archive');
+  }
+  throw new Error('sessions 子命令只允许 list/show/archive/unarchive');
+}
+
 async function doctor(): Promise<void> {
   const [list, wecom, llm, search] = await Promise.all([customers(), request('/api/wecom/status'), request('/api/config/llm'), request('/api/config/search')]);
   const sample = list[0];
@@ -662,6 +712,7 @@ async function main(): Promise<void> {
   if (command === 'drafts') return showDrafts(args);
   if (command === 'draft') return draftCommand(args.shift() ?? '', args);
   if (command === 'service') return serviceCommand(args.shift() ?? 'status', args);
+  if (command === 'sessions') return sessionsCommand(args.shift() ?? 'list', args, rawArgs);
   if (command === 'wecom') return print(await request('/api/wecom/status'));
   if (command === 'agent') {
     const customer = args.shift() ?? '';

@@ -173,6 +173,62 @@ test('ask-agent button creates a customer-bound session instead of reusing the a
   assert.match(switchFn, /sessionCustomerId = meta\?\.customerId \?\? null/);
 });
 
+test('session list supports share, archive and an archived fold with restore', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 显示契约：会话操作含归档按钮（PATCH archived:true），列表默认不含归档项（不带 include=archived）。
+  const renderer = source.match(/async function loadSessions[\s\S]*?\n  }\n\n  function renderSessionList/)?.[0];
+  assert.ok(renderer, 'loadSessions source was not found');
+  assert.match(renderer, /fetch\('\/api\/sessions'\)/);
+  assert.match(renderer, /fetch\('\/api\/sessions\?include=archived'\)/);
+  assert.match(renderer, /renderArchivedList\(all\.filter\(\(s\) => s\.archived === true\)\)/);
+  const listRenderer = source.match(/function renderSessionList[\s\S]*?\n  }\n\n  function renderArchivedList/)?.[0];
+  assert.ok(listRenderer, 'renderSessionList source was not found');
+  assert.match(listRenderer, /archiveSession\(s\.id\)/);
+  const archivedRenderer = source.match(/function renderArchivedList[\s\S]*?\n  }\n\n  function connectEvents/)?.[0];
+  assert.ok(archivedRenderer, 'renderArchivedList source was not found');
+  assert.match(archivedRenderer, /JSON\.stringify\(\{ archived: false \}\)/);
+
+  // 归档当前会话后切换到剩余第一个或新建。
+  const archiver = source.match(/async function archiveSession[\s\S]*?\n  }\n\n  \/\*\* 复制文本/)?.[0];
+  assert.ok(archiver, 'archiveSession source was not found');
+  assert.match(archiver, /JSON\.stringify\(\{ archived: true \}\)/);
+  assert.match(archiver, /归档该会话/);
+  assert.match(archiver, /list\[0\]\.id/);
+
+  // 分享：导出接口 + 剪贴板 API 优先、execCommand 回落（WKWebView 兼容），不使用原生对话框。
+  const sharer = source.match(/async function shareSession[\s\S]*?\n  }\n\n  async function loadHemoryInbox/)?.[0] ?? source.match(/async function shareSession[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(sharer, 'shareSession source was not found');
+  assert.match(sharer, /\/api\/sessions\/\$\{sessionId\}\/export/);
+  assert.match(sharer, /copyText\(data\.transcript\)/);
+  const copier = source.match(/async function copyText[\s\S]*?\n  }\n\n  async function shareSession/)?.[0];
+  assert.ok(copier, 'copyText source was not found');
+  assert.match(copier, /navigator\.clipboard\?\.writeText/);
+  assert.match(copier, /document\.execCommand\('copy'\)/);
+  assert.match(html, /id="shareSession"/);
+  assert.match(html, /id="archivedToggle"/);
+  assert.match(html, /id="archivedList"/);
+});
+
+test('agent nav item shows the sum of hemory pending and draft counts', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 显示契约：侧边栏 Agent 角标 = Hemory 待归属 + 草稿箱待处理之和，与两个 tab 角标同源、同刷新时机。
+  assert.match(html, /data-view="agent">Agent <span id="agentNavCount" class="nav-count"><\/span>/);
+  const updater = source.match(/function updateAgentNavCount[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(updater, 'updateAgentNavCount source was not found');
+  assert.match(updater, /hemoryPendingCount\.textContent \|\| 0/);
+  assert.match(updater, /draftPendingCount\.textContent \|\| 0/);
+  const hemoryLoader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+  assert.ok(hemoryLoader, 'loadHemoryInbox source was not found');
+  assert.match(hemoryLoader, /updateAgentNavCount\(\)/);
+  const draftsLoader = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+  assert.ok(draftsLoader, 'loadDraftBatches source was not found');
+  assert.match(draftsLoader, /updateAgentNavCount\(\)/);
+});
+
 test('settings modal exposes Tavily web search configuration', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');

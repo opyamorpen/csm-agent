@@ -11,6 +11,7 @@ import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContex
 import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToolHandlers } from './tools/workbench.js';
 import { WEB_SEARCH_TOOL_NAME, RECORD_WEB_INTELLIGENCE_TOOL_NAME, makeWebSearchHandler, makeRecordWebIntelligenceHandler } from './tools/websearch.js';
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
+import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent } from './transcript.js';
 import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
@@ -44,6 +45,8 @@ interface Session {
   lastRecordId: string | null;
   /** latest structured customer context resolved in this session */
   customer: CustomerContext | null;
+  /** archived sessions stay loadable but are hidden from the default list */
+  archived: boolean;
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -235,6 +238,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       messages: session.agent.context.messages as unknown[],
       events: session.events as Array<{ seq: number; event: unknown }>,
       customer: session.customer,
+      archived: session.archived,
     });
   }
 
@@ -279,6 +283,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       updatedAt: stored.updatedAt,
       lastRecordId: null,
       customer: (stored.customer as CustomerContext | undefined) ?? null,
+      archived: stored.archived === true,
     };
     const agent = makeAgent(session);
     session.agent = agent;
@@ -628,8 +633,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
 
       // ── session list ──
+      // 会话列表默认剔除已归档；include=archived 返回全量（网页已归档区与 CLI --all 诊断口）。
       if (req.method === 'GET' && path === '/api/sessions') {
-        return json(res, 200, { sessions: store.listSessions() });
+        const sessions = store.listSessions();
+        const visible = url.searchParams.get('include') === 'archived'
+          ? sessions
+          : sessions.filter((s) => s.archived !== true);
+        return json(res, 200, { sessions: visible });
       }
 
       // ── create session ──
@@ -667,6 +677,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           updatedAt: now,
           lastRecordId: null,
           customer: customerContext,
+          archived: false,
         };
         session.agent = makeAgent(session);
         sessions.set(session.id, session);
@@ -697,15 +708,46 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           return;
         }
 
-        // rename
+        // rename / archive
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
-          const title = String(body.title ?? '').trim();
-          if (!title) return json(res, 400, { error: 'title is required' });
-          session.title = title.slice(0, 80);
-          session.updatedAt = Date.now();
+          const title = typeof body.title === 'string' ? body.title.trim() : undefined;
+          const archived = typeof body.archived === 'boolean' ? body.archived : undefined;
+          if (title === undefined && archived === undefined) {
+            return json(res, 400, { error: 'title or archived is required' });
+          }
+          if (title !== undefined) {
+            if (!title) return json(res, 400, { error: 'title is required' });
+            session.title = title.slice(0, 80);
+          }
+          if (archived !== undefined) {
+            // 归档切换不改 updatedAt，避免归档项在 include=archived 列表里跳到顶部。
+            session.archived = archived;
+          }
+          if (title !== undefined) session.updatedAt = Date.now();
           persist(session);
-          return json(res, 200, { ok: true, title: session.title });
+          return json(res, 200, { ok: true, title: session.title, archived: session.archived });
+        }
+
+        // share/export full conversation transcript（归档会话也可导出，恢复前仍可查看内容）
+        if (req.method === 'GET' && sub === '/export') {
+          const customer = session.customer as { customer_name?: string; crm_customer_id?: string } | null;
+          return json(res, 200, {
+            id: session.id,
+            title: session.title,
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+            customerId: customer?.crm_customer_id,
+            customerName: customer?.customer_name,
+            archived: session.archived,
+            transcript: formatSessionTranscript({
+              title: session.title,
+              createdAt: session.createdAt,
+              updatedAt: session.updatedAt,
+              events: session.events as Array<{ seq: number; event: TranscriptEvent }>,
+              customer: session.customer as TranscriptSession['customer'],
+            }),
+          });
         }
 
         // delete
@@ -728,6 +770,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         // send a message
         if (req.method === 'POST' && sub === '/messages') {
           if (session.busy) return json(res, 409, { error: '已有进行中的请求' });
+          if (session.archived) return json(res, 409, { error: '会话已归档，请先恢复' });
           const body = await readBody(req);
           const text = String(body.message ?? '').trim();
           if (!text) return json(res, 400, { error: 'message is required' });

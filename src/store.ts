@@ -27,6 +27,8 @@ export interface SessionMeta {
   /** Customer binding (CRM 售后客户 _id + name) when the session was created with one. */
   customerId?: string;
   customerName?: string;
+  /** Archived sessions stay on disk but are hidden from the default session list. */
+  archived?: boolean;
 }
 
 export interface StoredSession {
@@ -37,6 +39,7 @@ export interface StoredSession {
   messages: unknown[];
   events: Array<{ seq: number; event: unknown }>;
   customer?: unknown;
+  archived?: boolean;
 }
 
 /** Default data home for sessions + records. Override with CSM_DATA_DIR. */
@@ -91,6 +94,7 @@ export class Store {
           };
           if (c?.crm_customer_id) meta.customerId = c.crm_customer_id;
           if (c?.customer_name) meta.customerName = c.customer_name;
+          if (s.archived === true) meta.archived = true;
           return meta;
         });
       return metas

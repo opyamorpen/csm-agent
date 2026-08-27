@@ -26,7 +26,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'api']) {
+  for (const command of ['serve', 'doctor', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/:id/complete')));
@@ -37,6 +37,8 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/resegment')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
+  assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
+  assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/export')));
 });
 
 test('CLI provides standard global help and version commands', () => {
@@ -54,6 +56,9 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent draft review/);
   assert.match(help.stdout, /csm-agent draft regenerate/);
   assert.match(help.stdout, /csm-agent service install/);
+  assert.match(help.stdout, /csm-agent sessions \[list\] \[--all\] \[--json\]/);
+  assert.match(help.stdout, /csm-agent sessions show <会话ID>/);
+  assert.match(help.stdout, /csm-agent sessions archive\|unarchive <会话ID>/);
 
   const version = runCli('--version');
   assert.equal(version.status, 0, version.stderr);
@@ -126,6 +131,29 @@ test('drafts listing hides written items by default and --all restores the full 
   // 服务端同一契约：默认剔除 written 项与全写入批次，include=written 恢复全量。
   assert.match(server, /include'\) === 'written'/);
   assert.match(server, /item\.status !== 'written'/);
+});
+
+test('sessions CLI hides archived sessions by default and --all restores the full view', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const listing = source.match(/async function showSessions[\s\S]*?\n}\n\nasync function showSessionTranscript/)?.[0];
+  const handler = source.match(/async function sessionsCommand[\s\S]*?\n}\n\nasync function doctor/)?.[0];
+  const setter = source.match(/async function setSessionArchived[\s\S]*?\n}\n\nasync function sessionsCommand/)?.[0];
+
+  // 显示契约：与 Web 会话列表一致，默认剔除已归档；--all 携带 include=archived 查看全量并可恢复。
+  assert.ok(listing, 'showSessions source was not found');
+  assert.match(listing, /rawArgs\.includes\('--all'\)/);
+  assert.match(listing, /include=archived/);
+  assert.match(listing, /没有活跃会话/);
+  assert.ok(handler, 'sessionsCommand source was not found');
+  assert.match(handler, /sessions 子命令只允许 list\/show\/archive\/unarchive/);
+  assert.match(handler, /subcommand === 'archive' \|\| subcommand === 'unarchive'/);
+  assert.ok(setter, 'setSessionArchived source was not found');
+  assert.match(setter, /JSON\.stringify\(\{ archived \}\)/);
+  // 服务端同一契约：默认剔除归档，include=archived 恢复全量；归档会话禁止继续发消息。
+  assert.match(server, /include'\) === 'archived'/);
+  assert.match(server, /s\.archived !== true/);
+  assert.match(server, /会话已归档，请先恢复/);
 });
 
 test('customer portfolio display contract exposes the supported sort controls', () => {

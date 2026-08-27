@@ -47,6 +47,11 @@
   const recordsPanel = document.getElementById('records');
   const hemoryPendingCount = document.getElementById('hemoryPendingCount');
   const draftPendingCount = document.getElementById('draftPendingCount');
+  const agentNavCount = document.getElementById('agentNavCount');
+  const shareSessionBtn = document.getElementById('shareSession');
+  const archivedToggle = document.getElementById('archivedToggle');
+  const archivedListEl = document.getElementById('archivedList');
+  const archivedCount = document.getElementById('archivedCount');
   const hemoryDate = document.getElementById('hemoryDate');
   const hemoryStatus = document.getElementById('hemoryStatus');
   const hemoryCustomer = document.getElementById('hemoryCustomer');
@@ -86,10 +91,17 @@
   let busy = false;
   let maxSeq = 0;
   let mcpFailures = [];
+  let archivedExpanded = false;
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
     statusEl.lastChild.textContent = text;
+  }
+
+  /** 侧边栏 Agent 角标 = Hemory 待归属 + 草稿箱两个数字之和（与两个 tab 角标同源）。 */
+  function updateAgentNavCount() {
+    const total = Number(hemoryPendingCount.textContent || 0) + Number(draftPendingCount.textContent || 0);
+    agentNavCount.textContent = total || '';
   }
 
   function scrollDown() {
@@ -360,9 +372,11 @@
 
   async function loadSessions() {
     try {
-      const res = await fetch('/api/sessions');
-      const data = await res.json();
-      renderSessionList(data.sessions || []);
+      const [activeRes, allRes] = await Promise.all([fetch('/api/sessions'), fetch('/api/sessions?include=archived')]);
+      const active = (await activeRes.json()).sessions || [];
+      const all = (await allRes.json()).sessions || [];
+      renderSessionList(active);
+      renderArchivedList(all.filter((s) => s.archived === true));
     } catch (_) { /* ignore */ }
   }
 
@@ -373,13 +387,41 @@
       const t = el('span', 't', s.title || '新对话');
       const ops = el('span', 'ops');
       const rename = el('button', 'ren', '✎');
+      const archive = el('button', 'arc', '⤓');
+      archive.title = '归档会话';
       const del = el('button', 'del', '✕');
       rename.onclick = (ev) => { ev.stopPropagation(); renameSession(s.id, s.title); };
+      archive.onclick = (ev) => { ev.stopPropagation(); archiveSession(s.id); };
       del.onclick = (ev) => { ev.stopPropagation(); deleteSession(s.id); };
-      ops.append(rename, del);
+      ops.append(rename, archive, del);
       item.append(t, ops);
       item.onclick = () => switchSession(s.id);
       sessionListEl.appendChild(item);
+    }
+  }
+
+  function renderArchivedList(archived) {
+    archivedCount.textContent = archived.length || '';
+    archivedToggle.classList.toggle('hidden', !archived.length);
+    archivedListEl.classList.toggle('hidden', !archived.length || !archivedExpanded);
+    archivedListEl.innerHTML = '';
+    if (!archived.length || !archivedExpanded) return;
+    for (const s of archived) {
+      const item = el('div', 'session-item archived');
+      const t = el('span', 't', s.title || '新对话');
+      const ops = el('span', 'ops');
+      const restore = el('button', 'ren', '恢复');
+      restore.title = '恢复到会话列表';
+      restore.onclick = async (ev) => {
+        ev.stopPropagation();
+        try {
+          await api(`/api/sessions/${s.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archived: false }) });
+          await loadSessions();
+        } catch (error) { await alertDialog(error.message); }
+      };
+      ops.append(restore);
+      item.append(t, ops);
+      archivedListEl.appendChild(item);
     }
   }
 
@@ -444,6 +486,54 @@
     } else {
       loadSessions();
     }
+  }
+
+  async function archiveSession(id) {
+    if (!await confirmDialog('归档该会话？会话将从列表隐藏，可在「已归档」区恢复。')) return;
+    try {
+      await api(`/api/sessions/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archived: true }) });
+    } catch (error) { return alertDialog(error.message); }
+    if (id === sessionId) {
+      const list = await (await fetch('/api/sessions')).json().then((d) => d.sessions);
+      if (list.length) await switchSession(list[0].id);
+      else await newSession();
+    }
+    loadSessions();
+  }
+
+  /** 复制文本：优先 Clipboard API，失败回落 execCommand（WKWebView 兼容）。 */
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to execCommand */ }
+    try {
+      const holder = document.createElement('textarea');
+      holder.value = text;
+      holder.style.position = 'fixed';
+      holder.style.opacity = '0';
+      document.body.appendChild(holder);
+      holder.select();
+      const ok = document.execCommand('copy');
+      holder.remove();
+      return ok;
+    } catch (_) { return false; }
+  }
+
+  async function shareSession() {
+    if (!sessionId) return;
+    let data;
+    try {
+      data = await api(`/api/sessions/${sessionId}/export`);
+    } catch (error) { return alertDialog(error.message); }
+    if (!data.transcript?.trim()) return alertDialog('当前会话还没有内容');
+    const ok = await copyText(data.transcript);
+    if (!ok) return alertDialog('复制失败，请手动重试');
+    const original = shareSessionBtn.textContent;
+    shareSessionBtn.textContent = '已复制';
+    setTimeout(() => { shareSessionBtn.textContent = original; }, 2000);
   }
 
   // ── records ────────────────────────────────────────────────────
@@ -772,6 +862,7 @@
     const data = await api(`/api/hemory/fragments?${params}`);
     const fragments = data.fragments || [];
     if (hemoryStatus.value === 'pending') hemoryPendingCount.textContent = fragments.length || '';
+    updateAgentNavCount();
     hemoryFragmentList.innerHTML = '';
     if (!fragments.length) {
       hemoryFragmentList.append(el('div', 'workspace-empty', hemoryStatus.value === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段'));
@@ -898,6 +989,7 @@
     const batches = data.batches || [];
     const pending = batches.flatMap((batch) => batch.items || []).filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
     draftPendingCount.textContent = pending || '';
+    updateAgentNavCount();
     draftBatchList.innerHTML = '';
     if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
     for (const batch of batches) {
@@ -1585,6 +1677,12 @@
   });
 
   newSessionBtn.addEventListener('click', newSession);
+  shareSessionBtn.addEventListener('click', shareSession);
+  archivedToggle.addEventListener('click', () => {
+    archivedExpanded = !archivedExpanded;
+    archivedListEl.classList.toggle('hidden', !archivedExpanded);
+    loadSessions();
+  });
 
   // ── boot ───────────────────────────────────────────────────────
 
