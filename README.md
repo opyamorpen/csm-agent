@@ -17,6 +17,35 @@
 - 片段质量门槛：寒暄、环境音、零散的一两句话，以及少于 3 条有效发言或信息量不足的分段只保留在原始转写中，不进入待归属；模型不得合并不相关短句来绕过门槛。
 - 自动草稿箱：客户归属后，AI 只生成证据支持的 Agent 待办、沟通记录、需求或工单草稿；勾选后一次批准、逐项执行，失败项单独重试。每个客户每个上海自然日一个批次，沟通记录草稿有且仅有一条（按【话题】分节合并当天全部沟通），并连带一条工时草稿（时长按录音片段时间计算、描述为一句话总结）；当天已在 CRM 发布过沟通（含手动录入的跟进）后，新草稿只合并发布之后的新沟通，全天发布完毕则不再生成沟通记录与工时草稿（其他类型不受影响）。同日补充归属会按全天内容重建当天批次（未写入草稿作废，已写入记录不动）。草稿箱（Web 与 `csm-agent drafts`）默认不显示已写入草稿；`csm-agent drafts --all` 或 `GET /api/draft-batches?include=written` 可查看全量。
 
+## 安装（macOS 一键安装）
+
+普通使用者无需克隆仓库和安装 Node，一条命令完成 CLI + 桌面端 + 常驻服务安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/opyamorpen/csm-agent/main/scripts/install.sh | bash
+```
+
+安装器会：
+
+1. 检查 git 与 Xcode Command Line Tools（`swiftc`，缺失时提示 `xcode-select --install`）；
+2. 复用系统 Node（`>=22.5`），否则下载捆绑 Node 22 LTS 到 `~/.csm-agent/node`；
+3. `git clone` 仓库到 `~/.csm-agent/app` 并构建；
+4. 生成 `csm-agent` CLI shim（`~/.local/bin`，必要时写入 PATH）；
+5. 现场构建桌面 App（Swift WKWebView 壳）并在 `/Applications` 建立入口；
+6. 安装 launchd 常驻服务（`http://127.0.0.1:3210`，开机自启，`--no-service` 跳过）。
+
+安装后：新开终端运行 `csm-agent version`；配置凭据后（App 设置中添加 MCP 服务器、`csm-agent config llm set` 配置大模型）即可使用。用户数据（配置、会话、SQLite、日志）都在 `~/.csm-agent` 下，与代码目录分离，更新和卸载不触碰。
+
+隔离验收参数（不动真实数据）：`bash scripts/install.sh --dir <目录> --bin-dir <目录> --data-dir <目录> --apps-dir <目录> --port <端口> --no-service`。
+
+### 更新与卸载
+
+```bash
+csm-agent update            # 拉取最新 main 并重建（重跑安装命令同样进入更新路径）
+csm-agent uninstall         # 移除 CLI、桌面端、常驻服务与受管目录；保留 ~/.csm-agent 用户数据
+csm-agent uninstall --purge # 连同用户数据一并删除（需确认，加 --yes 跳过确认）
+```
+
 ## 运行
 
 要求 Node.js `>=22.5`。SQLite 使用 Node 内置 `node:sqlite`，数据默认保存在 `~/.csm-agent/workbench.sqlite`；可通过 `CSM_DATA_DIR` 修改。

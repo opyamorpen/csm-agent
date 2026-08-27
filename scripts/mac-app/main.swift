@@ -1,10 +1,15 @@
 import Cocoa
 import WebKit
 
+#if canImport(Darwin)
+import Darwin
+#endif
+
 // Values baked in by scripts/build-mac-app.sh at build time.
 let nodeBin = "__NODE_BIN__"
 let repoDir = "__REPO_DIR__"
 let npxDir = "__NPX_DIR__"
+let csmPort = "__CSM_PORT__"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow?
@@ -46,13 +51,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         NSApp.mainMenu = mainMenu
     }
 
+    // The launchd service (if installed) already owns the port; only spawn our
+    // own server when nothing is listening, so we never double-start.
     func startServer() {
+        if portHasListener(csmPort) {
+            NSLog("Port \(csmPort) already served (launchd); reusing existing service")
+            return
+        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: nodeBin)
         p.arguments = [repoDir + "/dist/index.js"]
         p.currentDirectoryURL = URL(fileURLWithPath: repoDir)
         var env = ProcessInfo.processInfo.environment
-        env["CSM_PORT"] = "3210"
+        env["CSM_PORT"] = csmPort
         // GUI apps launched from Finder lack the shell PATH (nvm's npx etc.),
         // so prepend the npx directory so ONES's `npx mcp-remote` can spawn.
         if !npxDir.isEmpty {
@@ -69,6 +80,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         } catch {
             NSLog("Failed to start server: \(error)")
         }
+    }
+
+    // A cheap TCP connect probe: success means some process listens on the port.
+    func portHasListener(_ port: String) -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(port)"), let host = url.host,
+              let portNumber = UInt16(port) else { return false }
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { return false }
+        defer { close(socketFD) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = portNumber.bigEndian
+        guard inet_pton(AF_INET, host.cString(using: .utf8), &addr.sin_addr) == 1 else { return false }
+        let result = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
     }
 
     func setupWindow() {
@@ -92,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func loadApp() {
-        guard let url = URL(string: "http://127.0.0.1:3210") else { return }
+        guard let url = URL(string: "http://127.0.0.1:\(csmPort)") else { return }
         webView?.load(URLRequest(url: url))
     }
 
@@ -164,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        server?.terminate()
+        server?.terminate() // nil when we reused the launchd service
     }
 }
 

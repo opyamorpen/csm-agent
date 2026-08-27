@@ -6,6 +6,10 @@ dist-mac/
 *.log
 .DS_Store
 
+# npm link artifacts (repo-local bin/ and lib/ self-link)
+bin/
+lib/
+
 # Local overrides that may contain real endpoints / secrets must not be committed.
 config/local*.yaml
 config/mcp.user.yaml

@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
+import { runUpdate } from './update.js';
+import { runUninstall } from './uninstall.js';
 
 const baseUrl = (process.env.CSM_BASE_URL ?? `http://127.0.0.1:${process.env.CSM_PORT ?? 3210}`).replace(/\/$/, '');
 const rawArgs = process.argv.slice(2);
@@ -59,6 +61,8 @@ const CLI_CAPABILITIES = [
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
+  { command: 'update', workflow: 'self-update', access: 'local', api: [] },
+  { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
   { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
@@ -135,6 +139,12 @@ function help(): void {
   csm-agent draft regenerate <批次ID>
   csm-agent service install [端口]
   csm-agent service status|restart|uninstall|logs
+  csm-agent update
+    （自更新：仅限 install.sh 安装的受管目录；git fetch → reset --hard
+     origin/main → npm ci → 重建 → 重建桌面 App → 重启常驻服务）
+  csm-agent uninstall [--purge] [--yes]
+    （卸载：移除 CLI shim、桌面 App 入口、常驻服务与受管目录；
+     默认保留 ~/.csm-agent 用户数据，--purge 连同配置/会话/数据库一并删除）
   csm-agent ones fields [--verify] [--json]
     （ONES Desk 建议/工单/运维工单必填字段契约：选项 UUID 表、兜底值、
      实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
@@ -439,7 +449,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     const badTime = values.find((value) => /^--(from|to)=/.test(value) && !/^--(from|to)=\d{2}:\d{2}$/.test(value));
     if (badTime) throw new Error(`时间参数格式应为 HH:MM，例如 --from=14:00（收到: ${badTime}）`);
     const date = values.find((value) => !value.startsWith('--') && /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? '';
-    if ((from || to) && !date) throw new Error('--from/--to 时间段过滤需要同时指定日期，例如 csm-agent hermory inbox 2026-08-27 --from=14:00 --to=15:30');
+    if ((from || to) && !date) throw new Error('--from/--to 时间段过滤需要同时指定日期，例如 csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30');
     // 闭区间：只填一边时另一边取全天边界；与 Web 界面一致按上海时区组装 since/until。
     const since = from ? `${date}T${from.slice(7)}:00+08:00` : undefined;
     const until = to ? `${date}T${to.slice(5)}:59+08:00` : undefined;
@@ -799,6 +809,8 @@ async function main(): Promise<void> {
   if (command === 'drafts') return showDrafts(args);
   if (command === 'draft') return draftCommand(args.shift() ?? '', args);
   if (command === 'service') return serviceCommand(args.shift() ?? 'status', args);
+  if (command === 'update') return runUpdate();
+  if (command === 'uninstall') return runUninstall({ purge: rawArgs.includes('--purge'), yes: rawArgs.includes('--yes') });
   if (command === 'sessions') return sessionsCommand(args.shift() ?? 'list', args, rawArgs);
   if (command === 'ones') {
     const sub = args.shift() ?? '';

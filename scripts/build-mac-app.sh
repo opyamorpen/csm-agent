@@ -10,6 +10,8 @@ APP_NAME="CSM Agent"
 EXEC_NAME="CSMAgent"
 BUILD_DIR="$ROOT/.build-mac"
 APP_DIR="$ROOT/dist-mac/$APP_NAME.app"
+CSM_PORT="${CSM_PORT:-3210}"
+APP_VERSION="$(node -p "require('$ROOT/package.json').version")"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
@@ -27,7 +29,7 @@ echo "==> 构建服务器 dist/"
 echo "==> 准备 .app 包结构"
 rm -rf "$APP_DIR" "$BUILD_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR"
-cp "$ROOT/scripts/mac-app/Info.plist" "$APP_DIR/Contents/Info.plist"
+sed "s/<string>0\.1\.0<\/string>/<string>$APP_VERSION<\/string>/g" "$ROOT/scripts/mac-app/Info.plist" > "$APP_DIR/Contents/Info.plist"
 
 echo "==> 生成应用图标（AppIcon.icns）"
 if [ ! -f "$ROOT/assets/AppIcon.icns" ] || [ "$ROOT/assets/icon.svg" -nt "$ROOT/assets/AppIcon.icns" ]; then
@@ -35,13 +37,13 @@ if [ ! -f "$ROOT/assets/AppIcon.icns" ] || [ "$ROOT/assets/icon.svg" -nt "$ROOT/
 fi
 cp "$ROOT/assets/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-echo "==> 生成 main.swift（写入 node 路径、npx 目录与项目路径）"
-python3 - "$ROOT/scripts/mac-app/main.swift" "$BUILD_DIR/main.swift" "$NODE_BIN" "$ROOT" "$NPX_DIR" <<'PY'
+echo "==> 生成 main.swift（写入 node 路径、npx 目录、项目路径与服务端口）"
+python3 - "$ROOT/scripts/mac-app/main.swift" "$BUILD_DIR/main.swift" "$NODE_BIN" "$ROOT" "$NPX_DIR" "$CSM_PORT" <<'PY'
 import sys
-src, dst, node_bin, repo, npx_dir = sys.argv[1:6]
+src, dst, node_bin, repo, npx_dir, port = sys.argv[1:7]
 with open(src, encoding='utf-8') as f:
     t = f.read()
-t = t.replace('__NODE_BIN__', node_bin).replace('__REPO_DIR__', repo).replace('__NPX_DIR__', npx_dir)
+t = t.replace('__NODE_BIN__', node_bin).replace('__REPO_DIR__', repo).replace('__NPX_DIR__', npx_dir).replace('__CSM_PORT__', port)
 with open(dst, 'w', encoding='utf-8') as f:
     f.write(t)
 PY
