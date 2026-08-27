@@ -10,6 +10,8 @@ import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
 import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToolHandlers } from './tools/workbench.js';
 import { WEB_SEARCH_TOOL_NAME, RECORD_WEB_INTELLIGENCE_TOOL_NAME, makeWebSearchHandler, makeRecordWebIntelligenceHandler } from './tools/websearch.js';
+import { ONES_DESK_FIELDS_TOOL_NAME, makeOnesDeskFieldsHandler } from './tools/onesdesk.js';
+import { missingOnesDeskSpecFields, applyDeploymentTypeOverride, ONES_DESK_DEPLOYMENT_FIELD_ID } from './workbench/drafts.js';
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent } from './transcript.js';
 import { WorkbenchDatabase } from './workbench/database.js';
@@ -186,6 +188,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       overview: (id) => workbench.db.overview(id),
       timeline: (id, limit) => workbench.db.listTimeline(id, limit).map((e) => e as unknown as Record<string, unknown>),
     });
+    const onesDeskFields = makeOnesDeskFieldsHandler({
+      // CRM 使用版本是实例部署类型的唯一判定依据；未绑定客户时未同步，按私有云兜底。
+      getUsageVersion: () => {
+        const id = session.customer?.crm_customer_id;
+        return id ? workbench.db.getCustomer(id)?.usageVersion ?? null : null;
+      },
+    });
     const searchConfig = loadSearchConfig();
     const webSearch = makeWebSearchHandler({
       getApiKey: () => loadSearchConfig().apiKey,
@@ -215,6 +224,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         [CUSTOMER_EVENTS_TOOL_NAME]: workbenchHandlers.events,
         [WEB_SEARCH_TOOL_NAME]: webSearch,
         [RECORD_WEB_INTELLIGENCE_TOOL_NAME]: recordWebIntelligence,
+        [ONES_DESK_FIELDS_TOOL_NAME]: onesDeskFields,
         [CUSTOMER_CONTEXT_TOOL_NAME]: async (args, emit) => {
           const next = extractCustomerContext(args);
           if (Object.keys(next).length === 0) {
@@ -561,6 +571,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
       }
 
+      // ── ONES Desk 必填字段契约（只读规则可见口；verify=1 实时核对选项 UUID 漂移） ──
+      if (req.method === 'GET' && path === '/api/ones-desk-fields') {
+        try { return json(res, 200, await workbench.drafts.deskFieldContract(url.searchParams.get('verify') === '1')); }
+        catch (error) { return json(res, 400, { error: (error as Error).message }); }
+      }
+
       // ── MCP configuration (read + save/reconnect) ──
       if (req.method === 'GET' && path === '/api/config/mcp') {
         return json(res, 200, {
@@ -660,6 +676,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           ones_customer_option_id: option?.external_id ? String(option.external_id) : undefined,
           customer_manhour_issue_id: manhour?.externalId,
           industry: boundCustomer.industry ?? undefined,
+          usage_version: boundCustomer.usageVersion ?? undefined,
           health: boundCustomer.health,
           renewal_status: boundCustomer.renewalDate ?? undefined,
           summary: boundCustomer.nextAction ?? undefined,
@@ -840,6 +857,23 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             }
             const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer);
             if (bindingError) return json(res, 400, { error: bindingError });
+            // ONES 工作项批准门：规格表字段（所属产品/所属模块/实例部署类型等）必须齐备，批准即写入，
+            // 缺失会到 ONES 端才报错。agent 无法从 get_issue_fields 自行枚举选项（大选项集截断），必须用本地工具补齐。
+            const specMissing = missingOnesDeskSpecFields(approvedDraft.record_type,
+              Array.isArray(approvedDraft.target_arguments.fieldValues) ? approvedDraft.target_arguments.fieldValues as Array<Record<string, unknown>> : []);
+            if (specMissing.length) {
+              return json(res, 400, { error: `ONES 工作项缺少必填字段: ${specMissing.map((spec) => `${spec.label}(${spec.uuid})`).join('、')}（请调用 get_ones_desk_required_fields 获取选项 UUID 补齐后重新 confirm_write）` });
+            }
+            // 实例部署类型以 CRM 使用版本为唯一依据（公有云版→公有云，其余→私有云），与 Hemory 自动草稿同一规则。
+            if (approvedDraft.record_type === 'suggestion' || approvedDraft.record_type === 'ticket') {
+              const expected = applyDeploymentTypeOverride(approvedDraft.record_type as 'suggestion' | 'ticket', session.customer?.usage_version)[0];
+              const actual = (Array.isArray(approvedDraft.target_arguments.fieldValues)
+                ? approvedDraft.target_arguments.fieldValues as Array<Record<string, unknown>> : [])
+                .find((value) => value.fieldID === ONES_DESK_DEPLOYMENT_FIELD_ID);
+              if (!expected || !actual || String(actual.value) !== expected.value) {
+                return json(res, 400, { error: `实例部署类型必须按 CRM 使用版本判定为 ${expected?.value ?? '(规则解析失败)'}，当前草稿为 ${actual?.value ?? '(缺失)'}（公有云版→公有云，其余→私有云）` });
+              }
+            }
           }
           session.pending.resolve(approvedDraft ?? false);
           session.pending = null;

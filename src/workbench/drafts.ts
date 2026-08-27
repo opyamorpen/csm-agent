@@ -9,9 +9,9 @@ import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from
 
 export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-required-fields';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
-const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
-type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
-const ONES_DESK_ISSUE_TYPE_IDS: Record<OnesDeskDraftType, string> = { suggestion: 'A99xMfkg', ticket: '7sxvwZMY', operations: '943qpMX7' };
+export const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
+export type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
+export const ONES_DESK_ISSUE_TYPE_IDS: Record<OnesDeskDraftType, string> = { suggestion: 'A99xMfkg', ticket: '7sxvwZMY', operations: '943qpMX7' };
 const ONES_DESK_TARGET_OBJECTS: Record<OnesDeskDraftType, string> = { suggestion: 'ONES Desk / 建议和反馈', ticket: 'ONES Desk / 工单', operations: 'ONES Desk / 运维工单' };
 
 // ONES Desk 三类工作项除标题/项目/类型外的人工必填字段规格（2026-08-27 经 get_issue_fields 与
@@ -26,7 +26,7 @@ export interface OnesDeskFieldSpec {
   options?: Record<string, string>;
   /** 成员字段：允许 8 位用户 UUID 直填（CSM 手工编辑指定其他工程师）。 */
   member?: boolean;
-  /** AI 未提案或无法映射时的兜底（业务指定：是否客户付费=否、运维工程师=吴孟淋）。 */
+  /** AI 未提案或无法映射时的兜底（零缺失保证：所有规格字段都有兜底；实例部署类型另被 CRM 使用版本确定性覆盖）。 */
   defaultValue?: string;
 }
 
@@ -75,16 +75,16 @@ const ONES_DESK_MEMBER_DEFAULTS: Record<string, string> = { '吴孟淋': '5dP9HW
 
 export const ONES_DESK_FIELD_SPECS: Record<OnesDeskDraftType, OnesDeskFieldSpec[]> = {
   suggestion: [
-    { uuid: 'PYbGEZmN', label: '建议类型', options: { '新需求': '5qUVAY7m', '产品缺陷': 'XgCJbGc6', '交互问题': 'Q1JBwNUt' } },
-    { uuid: 'HS5u8PNB', label: '实例部署类型', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
-    { uuid: 'field054', label: '所属模块', options: ONES_DESK_MODULE_OPTIONS },
-    { uuid: 'field012', label: '优先级', options: { 'P0': 'KhZpaAXJ', 'P1': '762U6awQ', 'P2': 'Lv5Tbmih', 'P3': 'A7UyroWi', 'P4': '5kbJ4VYT' } },
+    { uuid: 'PYbGEZmN', label: '建议类型', defaultValue: '新需求', options: { '新需求': '5qUVAY7m', '产品缺陷': 'XgCJbGc6', '交互问题': 'Q1JBwNUt' } },
+    { uuid: 'HS5u8PNB', label: '实例部署类型', defaultValue: '私有云', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
+    { uuid: 'field054', label: '所属模块', defaultValue: '功能扩展', options: ONES_DESK_MODULE_OPTIONS },
+    { uuid: 'field012', label: '优先级', defaultValue: 'P2', options: { 'P0': 'KhZpaAXJ', 'P1': '762U6awQ', 'P2': 'Lv5Tbmih', 'P3': 'A7UyroWi', 'P4': '5kbJ4VYT' } },
   ],
   ticket: [
-    { uuid: 'CATNfrrF', label: '环境类型', options: { 'PRD（生产环境）': 'JuTTumjJ', 'UAT（用户验收环境）': 'SMti68WG', 'SIT（集成测试环境）': 'SmLA83rN', 'DEV（开发环境）': 'RT2kJk9i', 'POC（概念验证环境）': 'U58FbojT' } },
-    { uuid: 'HS5u8PNB', label: '实例部署类型', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
-    { uuid: 'Su4v8xFs', label: '是否稳定复现', options: { '稳定复现': 'M1eT99eW', '偶现': 'SyPTtJdW', '无法复现': '6v9NtC12' } },
-    { uuid: 'field029', label: '所属产品', options: ONES_DESK_PRODUCT_OPTIONS },
+    { uuid: 'CATNfrrF', label: '环境类型', defaultValue: 'PRD（生产环境）', options: { 'PRD（生产环境）': 'JuTTumjJ', 'UAT（用户验收环境）': 'SMti68WG', 'SIT（集成测试环境）': 'SmLA83rN', 'DEV（开发环境）': 'RT2kJk9i', 'POC（概念验证环境）': 'U58FbojT' } },
+    { uuid: 'HS5u8PNB', label: '实例部署类型', defaultValue: '私有云', options: { '私有云': 'KFewLptQ', '公有云': 'Fzg8dBCT' } },
+    { uuid: 'Su4v8xFs', label: '是否稳定复现', defaultValue: '偶现', options: { '稳定复现': 'M1eT99eW', '偶现': 'SyPTtJdW', '无法复现': '6v9NtC12' } },
+    { uuid: 'field029', label: '所属产品', defaultValue: 'Core 基础平台能力', options: ONES_DESK_PRODUCT_OPTIONS },
   ],
   operations: [
     { uuid: 'KcwE8f1Y', label: '服务类目', defaultValue: '其他', options: {
@@ -95,9 +95,63 @@ export const ONES_DESK_FIELD_SPECS: Record<OnesDeskDraftType, OnesDeskFieldSpec[
   ],
 };
 
+/** 实例部署类型字段（建议和反馈/工单共用），按 CRM 使用版本确定性判定。 */
+export const ONES_DESK_DEPLOYMENT_FIELD_ID = 'HS5u8PNB';
+
+/**
+ * 实例部署类型判定：CRM「使用版本」（field_Q2L6p__c）= 公有云版（value `option1`）→ 公有云，
+ * 其余（私有部署两版 value `Hox1iRI04`/`E4H2tH6o4`、缺失、未知）→ 私有云。
+ * CRM 返回该单选字段时给的是选项 value 而非 label，两种表示都接受。
+ * CRM 是唯一依据，沟通证据不覆盖；返回选项 label。
+ */
+export function resolveDeploymentType(usageVersion: string | null | undefined): '公有云' | '私有云' {
+  return usageVersion === '公有云版' || usageVersion === 'option1' ? '公有云' : '私有云';
+}
+
+/**
+ * 沟通证据 → 所属模块/所属产品 的分类指引（按 ONES 产品模块层级组织，供 LLM 生成提示词与
+ * get_ones_desk_required_fields 本地工具共用）。只指引「选最接近项」，兜底值在代码层兜底。
+ */
+export const ONES_DESK_CLASSIFICATION_HINTS: Record<'module' | 'product', string[]> = {
+  module: [
+    'Project 类：父子工作项（层级关系）、甘特图属性/配置/列表和操作/性能问题、瀑布组件（甘特图、里程碑...)、前后置和排期规则、里程碑和交付物、模块组件、表单详情、表单组件、基线、燃尽图、规划与跟踪、计算属性、项目集管理',
+    'Wiki 类：页面操作、页面属性、页面组分类、页面导入、页面导出、页面复制移动等操作、页面标签、页面通知、附件管理、审批业务场景、审批配置、模版管理、搜索+筛选、移动端、Wiki+Project',
+    '工时资源类：工时管理（登记工时&预估工时）、工时审批、工时报表、工作台-工时日历、资源管理配置（工时表单&登记规则&工时提醒）',
+    '自动化类：管理自动化规则、新建自动化规则、条件判断、条件分支',
+    '开放集成类：OpenAPI、功能扩展、事件、平台开放能力（OpenAPI、功能扩展、事件）、插件（标品插件不要选此项）、多数据中心、外部门户',
+    '其他：导入导出、运行历史日志、事件',
+  ],
+  product: [
+    'ONES Project（项目管理）：Project 场景与平台、Core 基础平台能力、Dashboard 仪表盘能力、Automation 流程自动化、Mobile 手机网页与客户端',
+    'ONES Wiki（知识库）：Wiki 知识库管理场景、ONES Note',
+    '测试：TestCase 测试管理场景',
+    '效能与项目集：Performance 效能管理场景、ONES Plan 项目集管理、ONES Resource 资源管理、ONES Task 任务协作',
+    '平台与账号：Account 基础平台能力、Admin-系统业务配置、Admin-订单中心、零号应用中心与 License 管理、证书平台、审批管理',
+    '服务与支持：Desk 工单管理、ONES 运维工具箱、帮助中心与产品手册',
+    '集成与开放：Open 开放平台、插件、Jira&Confluence 数据导入、ONES Assistant、ONES Design 组件库、CRM、CN 信创、基础设施（非业务需求）、海外官网、CN Official Website 官网',
+  ],
+};
+
 // 描述字段落点：create_new_issue 无顶层 description 参数，Hemory 摘要写入 field016（rich_desc，
 // 运维工单上为必填；建议/工单上选填但保持一致，便于 ONES 端阅读）。
 const ONES_DESK_DESC_FIELD_ID = 'field016';
+
+/**
+ * label → 选项 UUID 解析（逐级放宽）：精确 → 大小写无关去空格 → 选项 label 包含提案或提案以选项开头
+ *（近似 label 纠偏，如「工时管理」→「工时管理（登记工时&预估工时）」）→ UUID 直填。
+ * 大小写无关与包含式匹配都要求命中唯一，防止「工时」同时命中多个工时类选项。
+ */
+function resolveOptionLabel(label: string, spec: OnesDeskFieldSpec): string | null {
+  if (!label) return null;
+  if (spec.options?.[label]) return spec.options[label];
+  const normalized = label.trim().toLowerCase();
+  const keys = Object.keys(spec.options ?? {});
+  const caseInsensitive = keys.filter((key) => key.toLowerCase() === normalized);
+  if (caseInsensitive.length === 1) return spec.options![caseInsensitive[0]];
+  const partial = keys.filter((key) => key.includes(label) || label.includes(key));
+  if (partial.length === 1) return spec.options![partial[0]];
+  return null;
+}
 
 /** 把 AI 提案（字段名→选项名/成员名）映射成 fieldValues；带 defaultValue 的字段在缺省或映射失败时兜底。 */
 export function mapOnesDeskRequiredFields(deskType: OnesDeskDraftType, proposed: Record<string, unknown> | undefined): Array<Record<string, string>> {
@@ -108,10 +162,31 @@ export function mapOnesDeskRequiredFields(deskType: OnesDeskDraftType, proposed:
     if (label && spec.options?.[label]) uuid = spec.options[label];
     else if (label && spec.member && /^[A-Za-z0-9]{8}$/.test(label)) uuid = label; // 成员字段支持用户 UUID 直填
     else if (label && Object.values(spec.options ?? {}).includes(label)) uuid = label; // 选项字段 UUID 直填（CSM 手工编辑）
+    else if (label) uuid = resolveOptionLabel(label, spec) ?? '';
     if (!uuid && spec.defaultValue) uuid = spec.options?.[spec.defaultValue] ?? '';
     if (uuid) values.push({ fieldID: spec.uuid, value: uuid });
   }
   return values;
+}
+
+/**
+ * 实例部署类型确定性覆盖：CRM 使用版本是唯一依据（公有云版→公有云，其余→私有云），
+ * 模型提案与兜底值都不参与。Hemory 自动草稿在 buildTarget 里调用；交互式草稿由
+ * get_ones_desk_required_fields 返回解析值、批准门校验一致性。
+ */
+export function applyDeploymentTypeOverride(deskType: OnesDeskDraftType, usageVersion: string | null | undefined): Array<Record<string, string>> {
+  if (deskType !== 'suggestion' && deskType !== 'ticket') return [];
+  const label = resolveDeploymentType(usageVersion);
+  const uuid = ONES_DESK_FIELD_SPECS[deskType].find((spec) => spec.uuid === ONES_DESK_DEPLOYMENT_FIELD_ID)?.options?.[label];
+  return uuid ? [{ fieldID: ONES_DESK_DEPLOYMENT_FIELD_ID, value: uuid }] : [];
+}
+
+/** 批准门校验：fieldValues 必须覆盖目标类型规格表的全部字段（零缺失保证）。非 ONES Desk 类型返回空。 */
+export function missingOnesDeskSpecFields(recordType: string, fieldValues: Array<Record<string, unknown>>): OnesDeskFieldSpec[] {
+  const deskType = onesDeskTypeId(recordType as DraftItemType);
+  if (!deskType) return [];
+  const provided = new Set(fieldValues.filter((value) => value.value != null && value.value !== '').map((value) => String(value.fieldID)));
+  return ONES_DESK_FIELD_SPECS[deskType].filter((spec) => !provided.has(spec.uuid));
 }
 // ONES 工时按实例配置的模式二选一写工具；宽松正则匹配曾把 create_new_issue（描述里带 manhour 字样）误当工时工具。
 type OnesWorkhourMode = 'simple' | 'summary';
@@ -385,6 +460,8 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
   const requiredGuide = (Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[])
     .map((type) => `- ${type}：${ONES_DESK_FIELD_SPECS[type].map((spec) => `${spec.label}（${spec.options ? Object.keys(spec.options).join('|') : '成员名'}）`).join('、')}`)
     .join('\n');
+  const classificationGuide = `所属模块分类指引（按 ONES 产品模块层级，选最接近的一项）：\n${ONES_DESK_CLASSIFICATION_HINTS.module.map((line) => `- ${line}`).join('\n')}\n`
+    + `所属产品分类指引（按 ONES 产品线，选最接近的一项）：\n${ONES_DESK_CLASSIFICATION_HINTS.product.map((line) => `- ${line}`).join('\n')}\n`;
   const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
     + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段；其 fields 必须包含 one_line_summary（一句话总结当天沟通）和 sections 数组——published=false 的每个片段恰好一项 {"evidence_id":"片段id","summary":"该片段的摘要"}。每段 summary 2~4 句，忠于该片段自己的转写，写明该话题的关键结论、决定与后续行动，不得与其他片段的 summary 雷同、不得写成全天综述。sections 必须覆盖全部 published=false 片段，不得遗漏。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
     + `workhour 不必输出（系统按录音时长自动计算并连带生成）。internal_todo 可以输出多条，每条对应独立的行动；只返回有证据支持的草稿。\n`
@@ -394,10 +471,11 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
     + `- operations（运维工单）：客户明确提出需要运维服务操作——如环境重装、数据迁移、配置变更、证书/域名/服务器/备份等基础设施操作请求。只在客户明确提出操作请求时才输出，三者中最谨慎；一般的系统问题反馈、索引慢查询、插件交付都不算。\n`
     + `suggestion/ticket/operations 的 fields 必须包含 ones_required 对象（键=字段名，值=选项名，从选项列表中选）。这些是 ONES 必填字段，你要根据沟通证据理解后给出提案，不得留空、不得写 unknown：\n`
     + `${requiredGuide}\n`
-    + `ones_required 证据不足时的保守默认：服务类目→其他、是否客户付费→否、运维工程师→吴孟淋、优先级→P2、实例部署类型→私有云、环境类型→PRD（生产环境）、是否稳定复现→偶现、建议类型→新需求；所属模块/所属产品必须从选项中选最接近的一项。\n`
+    + `ones_required 证据不足时的保守默认：服务类目→其他、是否客户付费→否、运维工程师→吴孟淋、优先级→P2、实例部署类型→私有云、环境类型→PRD（生产环境）、是否稳定复现→偶现、建议类型→新需求；所属模块/所属产品必须按下方分类指引选最接近的一项，不得留空。\n`
+    + `${classificationGuide}\n`
     + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
     + `只输出 JSON：{"drafts":[{"type":"...","title":"...","summary":"...","fields":{},"evidence_refs":["..."],"unknowns":[]}]}。\n`
-    + `客户：${customer.name}（CRM ${customer.id}）\n证据：${JSON.stringify(evidence)}`;
+    + `客户：${customer.name}（CRM ${customer.id}${customer.usageVersion ? `，使用版本 ${customer.usageVersion}` : ''}）\n证据：${JSON.stringify(evidence)}`;
   const response = await runtime.models.complete(runtime.model, {
     systemPrompt: '你是 CSM 草稿分类器。你只能整理用户提供的证据，不执行任何工具或外部写入。',
     messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
@@ -773,8 +851,12 @@ export class HemoryDraftService {
     if (!tool) validationErrors.push('未找到 ONES 新建工作项写工具');
     // create_new_issue 的 schema 为 additionalProperties:false：标题只能走顶层 title（旧代码传 summary
     // 曾导致「FAIL: InvalidParameter issue title empty」），描述与人工必填项（服务类目/优先级等）全部走 fieldValues。
+    // 实例部署类型以 CRM 使用版本为准（公有云版→公有云，其余→私有云）：确定性覆盖，模型提案不参与。
+    const override = applyDeploymentTypeOverride(deskType, customer.usageVersion);
+    const overridden = new Set(override.map((entry) => entry.fieldID));
+    const mapped = mapOnesDeskRequiredFields(deskType, proposal.fields?.ones_required as Record<string, unknown> | undefined);
     const fieldValues: Array<Record<string, string>> = option ? [{ fieldID: ONES_CUSTOMER_FIELD_ID, value: option.id }] : [];
-    fieldValues.push(...mapOnesDeskRequiredFields(deskType, proposal.fields?.ones_required as Record<string, unknown> | undefined));
+    fieldValues.push(...mapped.filter((entry) => !overridden.has(entry.fieldID)), ...override);
     fieldValues.push({ fieldID: ONES_DESK_DESC_FIELD_ID, value: proposal.summary });
     return { system: 'ones' as const, object: ONES_DESK_TARGET_OBJECTS[deskType], tool,
       arguments: { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[deskType], title: proposal.title, fieldValues }, validationErrors };
@@ -863,6 +945,52 @@ export class HemoryDraftService {
         }
       }
     }
+  }
+
+  /**
+   * ONES Desk 必填字段契约（只读规则可见口）：返回三类工作项的规格表 + 实例部署类型判定规则；
+   * verify=true 时经 get_issue_fields 实时核对每个规格字段仍存在、必填、且内置选项 UUID 未失效。
+   * 大选项集（≥30 截断）无法证伪，只核对该字段存在与必填。
+   */
+  async deskFieldContract(verify = false): Promise<Record<string, unknown>> {
+    const contract = {
+      projectID: ONES_DESK_PROJECT_ID,
+      issueTypeIDs: ONES_DESK_ISSUE_TYPE_IDS,
+      deployment_rule: { field: '实例部署类型', rule: 'CRM 使用版本=公有云版→公有云，其余（含缺失）→私有云', source: 'CRM object_Umwnn__c.field_Q2L6p__c（使用版本）' },
+      classification_hints: ONES_DESK_CLASSIFICATION_HINTS,
+      types: Object.fromEntries((Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[]).map((type) => [type, {
+        label: ONES_DESK_TYPE_LABELS[type],
+        fields: ONES_DESK_FIELD_SPECS[type].map((spec) => ({ fieldID: spec.uuid, label: spec.label, defaultValue: spec.defaultValue ?? null,
+          member: spec.member === true, options: spec.options ?? null })),
+      }])),
+    };
+    if (!verify) return { ...contract, verification: { skipped: true } };
+    const tool = this.findReadTool('ones', /(get.*issue.*fields|issue.*fields|工作项.*字段)/i);
+    if (!tool) return { ...contract, verification: { error: '未找到 ONES 工作项字段查询工具（ONES MCP 未连接）' } };
+    const verification: Record<string, unknown> = {};
+    for (const type of Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[]) {
+      const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[type] });
+      const fields = response.isError ? null : parseOnesIssueFields(response.text);
+      if (!fields) {
+        verification[type] = { error: response.isError ? response.text.slice(0, 200) : '无法解析字段表' };
+        continue;
+      }
+      const byId = new Map(fields.map((field) => [field.uuid, field]));
+      const problems: string[] = [];
+      for (const spec of ONES_DESK_FIELD_SPECS[type]) {
+        const live = byId.get(spec.uuid);
+        if (!live) { problems.push(`${spec.label}(${spec.uuid}) 不在当前字段表中`); continue; }
+        if (!live.required) problems.push(`${spec.label}(${spec.uuid}) 在 ONES 端已不是必填`);
+        // 截断选项表（≥30）无法证伪；小选项集逐一核对内置 UUID 仍有效。
+        if (live.options.length && live.options.length < 30) {
+          const valid = new Set(live.options.map((option) => option.uuid));
+          const invalid = Object.entries(spec.options ?? {}).filter(([, uuid]) => !valid.has(uuid));
+          if (invalid.length) problems.push(`${spec.label}(${spec.uuid}) 内置选项 UUID 已失效: ${invalid.map(([label]) => label).join('、')}`);
+        }
+      }
+      verification[type] = problems.length ? { problems } : { ok: true };
+    }
+    return { ...contract, verification };
   }
 
   async preview(batchId: string, itemIds: string[]): Promise<DraftPreview> {

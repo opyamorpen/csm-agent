@@ -11,6 +11,8 @@ export interface CustomerContext {
   customer_manhour_issue_id?: string;
   recording_subject_id?: string;
   industry?: string;
+  /** CRM「使用版本」：公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版；ONES 实例部署类型按它判定。 */
+  usage_version?: string;
   scale?: string;
   stage?: string;
   health?: string;
@@ -27,6 +29,7 @@ const FIELDS: Array<keyof CustomerContext> = [
   'customer_manhour_issue_id',
   'recording_subject_id',
   'industry',
+  'usage_version',
   'scale',
   'stage',
   'health',
@@ -42,7 +45,7 @@ export const resolveCustomerTool: Tool = {
     '把已解析的客户身份与上下文以结构化形式提交，用于在界面上展示客户上下文卡。' +
     '可在读取到新信息后再次调用以增量更新（只覆盖非空字段）。' +
     '字段：customer_name 客户名称、crm_customer_id、ones_project、ones_customer_option_id、customer_manhour_issue_id、recording_subject_id、' +
-    'industry 行业、scale 规模、stage 当前阶段、health 健康度(红/黄/绿)、' +
+    'industry 行业、usage_version 使用版本（公有云版/私有部署按年订阅版/私有部署一次性授权版）、scale 规模、stage 当前阶段、health 健康度(红/黄/绿)、' +
     'renewal_status 续约状态、key_contacts 关键联系人、summary 最近跟进摘要。',
   parameters: Type.Object({
     customer_name: Type.Optional(Type.String()),
@@ -52,6 +55,7 @@ export const resolveCustomerTool: Tool = {
     customer_manhour_issue_id: Type.Optional(Type.String()),
     recording_subject_id: Type.Optional(Type.String()),
     industry: Type.Optional(Type.String()),
+    usage_version: Type.Optional(Type.String()),
     scale: Type.Optional(Type.String()),
     stage: Type.Optional(Type.String()),
     health: Type.Optional(Type.String()),

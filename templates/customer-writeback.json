@@ -44,11 +44,20 @@
     "fieldID": "JrvswW8P",
     "value": "当前客户的 ones_customer_option_id（按客户名称 field_n1qN0__c__r 或售后客户名称 field_83f4l__c 精确唯一解析）"
   },
-  "ones_minimal_required_arguments": {
+  "ones_required_arguments": {
     "projectID": "目标项目 ID",
     "issueTypeID": "目标工作项类型 ID",
     "summary": "标题",
-    "description": "Hemory 摘要",
-    "fieldValues": ["客户信息 JrvswW8P=当前客户 option ID"]
+    "description": "Hemory 摘要（写入 field016）",
+    "fieldValues": [
+      "客户信息 JrvswW8P=当前客户 option ID",
+      "其余全部必填规格字段的选项 UUID：新建前调用本地工具 get_ones_desk_required_fields 获取（get_issue_fields 选项列表截断，不可用于枚举）",
+      "实例部署类型 HS5u8PNB 按 CRM 使用版本判定：公有云版→公有云(Fzg8dBCT)，其余→私有云(KFewLptQ)"
+    ],
+    "per_type_required_fields": {
+      "suggestion": ["建议类型 PYbGEZmN", "实例部署类型 HS5u8PNB", "所属模块 field054", "优先级 field012"],
+      "ticket": ["环境类型 CATNfrrF", "实例部署类型 HS5u8PNB", "是否稳定复现 Su4v8xFs", "所属产品 field029"],
+      "operations": ["服务类目 KcwE8f1Y", "是否客户付费 M9vaUBPP", "运维工程师 TioFkeZn"]
+    }
   }
 }

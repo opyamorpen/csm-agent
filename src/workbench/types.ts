@@ -11,6 +11,8 @@ export interface CustomerInput {
   name: string;
   shortName?: string | null;
   industry?: string | null;
+  /** CRM「使用版本」（field_Q2L6p__c）：公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版。ONES 实例部署类型按它判定。 */
+  usageVersion?: string | null;
   csmName?: string | null;
   csmWecomUserid?: string | null;
   sourceObject?: string | null;

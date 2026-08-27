@@ -250,6 +250,7 @@
     ccFacts.innerHTML = '';
     const facts = [
       c.industry && ['行业', c.industry],
+      c.usage_version && ['使用版本', c.usage_version],
       c.scale && ['规模', c.scale],
       c.stage && ['阶段', c.stage],
       c.renewal_status && ['续约', c.renewal_status],
@@ -1388,7 +1389,7 @@
       ? meetings.map((event) => `- ${formatDateTime(event.occurredAt)} [${event.title}] ${event.payload?.summary || ''}\n${event.payload?.transcript || ''}`).join('\n')
       : '- 当前工作台没有已确认归属的会议片段；请使用 Hemory MCP 按客户全称检索，无法唯一归属时停止。';
     const config = target.projectId
-      ? `ONES projectID=${target.projectId}，issueTypeID=${target.issueTypeId}。新建前调用 get_issue_fields；fieldValues 必须包含 {"fieldID":"JrvswW8P","value":"${option?.external_id || ''}"}。`
+      ? `ONES projectID=${target.projectId}，issueTypeID=${target.issueTypeId}。新建前先调用本地工具 get_ones_desk_required_fields（record_type=${target.recordType}）获取必填字段与完整选项 UUID 表；fieldValues 必须覆盖全部必填规格字段并包含 {"fieldID":"JrvswW8P","value":"${option?.external_id || ''}"}；实例部署类型按返回的当前客户解析值填写（CRM 使用版本=公有云版→公有云，其余→私有云）；证据不足的字段用兜底值。`
       : targetKey === 'customer_manhour'
         ? `只能向已绑定售后客户工作项 issueID=${manhour?.externalId || ''} 登记工时；先调用 get_manhour_mode，再选择对应写工具。`
         : targetKey === 'followup'
@@ -1505,7 +1506,7 @@
 
     const summary = el('div', 'definition-grid');
     summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)),
-      definition('最后互动', formatDate(data.lastInteractionAt ?? c.lastContactAt)), definition('数据同步', formatDateTime(c.syncedAt)));
+      definition('使用版本', c.usageVersion || 'unknown'), definition('最后互动', formatDate(data.lastInteractionAt ?? c.lastContactAt)), definition('数据同步', formatDateTime(c.syncedAt)));
     customerOverview.append(summary);
 
     const opportunities = el('div', 'opportunity-grid');

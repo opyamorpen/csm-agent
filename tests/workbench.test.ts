@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { classifyDraftTypes, draftDisplayFields, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesRequiredFields, parseOnesIssueFields } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, classifyDraftTypes, draftDisplayFields, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 function withDb(fn: (db: WorkbenchDatabase) => void): void {
@@ -70,6 +70,17 @@ test('workbench: CRM CSM owner resolves from the owner employee field, not 客�
   // CSM 负责人 = 售后客户的「负责人」（owner，employee 显示值），不是客户经理也不是所属销售。
   assert.equal(input?.csmName, '赵荣泽');
   assert.equal(crmCustomer({ _id: 'crm-owner2', field_n1qN0__c__r: '无负责人客户' })?.csmName, null);
+});
+
+test('workbench: CRM usage version option values normalize to labels', () => {
+  // CRM query 返回单选字段的是选项 value（option1/Hox1iRI04/E4H2tH6o4），入库前规范化成 label。
+  assert.equal(crmCustomer({ _id: 'crm-uv1', field_n1qN0__c__r: '版本客户A', field_Q2L6p__c: 'option1' })?.usageVersion, '公有云版');
+  assert.equal(crmCustomer({ _id: 'crm-uv2', field_n1qN0__c__r: '版本客户B', field_Q2L6p__c: 'Hox1iRI04' })?.usageVersion, '私有部署按年订阅版');
+  assert.equal(crmCustomer({ _id: 'crm-uv3', field_n1qN0__c__r: '版本客户C', field_Q2L6p__c: 'E4H2tH6o4' })?.usageVersion, '私有部署一次性授权版');
+  // label 直传与未知 value 原样保留；缺失为 null。
+  assert.equal(crmCustomer({ _id: 'crm-uv4', field_n1qN0__c__r: '版本客户D', field_Q2L6p__c: '公有云版' })?.usageVersion, '公有云版');
+  assert.equal(crmCustomer({ _id: 'crm-uv5', field_n1qN0__c__r: '版本客户E', field_Q2L6p__c: 'future-value' })?.usageVersion, 'future-value');
+  assert.equal(crmCustomer({ _id: 'crm-uv6', field_n1qN0__c__r: '版本客户F' })?.usageVersion, null);
 });
 
 test('workbench: CRM followup event binds after-sales customer and keeps record create time', () => {
@@ -855,8 +866,59 @@ test('workbench: ONES work-item drafts carry minimal required arguments with opt
     const fields = draftDisplayFields(db, suggestion, customer);
     assert.deepEqual(fields.map((field) => field.label), ['所属项目', '工作项类型', '标题', '客户信息', '建议类型', '实例部署类型', '所属模块', '优先级', '描述']);
     assert.equal(fields.find((field) => field.key === 'customer')!.value, '客户欧');
-    // 无 AI 提案的建议草稿：必填项展示为待补充（无默认值类型），预检会拦截。
-    assert.equal(fields.find((field) => field.key === 'PYbGEZmN')!.value, '待补充');
+    // 无 AI 提案的建议草稿：全部必填项都有兜底值（零缺失契约），预检不因缺项拦截。
+    assert.equal(fields.find((field) => field.key === 'PYbGEZmN')!.value, '新需求');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: ONES drafts apply deployment type from CRM usage version over model proposals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-ones-deploy-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 公有云版客户：模型即使提案私有云（或漏提），fieldValues 也要覆盖为公有云 UUID。
+    db.upsertCustomer({ id: 'crm-cloud', name: '客户云', sourceObject: 'object_Umwnn__c', usageVersion: '公有云版' });
+    db.upsertIdentity('crm-cloud', 'ones_customer_option', 'opt-cloud', '客户云', 'confirmed');
+    const event = db.upsertSourceEvent({ customerId: 'crm-cloud', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r30:t1:x',
+      title: '客户反馈需求', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r30', speaker: 'CSM', transcript: '客户希望支持批量导出的需求' }, attributionStatus: 'confirmed' });
+    const mcp = fakeOnesMcp();
+    const service = new HemoryDraftService(db, mcp);
+    const queued = service.enqueue('crm-cloud', [event.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-cloud')[0];
+    const suggestion = batch.items!.find((item) => item.type === 'suggestion')!;
+    const sugValues = suggestion.targetArguments.fieldValues as Array<Record<string, string>>;
+    assert.ok(sugValues.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'Fzg8dBCT'), '公有云版客户→公有云 UUID');
+    // 零缺失：无模型提案时建议草稿的全部规格字段都有值（兜底 + 覆盖）。
+    for (const fieldID of ['PYbGEZmN', 'HS5u8PNB', 'field054', 'field012']) {
+      assert.ok(sugValues.some((value) => value.fieldID === fieldID && value.value), `${fieldID} 必填项有值`);
+    }
+    const preview = await service.preview(batch.id, [suggestion.id]);
+    assert.equal(preview.items[0].validationErrors.length, 0);
+    // 私有部署客户：覆盖为私有云。
+    db.upsertCustomer({ id: 'crm-priv', name: '客户私', sourceObject: 'object_Umwnn__c', usageVersion: '私有部署按年订阅版' });
+    db.upsertIdentity('crm-priv', 'ones_customer_option', 'opt-priv', '客户私', 'confirmed');
+    const privEvent = db.upsertSourceEvent({ customerId: 'crm-priv', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r31:t1:x',
+      title: '客户报错工单', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r31', speaker: 'CSM', transcript: '客户遇到一个报错工单无法使用', summary: '客户反馈线上报错工单无法使用' }, attributionStatus: 'confirmed' });
+    const queuedPriv = service.enqueue('crm-priv', [privEvent.id]);
+    await waitDraftJob(db, queuedPriv[0].jobId);
+    const privBatch = db.listDraftBatches('crm-priv')[0];
+    const ticket = privBatch.items!.find((item) => item.type === 'ticket')!;
+    const ticketValues = ticket.targetArguments.fieldValues as Array<Record<string, string>>;
+    assert.ok(ticketValues.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'KFewLptQ'), '私有部署客户→私有云 UUID');
+    // 未同步使用版本的旧客户：按私有云兜底。
+    db.upsertCustomer({ id: 'crm-old', name: '客户旧', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-old', 'ones_customer_option', 'opt-old', '客户旧', 'confirmed');
+    const oldEvent = db.upsertSourceEvent({ customerId: 'crm-old', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r32:t1:x',
+      title: '客户反馈需求', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r32', speaker: 'CSM', transcript: '客户希望支持批量导出的需求' }, attributionStatus: 'confirmed' });
+    const queuedOld = service.enqueue('crm-old', [oldEvent.id]);
+    await waitDraftJob(db, queuedOld[0].jobId);
+    const oldBatch = db.listDraftBatches('crm-old')[0];
+    const oldSuggestion = oldBatch.items!.find((item) => item.type === 'suggestion')!;
+    const oldValues = oldSuggestion.targetArguments.fieldValues as Array<Record<string, string>>;
+    assert.ok(oldValues.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'KFewLptQ'), '未同步使用版本→私有云兜底');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1128,6 +1190,65 @@ test('workbench: mapOnesDeskRequiredFields maps proposals and applies business d
   // 工单：所属产品名映射；成员字段允许 8 位 UUID 直填。
   assert.ok(mapOnesDeskRequiredFields('ticket', { '所属产品': 'Desk 工单管理' }).some((value) => value.fieldID === 'field029' && value.value === 'FFpmuURAFJfgSqQ1'));
   assert.ok(mapOnesDeskRequiredFields('operations', { '运维工程师': 'abcd1234' }).some((value) => value.fieldID === 'TioFkeZn' && value.value === 'abcd1234'));
+});
+
+test('workbench: desk required fields never miss — defaults cover module/product, fuzzy labels resolve', () => {
+  // 零缺失保证：suggestion/ticket 全缺省时每个规格字段都有兜底值。
+  const sug = mapOnesDeskRequiredFields('suggestion', undefined);
+  assert.deepEqual(sug.map((value) => value.fieldID).sort(), ['HS5u8PNB', 'PYbGEZmN', 'field012', 'field054']);
+  assert.ok(sug.some((value) => value.fieldID === 'field054' && value.value === 'RbrMxh1n'), '所属模块兜底=功能扩展');
+  assert.ok(sug.some((value) => value.fieldID === 'field012' && value.value === 'Lv5Tbmih'), '优先级兜底=P2');
+  const ticket = mapOnesDeskRequiredFields('ticket', undefined);
+  assert.ok(ticket.some((value) => value.fieldID === 'field029' && value.value === 'KuZfE9scKYpijpKk'), '所属产品兜底=Core 基础平台能力');
+  assert.ok(ticket.some((value) => value.fieldID === 'CATNfrrF' && value.value === 'JuTTumjJ'), '环境类型兜底=PRD');
+  assert.ok(ticket.some((value) => value.fieldID === 'Su4v8xFs' && value.value === 'SyPTtJdW'), '是否稳定复现兜底=偶现');
+  // 模糊匹配纠偏：近似 label（模型输出「工时管理」而选项是「工时管理（登记工时&预估工时）」）唯一命中。
+  assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '工时管理' }).some((value) => value.fieldID === 'field054' && value.value === 'AC5rA1w8'));
+  // 模糊匹配歧义（「甘特图」同时命中多个甘特图类选项）时回退兜底，不猜。
+  const ambiguous = mapOnesDeskRequiredFields('suggestion', { '所属模块': '甘特图' });
+  assert.ok(ambiguous.some((value) => value.fieldID === 'field054' && value.value === 'RbrMxh1n'), '歧义 label 回退兜底=功能扩展');
+});
+
+test('workbench: deployment type resolves from CRM usage version deterministically', () => {
+  // label 与 CRM 选项 value 两种表示都接受（CRM query 返回的是 value）。
+  assert.equal(resolveDeploymentType('公有云版'), '公有云');
+  assert.equal(resolveDeploymentType('option1'), '公有云');
+  assert.equal(resolveDeploymentType('私有部署按年订阅版'), '私有云');
+  assert.equal(resolveDeploymentType('Hox1iRI04'), '私有云');
+  assert.equal(resolveDeploymentType('私有部署一次性授权版'), '私有云');
+  assert.equal(resolveDeploymentType('E4H2tH6o4'), '私有云');
+  assert.equal(resolveDeploymentType(null), '私有云');
+  assert.equal(resolveDeploymentType(undefined), '私有云');
+  assert.equal(resolveDeploymentType(''), '私有云');
+  // 覆盖值：建议/工单都有部署类型覆盖，公有云版解析为公有云 UUID。
+  assert.deepEqual(applyDeploymentTypeOverride('suggestion', '公有云版'), [{ fieldID: 'HS5u8PNB', value: 'Fzg8dBCT' }]);
+  assert.deepEqual(applyDeploymentTypeOverride('suggestion', 'option1'), [{ fieldID: 'HS5u8PNB', value: 'Fzg8dBCT' }]);
+  assert.deepEqual(applyDeploymentTypeOverride('ticket', '私有部署按年订阅版'), [{ fieldID: 'HS5u8PNB', value: 'KFewLptQ' }]);
+  assert.deepEqual(applyDeploymentTypeOverride('ticket', 'Hox1iRI04'), [{ fieldID: 'HS5u8PNB', value: 'KFewLptQ' }]);
+  assert.deepEqual(applyDeploymentTypeOverride('ticket', null), [{ fieldID: 'HS5u8PNB', value: 'KFewLptQ' }]);
+  // 运维工单没有实例部署类型字段，无覆盖。
+  assert.deepEqual(applyDeploymentTypeOverride('operations', '公有云版'), []);
+});
+
+test('workbench: missingOnesDeskSpecFields gates the approval of agent-session drafts', () => {
+  // 完整 fieldValues（客户信息 + 4 个规格字段）→ 无缺失。
+  const full = [
+    { fieldID: 'JrvswW8P', value: 'opt1' },
+    { fieldID: 'PYbGEZmN', value: '5qUVAY7m' },
+    { fieldID: 'HS5u8PNB', value: 'Fzg8dBCT' },
+    { fieldID: 'field054', value: 'RbrMxh1n' },
+    { fieldID: 'field012', value: 'Lv5Tbmih' },
+  ];
+  assert.deepEqual(missingOnesDeskSpecFields('suggestion', full), []);
+  // 缺所属模块与优先级 → 报这两个字段。
+  const partial = full.filter((value) => value.fieldID !== 'field054' && value.fieldID !== 'field012');
+  assert.deepEqual(missingOnesDeskSpecFields('suggestion', partial).map((spec) => spec.label), ['所属模块', '优先级']);
+  // 空值视为缺失（value 为空字符串）。
+  assert.ok(missingOnesDeskSpecFields('suggestion', [...full.slice(0, 2), { fieldID: 'field054', value: '' }]).some((spec) => spec.uuid === 'field054'));
+  // 非 ONES Desk 类型（followup/workhour/case/未知）不校验。
+  assert.deepEqual(missingOnesDeskSpecFields('followup', []), []);
+  assert.deepEqual(missingOnesDeskSpecFields('case', []), []);
+  assert.deepEqual(missingOnesDeskSpecFields('unknown-type', []), []);
 });
 
 test('workbench: parseOnesManhourMode tolerates ONES status envelopes', () => {

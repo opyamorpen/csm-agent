@@ -73,6 +73,7 @@ csm-agent draft regenerate <批次ID>
 csm-agent service install 3210
 csm-agent service status
 csm-agent service logs
+csm-agent ones fields [--verify] # ONES Desk 必填字段契约：选项 UUID 表、兜底值、实例部署类型规则
 csm-agent agent <CRM客户ID> "基于会议生成工单草稿"
 csm-agent agent <CRM客户ID> "结合已同步数据与最近三个月公开动态分析续约风险和增购机会"
 csm-agent sessions [list] [--all] # 会话列表；--all 含已归档
@@ -98,7 +99,9 @@ ONES 当前租户按以下字段契约同步：
 
 五类工作项统一使用「客户信息」字段 `JrvswW8P`。客户主名称是 CRM「客户名称」引用字段（`field_n1qN0__c__r`，客户全称），「售后客户名称」（`field_83f4l__c`，常为简称）作为次级名称；同步按两个名称分别精确唯一解析该字段的 option ID，仍歧义或缺失的保持未归属，标题模糊匹配不作为自动归属依据。
 
-Hemory 草稿确认视图按最小必填项结构化展示（服务端 `displayFields`，Web 与 CLI 共用）：ONES 需求/工单/运维工单草稿展示所属项目、工作项类型、标题、客户信息（含 ONES 选项名）、描述（Hemory 摘要），预检会通过 `get_issue_fields` 核对其余必填字段并给出明确校验错误；`draft review` 默认逐行结构化输出，`--json` 保留原始 JSON。
+Hemory 草稿确认视图按最小必填项结构化展示（服务端 `displayFields`，Web 与 CLI 共用）：ONES 需求/工单/运维工单草稿展示所属项目、工作项类型、标题、客户信息（含 ONES 选项名）、必填项（含 所属模块/所属产品 等，选项 UUID 反解为名称）、描述（Hemory 摘要）；`draft review` 默认逐行结构化输出，`--json` 保留原始 JSON。
+
+ONES Desk 三类工作项（建议和反馈/工单/运维工单）的人工必填字段契约内置在 `src/workbench/drafts.ts`（`ONES_DESK_FIELD_SPECS`，2026-08-27 经 ONES 实测核验）：除标题/项目/类型/客户信息/描述外的全部规格字段（建议的所属模块、工单的所属产品、实例部署类型、优先级等）都会自动填入 fieldValues——证据不足时用兜底值（所属模块→功能扩展、所属产品→Core 基础平台能力、优先级→P2 等），草稿不出现必填项缺失。实例部署类型按 CRM「使用版本」（`field_Q2L6p__c`）确定性判定：公有云版→公有云，其余（含未同步）→私有云，模型提案不参与。交互式 Agent 会话用本地工具 `get_ones_desk_required_fields` 获取同一契约（`get_issue_fields` 的选项列表被截断且部分 UUID 无效，不能用于枚举选项），批准门校验规格字段齐备与部署类型一致。内置规则只读可见：`GET /api/ones-desk-fields` 与 `csm-agent ones fields [--verify]`（`--verify` 经 `get_issue_fields` 实时核对选项 UUID 漂移）。
 
 ## 本地配置
 

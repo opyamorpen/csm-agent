@@ -6,6 +6,7 @@ import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
 import { customerProfileTool, customerEventsTool } from './tools/workbench.js';
 import { webSearchTool, recordWebIntelligenceTool } from './tools/websearch.js';
+import { onesDeskFieldsTool } from './tools/onesdesk.js';
 import { buildSystemPrompt, type ToolSummary } from './prompt.js';
 
 export interface Runtime {
@@ -46,7 +47,7 @@ function resolveModel(models: Models, cfg: LlmConfig): Model<any> {
 
 /** Local (non-MCP) tools available to every session. */
 export function localTools(): Tool[] {
-  return [confirmWriteTool, resolveCustomerTool, customerProfileTool, customerEventsTool, webSearchTool, recordWebIntelligenceTool];
+  return [confirmWriteTool, resolveCustomerTool, customerProfileTool, customerEventsTool, webSearchTool, recordWebIntelligenceTool, onesDeskFieldsTool];
 }
 
 /**

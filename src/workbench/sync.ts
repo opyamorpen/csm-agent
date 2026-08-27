@@ -14,6 +14,9 @@ const CRM_FIELDS = {
   // 售后客户名称是手填文本字段，常为简称（如「华大九天」），只作次级名称。
   shortName: 'field_83f4l__c',
   industry: 'field_OL1jQ__c',
+  // 使用版本（单选）：公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版；ONES 实例部署类型按它判定。
+  // CRM 返回的是选项 value（option1/Hox1iRI04/E4H2tH6o4），入库前规范化成 label。
+  usageVersion: 'field_Q2L6p__c',
   // CSM 负责人 = 售后客户的「负责人」字段（owner，employee，显示值 owner__r/name）；
   // field_M1uu5__c 是「客户经理」，field_c2pNm__c 是「所属销售」，都不是负责人。
   csm: 'owner',
@@ -33,13 +36,25 @@ const CRM_FIELDS = {
 } as const;
 
 const CRM_SELECT_FIELDS = [
-  CRM_FIELDS.id, CRM_FIELDS.name, CRM_FIELDS.nameReferenceId, CRM_FIELDS.shortName, CRM_FIELDS.industry, CRM_FIELDS.csm,
+  CRM_FIELDS.id, CRM_FIELDS.name, CRM_FIELDS.nameReferenceId, CRM_FIELDS.shortName, CRM_FIELDS.industry, CRM_FIELDS.usageVersion, CRM_FIELDS.csm,
   CRM_FIELDS.renewalDate, CRM_FIELDS.contractValue, CRM_FIELDS.contractValueFallback, CRM_FIELDS.products,
   CRM_FIELDS.lastContactAt, CRM_FIELDS.lastFollowup, CRM_FIELDS.lifeStatus, CRM_FIELDS.stageValue,
   CRM_FIELDS.specialRenewalTerms, CRM_FIELDS.customerNeeds, CRM_FIELDS.updatedAt, CRM_FIELDS.pageCursor,
 ];
 const CRM_OBJECT = 'object_Umwnn__c';
 const CRM_LOST_STAGE_VALUE = '052JwwdZ4';
+
+/** 使用版本选项 value → label（describe 实测）；未知 value 原样保留，缺失返回 null。 */
+const CRM_USAGE_VERSION_LABELS: Record<string, string> = {
+  option1: '公有云版',
+  Hox1iRI04: '私有部署按年订阅版',
+  E4H2tH6o4: '私有部署一次性授权版',
+};
+
+export function normalizeUsageVersion(value: string | null): string | null {
+  const text = value?.trim();
+  return text ? CRM_USAGE_VERSION_LABELS[text] ?? text : null;
+}
 
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 const ONES_WEB_BASE_URL = (process.env.ONES_WEB_BASE_URL ?? 'https://our.ones.pro').replace(/\/$/, '');
@@ -290,6 +305,7 @@ export function crmCustomer(record: Record<string, unknown>): Parameters<Workben
     sourceObject: CRM_OBJECT,
     shortName: asText(record[CRM_FIELDS.shortName]),
     industry: asText(record[CRM_FIELDS.industry]),
+    usageVersion: normalizeUsageVersion(asText(record[CRM_FIELDS.usageVersion])),
     csmName: relatedName(record, CRM_FIELDS.csm),
     renewalDate: asDate(record[CRM_FIELDS.renewalDate]),
     contractValue: asNumber(record[CRM_FIELDS.contractValue] ?? record[CRM_FIELDS.contractValueFallback]),

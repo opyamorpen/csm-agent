@@ -58,8 +58,9 @@ const CLI_CAPABILITIES = [
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
+  { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
   { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
-  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'web_search', 'record_web_intelligence'] },
+  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
   { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
@@ -128,6 +129,10 @@ function help(): void {
   csm-agent draft regenerate <批次ID>
   csm-agent service install [端口]
   csm-agent service status|restart|uninstall|logs
+  csm-agent ones fields [--verify] [--json]
+    （ONES Desk 建议/工单/运维工单必填字段契约：选项 UUID 表、兜底值、
+     实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
+     --verify 经 get_issue_fields 实时核对选项 UUID 漂移）
   csm-agent wecom
   csm-agent agent <客户ID或名称> <指令>
     （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
@@ -666,6 +671,38 @@ async function setSessionArchived(sessionId: string, archived: boolean): Promise
   print(result);
 }
 
+/** csm-agent ones fields [--verify]：ONES Desk 必填字段契约（选项 UUID 表 + 兜底值 + 部署类型规则）。 */
+async function showOnesDeskFields(verify: boolean): Promise<void> {
+  const body = await request<any>(`/api/ones-desk-fields${verify ? '?verify=1' : ''}`);
+  if (jsonOutput) return print(body);
+  console.log(`ONES Desk（projectID=${body.projectID}）`);
+  console.log(`实例部署类型规则: ${body.deployment_rule.rule}（来源: ${body.deployment_rule.source}）`);
+  for (const [type, detail] of Object.entries<any>(body.types ?? {})) {
+    console.log(`\n${detail.label}（issueTypeID=${body.issueTypeIDs?.[type] ?? 'unknown'}）`);
+    console.table((detail.fields ?? []).map((field: any) => ({
+      fieldID: field.fieldID,
+      label: field.label,
+      兜底值: field.defaultValue ?? '无',
+      选项数: field.options ? Object.keys(field.options).length : (field.member ? '成员' : 0),
+    })));
+    for (const field of detail.fields ?? []) {
+      if (field.options) {
+        const entries = Object.entries<string>(field.options);
+        console.log(`  ${field.label} 选项 (${entries.length}):`);
+        for (const [label, uuid] of entries) console.log(`    ${label} = ${uuid}`);
+      }
+    }
+    const verifyResult = body.verification?.[type];
+    if (verify) {
+      if (!verifyResult) console.log('  实时核对: 未执行');
+      else if (verifyResult.ok) console.log('  实时核对: 通过（字段存在、必填、内置选项 UUID 有效）');
+      else if (verifyResult.error) console.log(`  实时核对失败: ${verifyResult.error}`);
+      else if (verifyResult.problems) console.log(`  实时核对发现问题:\n    ${verifyResult.problems.join('\n    ')}`);
+    }
+  }
+  if (!verify) console.log('\n（加 --verify 经 get_issue_fields 实时核对选项 UUID 漂移）');
+}
+
 async function sessionsCommand(subcommand: string, values: string[], rawArgs: string[]): Promise<void> {
   if (subcommand === 'list') return showSessions(rawArgs);
   if (subcommand === 'show') {
@@ -713,6 +750,11 @@ async function main(): Promise<void> {
   if (command === 'draft') return draftCommand(args.shift() ?? '', args);
   if (command === 'service') return serviceCommand(args.shift() ?? 'status', args);
   if (command === 'sessions') return sessionsCommand(args.shift() ?? 'list', args, rawArgs);
+  if (command === 'ones') {
+    const sub = args.shift() ?? '';
+    if (sub === 'fields') return showOnesDeskFields(rawArgs.includes('--verify'));
+    throw new Error('ones 子命令只允许 fields');
+  }
   if (command === 'wecom') return print(await request('/api/wecom/status'));
   if (command === 'agent') {
     const customer = args.shift() ?? '';

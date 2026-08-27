@@ -107,6 +107,7 @@ function customerFromRow(row: Row): Customer {
     name: String(row.name),
     shortName: row.short_name as string | null,
     industry: row.industry as string | null,
+    usageVersion: row.usage_version as string | null,
     csmName: row.csm_name as string | null,
     csmWecomUserid: row.csm_wecom_userid as string | null,
     sourceObject: row.source_object as string | null,
@@ -499,6 +500,9 @@ export class WorkbenchDatabase {
     if (!customerColumns.some((column) => String(column.name) === 'source_object')) {
       this.db.exec('ALTER TABLE customers ADD COLUMN source_object TEXT;');
     }
+    if (!customerColumns.some((column) => String(column.name) === 'usage_version')) {
+      this.db.exec('ALTER TABLE customers ADD COLUMN usage_version TEXT;');
+    }
     this.db.exec(`
       UPDATE source_events
       SET occurred_at = json_extract(payload_json, '$.field009')
@@ -540,12 +544,12 @@ export class WorkbenchDatabase {
     const previous = this.getCustomer(input.id);
     this.db.prepare(`
       INSERT INTO customers (
-        id,name,short_name,industry,csm_name,csm_wecom_userid,source_object,after_sales_stage,renewal_date,contract_value,contract_status,
+        id,name,short_name,industry,usage_version,csm_name,csm_wecom_userid,source_object,after_sales_stage,renewal_date,contract_value,contract_status,
         products_json,last_contact_at,support_open_count,support_blocked_count,voice_risk,explicit_nonrenewal,
         next_action,next_action_due,crm_url,health,synced_at,source_json,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, short_name=excluded.short_name, industry=excluded.industry,
+        name=excluded.name, short_name=excluded.short_name, industry=excluded.industry, usage_version=excluded.usage_version,
         csm_name=excluded.csm_name, csm_wecom_userid=COALESCE(excluded.csm_wecom_userid,customers.csm_wecom_userid),
         source_object=excluded.source_object,
         after_sales_stage=excluded.after_sales_stage,
@@ -559,7 +563,7 @@ export class WorkbenchDatabase {
         next_action_due=COALESCE(excluded.next_action_due,customers.next_action_due),
         crm_url=excluded.crm_url, synced_at=excluded.synced_at, source_json=excluded.source_json, updated_at=excluded.updated_at
     `).run(
-      input.id, input.name, input.shortName ?? null, input.industry ?? null, input.csmName ?? null,
+      input.id, input.name, input.shortName ?? null, input.industry ?? null, input.usageVersion ?? null, input.csmName ?? null,
       input.csmWecomUserid ?? null, input.sourceObject ?? 'object_Umwnn__c', normalizeAfterSalesStage(input.afterSalesStage), input.renewalDate ?? null, input.contractValue ?? null, input.contractStatus ?? null,
       json(input.products ?? []), input.lastContactAt ?? null, input.supportOpenCount ?? null, input.supportBlockedCount ?? null,
       input.voiceRisk == null ? null : Number(input.voiceRisk), input.explicitNonrenewal == null ? null : Number(input.explicitNonrenewal),
