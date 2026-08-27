@@ -10,7 +10,7 @@
 - 增购机会：只在非高风险客户中展示至少两个独立证据支持的假设。
 - 客户案例：固定模板成稿，CSM 编辑并确认后写入 ONES Wiki。
 - 企业微信待办：CSM 确认行动后生成一次性 H5 意图，在企业微信原生面板完成平台确认并保存 `todoId`。
-- Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_profile` / `get_customer_events` 直接读工作台已同步数据（本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。会话支持「分享」（一键复制全文：对话 + 工具轨迹，Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
+- Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_profile` / `get_customer_events` 直接读工作台已同步数据（本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。会话支持「分享」（一键复制全文：标题、客户绑定、时间范围与完整对话；Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
 - 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看；建议/工单/运维三个 ONES 工作项列表只展示语义化 ID（`display_id`）、标题、状态、创建时间，标题可点击进入工作项详情，并默认按创建时间倒序。工时页同时展示总工时和登记明细（登记人、工时日期、登记小时、工时描述），明细默认按工时日期倒序。
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
 - Hemory 收件箱：每天中国时间 13:00/20:00 通过 MCP 拉取当天完整逐句转写，按录音持久化后由当前 Agent 大模型整理为话题、摘要和连续证据片段；唯一客户名称自动归属，其他片段由 CSM 在 Agent 页面批量标记。
@@ -76,7 +76,7 @@ csm-agent service logs
 csm-agent agent <CRM客户ID> "基于会议生成工单草稿"
 csm-agent agent <CRM客户ID> "结合已同步数据与最近三个月公开动态分析续约风险和增购机会"
 csm-agent sessions [list] [--all] # 会话列表；--all 含已归档
-csm-agent sessions show <会话ID> # 导出会话全文（对话 + 工具轨迹）
+csm-agent sessions show <会话ID> # 导出会话全文（标题 + 客户 + 时间 + 对话）
 csm-agent sessions archive <会话ID> # 归档：从列表隐藏，可恢复
 csm-agent sessions unarchive <会话ID>
 csm-agent api GET /api/customers

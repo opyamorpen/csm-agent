@@ -27,37 +27,24 @@ test('transcript: unbound sessions show 未绑定客户 and fallback title', () 
   assert.match(text, /客户：未绑定客户/);
 });
 
-test('transcript: renders dialogue and tool traces with clipping', () => {
-  const longResult = 'x'.repeat(600);
+test('transcript: renders dialogue only, tool traces are excluded from sharing', () => {
   const text = formatSessionTranscript(session({
     events: [
       { seq: 1, event: { type: 'user', text: '整理本周跟进' } },
       { seq: 2, event: { type: 'turn_start' } },
       { seq: 3, event: { type: 'tool_call', name: 'get_customer_profile', arguments: { customer_id: 'cust_1' } } },
-      { seq: 4, event: { type: 'tool_result', name: 'get_customer_profile', result: longResult } },
+      { seq: 4, event: { type: 'tool_result', name: 'get_customer_profile', result: 'x'.repeat(600) } },
       { seq: 5, event: { type: 'text', text: '已整理完成' } },
       { seq: 6, event: { type: 'turn_end' } },
     ],
   }));
   assert.match(text, /用户：整理本周跟进/);
   assert.match(text, /助手：已整理完成/);
-  assert.match(text, /\[调用工具\] get_customer_profile \{"customer_id":"cust_1"\}/);
-  assert.match(text, new RegExp(`\\[工具结果\\] get_customer_profile: x{500}…`));
-  // turn 标记不进入分享文本。
+  // 工具轨迹（调用/结果）与 turn 标记都不进入分享文本。
+  assert.doesNotMatch(text, /get_customer_profile/);
+  assert.doesNotMatch(text, /调用工具/);
+  assert.doesNotMatch(text, /工具结果/);
   assert.doesNotMatch(text, /turn_start|turn_end/);
-});
-
-test('transcript: tool args clip at 200 chars and confirm_write result is skipped', () => {
-  const text = formatSessionTranscript(session({
-    events: [
-      { seq: 1, event: { type: 'tool_call', name: 'create_new_issue', arguments: { description: 'y'.repeat(300) } } },
-      { seq: 2, event: { type: 'tool_result', name: 'confirm_write', result: 'APPROVED' } },
-    ],
-  }));
-  // JSON 前缀 {"description":" 占 16 字符，200 字截断后保留 184 个 y。
-  assert.match(text, /\[调用工具\] create_new_issue \{"description":"y{184}…/);
-  assert.doesNotMatch(text, /y{185}/);
-  assert.doesNotMatch(text, /confirm_write/);
 });
 
 test('transcript: confirm drafts render target system and tool', () => {

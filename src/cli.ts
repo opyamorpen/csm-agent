@@ -135,7 +135,7 @@ function help(): void {
      落库 record_web_intelligence）
   csm-agent sessions [list] [--all] [--json]
   csm-agent sessions show <会话ID> [--json]
-    （导出会话全文：对话 + 工具轨迹，与网页「分享」同源）
+    （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）
   csm-agent sessions archive|unarchive <会话ID>
     （归档后会话从列表隐藏；--all 或网页「已归档」区可查看并恢复）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
