@@ -26,7 +26,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'wecom', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/:id/complete')));
@@ -37,6 +37,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/resegment')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
+  assert.ok(capabilities.some((item) => item.workflow === 'runtime-config' && item.api.includes('PUT /api/config/llm')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/export')));
 });

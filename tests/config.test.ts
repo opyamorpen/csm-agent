@@ -46,6 +46,40 @@ test('global CLI config is persisted under the writable data directory', () => {
   }
 });
 
+test('custom LLM config round-trips baseUrl; other providers drop it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-agent-config-'));
+  const previousDataDir = process.env.CSM_DATA_DIR;
+  const previousConfigDir = process.env.CSM_CONFIG_DIR;
+  try {
+    process.env.CSM_DATA_DIR = dir;
+    delete process.env.CSM_CONFIG_DIR;
+
+    saveLlmConfig({ provider: 'custom', model: 'ucloud-qwen3.8-max', apiKeyEnv: 'CSM_CUSTOM_API_KEY', baseUrl: 'https://relay.ones.pro/v1/', apiKey: 'sk-test' });
+    const custom = loadLlmConfig();
+    assert.equal(custom.provider, 'custom');
+    assert.equal(custom.model, 'ucloud-qwen3.8-max');
+    assert.equal(custom.baseUrl, 'https://relay.ones.pro/v1');
+    assert.equal(custom.apiKeyEnv, 'CSM_CUSTOM_API_KEY');
+    assert.equal(custom.apiKey, 'sk-test');
+
+    saveLlmConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', apiKeyEnv: 'DEEPSEEK_API_KEY', baseUrl: 'https://ignored.example/v1' });
+    const builtin = loadLlmConfig();
+    assert.equal(builtin.provider, 'deepseek');
+    assert.equal(builtin.baseUrl, undefined);
+
+    // 残缺的 custom 配置（手改 YAML 丢字段）回退默认 provider，保证服务可启动。
+    saveLlmConfig({ provider: 'custom', model: '', apiKeyEnv: 'CSM_CUSTOM_API_KEY' });
+    const incomplete = loadLlmConfig();
+    assert.equal(incomplete.provider, 'deepseek');
+  } finally {
+    if (previousDataDir === undefined) delete process.env.CSM_DATA_DIR;
+    else process.env.CSM_DATA_DIR = previousDataDir;
+    if (previousConfigDir === undefined) delete process.env.CSM_CONFIG_DIR;
+    else process.env.CSM_CONFIG_DIR = previousConfigDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('toPublicName: namespaced and sanitized', () => {
   assert.equal(toPublicName('crm', 'search customer'), 'mcp__crm__search_customer');
   assert.equal(toPublicName('recording', 'get.transcript'), 'mcp__recording__get_transcript');

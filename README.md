@@ -107,7 +107,7 @@ ONES Desk 三类工作项（建议和反馈/工单/运维工单）的人工必�
 ## 本地配置
 
 - `~/.csm-agent/config/mcp.user.yaml`：界面或全局 CLI 服务保存的 MCP 服务器配置。
-- `~/.csm-agent/config/llm.user.yaml`：界面或全局 CLI 服务保存的模型配置。
+- `~/.csm-agent/config/llm.user.yaml`：界面或全局 CLI 服务保存的模型配置。除内置服务商（DeepSeek/OpenAI/Anthropic/Moonshot/Groq）外，支持「自定义（OpenAI 兼容）」服务商：在「设置」页填 Base URL + 模型 + API Key 即可接入任意 OpenAI 兼容端点（如 `https://relay.ones.pro/v1` + `ucloud-qwen3.8-max`）。CLI 同口径：`csm-agent config llm` 查看、`csm-agent config llm set --provider=custom --model=<模型> --base-url=<端点> --api-key=<key>` 切换；保存前服务端会向端点发一次真实流式请求验证连通，失败不落盘。API Key 只写入本地配置文件（0600），查询接口只返回是否已配置。
 - `~/.csm-agent/config/search.user.yaml`：联网搜索（Tavily）配置，也可在「设置」页填写或用环境变量 `TAVILY_API_KEY`。未配置 key 时 `web_search` 自动走免费匿名搜索层（Exa/Parallel/Tavily/Firecrawl/Keenable 五家轮换、限流自动切换下一家，匿名请求不带用户身份；`keylessFallback: false` 可停用）；配置 key 后优先走 Tavily 并支持严格时间窗过滤。`GET /api/config/search` 与 `csm-agent doctor` 只返回 key 是否已配置，不返回 key 本身。
 - `~/.csm-agent/.env` 或当前目录 `.env`：凭据和部署变量；可用 `CSM_ENV_FILE` 显式指定。
 - `CSM_CONFIG_DIR`：单独覆盖可写配置目录；`CSM_DATA_DIR` 同时决定默认数据目录和默认配置目录。

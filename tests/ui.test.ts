@@ -344,3 +344,26 @@ test('settings modal exposes Tavily web search configuration', () => {
   assert.match(source, /\/api\/config\/search/);
   assert.ok(source.includes("searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选，不填走免费匿名通道）'"));
 });
+
+test('settings modal exposes custom OpenAI-compatible endpoint configuration', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  // 显示契约：设置页支持自定义 OpenAI 兼容端点（Base URL 输入框仅 custom 服务商可见，
+  // 加载回填 baseUrl，保存 payload 只在 custom 时携带 baseUrl）。
+  assert.match(html, /id="llmBaseUrlRow"/);
+  assert.match(html, /id="llmBaseUrl"/);
+  assert.match(html, /OpenAI 兼容端点/);
+  const boot = source.match(/const PROVIDERS = \[[\s\S]*?\n  \];/)?.[0];
+  assert.ok(boot, 'PROVIDERS list was not found');
+  assert.match(boot, /\['custom', '自定义（OpenAI 兼容）'\]/);
+  const sync = source.match(/function syncLlmProviderUi[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(sync, 'syncLlmProviderUi source was not found');
+  assert.match(sync, /llmProvider\.value === 'custom'/);
+  assert.match(sync, /llmBaseUrlRow\.classList\.toggle\('hidden', !isCustom\)/);
+  const loader = source.match(/async function loadLlmConfigUI[\s\S]*?\n  }\n\n  async function loadSearchConfigUI/)?.[0];
+  assert.ok(loader, 'loadLlmConfigUI source was not found');
+  assert.match(loader, /llmBaseUrl\.value = data\.baseUrl \|\| ''/);
+  const saver = source.match(/saveConfigBtn\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(saver, 'saveConfigBtn handler was not found');
+  assert.match(saver, /if \(llmPayload\.provider === 'custom'\) llmPayload\.baseUrl = llmBaseUrl\.value\.trim\(\)/);
+});

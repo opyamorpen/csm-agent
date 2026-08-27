@@ -1,6 +1,7 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Model, Models, Tool } from '@earendil-works/pi-ai';
 import { loadDotEnv, loadLlmConfig, saveLlmConfig, providerFor, type McpServerConfig, type LlmConfig } from './config.js';
+import { registerCustomProvider, CUSTOM_PROVIDER_ID } from './custom-llm.js';
 import { McpHub } from './mcp/index.js';
 import { confirmWriteTool } from './tools/confirm.js';
 import { resolveCustomerTool } from './tools/customer.js';
@@ -62,6 +63,7 @@ export async function createRuntime(): Promise<Runtime> {
   const llm = loadLlmConfig();
   // Saved API key takes precedence; otherwise keep env/.env value if present.
   if (llm.apiKey) process.env[llm.apiKeyEnv] = llm.apiKey;
+  if (llm.provider === CUSTOM_PROVIDER_ID && llm.baseUrl) registerCustomProvider(models, llm);
 
   const model = resolveModel(models, llm);
 
@@ -84,9 +86,13 @@ export async function createRuntime(): Promise<Runtime> {
     },
     setLlm: (cfg) => {
       const normalized = { ...cfg, apiKeyEnv: providerFor(cfg.provider)?.apiKeyEnv ?? cfg.apiKeyEnv };
-      saveLlmConfig(normalized);
-      if (normalized.apiKey) process.env[normalized.apiKeyEnv] = normalized.apiKey;
+      if (normalized.provider === CUSTOM_PROVIDER_ID && normalized.baseUrl && normalized.model) {
+        registerCustomProvider(models, normalized);
+      }
+      // Resolve before persisting so a bad model never lands on disk and
+      // breaks the next boot.
       const next = resolveModel(models, normalized);
+      saveLlmConfig(normalized);
       runtime.model = next;
       runtime.llm = normalized;
       return next;

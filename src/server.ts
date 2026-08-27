@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
 import { loadMcpServers, saveMcpServers, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
+import { CUSTOM_PROVIDER_ID, testCustomEndpoint } from './custom-llm.js';
 import { AgentSession, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
@@ -609,6 +610,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         return json(res, 200, {
           provider: runtime.llm.provider,
           model: runtime.llm.model,
+          baseUrl: runtime.llm.baseUrl,
           apiKeyEnv: runtime.llm.apiKeyEnv,
           apiKeyConfigured: !!runtime.llm.apiKey,
         });
@@ -616,12 +618,32 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (req.method === 'PUT' && path === '/api/config/llm') {
         const body = await readBody(req);
         if (!body.provider || !body.model) return json(res, 400, { error: 'provider 与 model 必填' });
+        const provider = String(body.provider);
+        const model = String(body.model);
+        const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim().replace(/\/+$/, '') : '';
+        // custom: the endpoint URL is part of the identity; everything else
+        // must not carry one.
+        if (provider === CUSTOM_PROVIDER_ID) {
+          if (!baseUrl) return json(res, 400, { error: '自定义服务商必须填写 Base URL' });
+          if (!/^https?:\/\//i.test(baseUrl)) return json(res, 400, { error: 'Base URL 必须以 http(s):// 开头' });
+        } else if (baseUrl) {
+          return json(res, 400, { error: '只有自定义服务商支持 Base URL' });
+        }
         try {
+          const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey : undefined;
+          // Verify a custom endpoint with a real streaming request before it
+          // can be saved; a saved-but-broken config would break every session.
+          if (provider === CUSTOM_PROVIDER_ID) {
+            const savedKey = apiKey ?? (runtime.llm.provider === CUSTOM_PROVIDER_ID ? runtime.llm.apiKey : undefined);
+            if (!savedKey) return json(res, 400, { error: '自定义端点缺少 API Key（新配置必填；旧配置未保存过 key）' });
+            await testCustomEndpoint({ baseUrl, model, apiKey: savedKey });
+          }
           runtime.setLlm({
-            provider: String(body.provider),
-            model: String(body.model),
-            apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey : undefined,
+            provider,
+            model,
+            apiKey,
             apiKeyEnv: runtime.llm.apiKeyEnv,
+            ...(baseUrl ? { baseUrl } : {}),
           });
         } catch (err) {
           return json(res, 400, { error: (err as Error).message });
@@ -630,6 +652,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           ok: true,
           provider: runtime.llm.provider,
           model: runtime.llm.model,
+          baseUrl: runtime.llm.baseUrl,
           apiKeyConfigured: !!runtime.llm.apiKey,
         });
       }

@@ -47,6 +47,7 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/wecom/status'] },
+  { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
@@ -103,6 +104,10 @@ function help(): void {
 用法:
   csm-agent serve [端口]
   csm-agent doctor
+  csm-agent config llm [--json]
+  csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>]
+    （查看/切换大模型；provider=custom 需 --base-url（OpenAI 兼容端点），
+     保存时自动发一次真实请求验证连通，失败则不落盘；API Key 只写本地配置文件）
   csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
   csm-agent customer <客户ID或名称> [--json]
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
@@ -346,6 +351,39 @@ async function rawApi(methodInput: string, path: string, json?: string): Promise
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   }));
+}
+
+// ── config llm：查看/切换大模型（与网页设置页同一 API；custom 保存时同样做连通验证） ──
+
+function flagOf(values: string[], name: string): string | undefined {
+  const prefix = `--${name}=`;
+  const hit = values.find((v) => v.startsWith(prefix));
+  return hit ? hit.slice(prefix.length) : undefined;
+}
+
+async function configCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'llm' && !values.length) {
+    const cfg = await request<any>('/api/config/llm');
+    return print(cfg);
+  }
+  if (subcommand === 'llm' && values[0] === 'set') {
+    const rest = values.slice(1);
+    const provider = flagOf(rest, 'provider');
+    const model = flagOf(rest, 'model');
+    const baseUrl = flagOf(rest, 'base-url');
+    const apiKey = flagOf(rest, 'api-key');
+    if (!provider || !model) throw new Error('config llm set 需要 --provider=<id> --model=<id>，可选 --base-url=<url> --api-key=<key>');
+    const payload: Record<string, string> = { provider, model };
+    if (baseUrl !== undefined) payload.baseUrl = baseUrl;
+    if (apiKey !== undefined) payload.apiKey = apiKey;
+    const result = await request<any>('/api/config/llm', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return print(result);
+  }
+  throw new Error('config 子命令只允许 llm / llm set');
 }
 
 async function waitSync(id: string, maxAttempts = 600): Promise<any> {
@@ -744,6 +782,7 @@ async function main(): Promise<void> {
   if (command === 'capabilities') return print(CLI_CAPABILITIES);
   if (command === 'serve') return serve(args.shift());
   if (command === 'doctor') return doctor();
+  if (command === 'config') return configCommand(args.shift() ?? '', args);
   if (command === 'customers') return showCustomers(args);
   if (command === 'customer') return showCustomer(args.join(' '));
   if (command === 'timeline') {

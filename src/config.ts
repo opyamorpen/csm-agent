@@ -125,6 +125,8 @@ export interface LlmConfig {
   apiKey?: string;
   /** Environment variable the key should be exposed as. */
   apiKeyEnv: string;
+  /** OpenAI-compatible base URL; only meaningful for the 'custom' provider. */
+  baseUrl?: string;
 }
 
 /** Provider id → { label, apiKeyEnv, defaultModel }. */
@@ -134,6 +136,7 @@ export const LLM_PROVIDERS: Array<{ id: string; label: string; apiKeyEnv: string
   { id: 'anthropic', label: 'Anthropic (Claude)', apiKeyEnv: 'ANTHROPIC_API_KEY', defaultModel: 'claude-sonnet-4-5' },
   { id: 'moonshotai', label: 'Moonshot (Kimi)', apiKeyEnv: 'MOONSHOT_API_KEY', defaultModel: 'moonshot-v1-8k' },
   { id: 'groq', label: 'Groq', apiKeyEnv: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },
+  { id: 'custom', label: '自定义（OpenAI 兼容）', apiKeyEnv: 'CSM_CUSTOM_API_KEY', defaultModel: '' },
 ];
 
 export function providerFor(id: string) {
@@ -149,11 +152,21 @@ export function loadLlmConfig(): LlmConfig {
     const raw = parsed?.llm && typeof parsed.llm === 'object' ? parsed.llm : parsed;
     const provider = typeof raw?.provider === 'string' ? raw.provider : 'deepseek';
     const p = providerFor(provider) ?? providerFor('deepseek')!;
+    const model = typeof raw?.model === 'string' && raw.model ? raw.model : p.defaultModel;
+    const baseUrl = typeof raw?.baseUrl === 'string' && raw.baseUrl.trim() ? raw.baseUrl.trim() : undefined;
+    // An incomplete custom config (hand-edited YAML) cannot resolve a model; fall
+    // back to the default provider so the service still boots and stays fixable
+    // from the settings UI.
+    if (provider === 'custom' && (!model || !baseUrl)) {
+      const fallback = providerFor('deepseek')!;
+      return { provider: 'deepseek', model: fallback.defaultModel, apiKeyEnv: fallback.apiKeyEnv };
+    }
     return {
       provider,
-      model: typeof raw?.model === 'string' && raw.model ? raw.model : p.defaultModel,
+      model,
       apiKey: typeof raw?.apiKey === 'string' ? raw.apiKey : undefined,
       apiKeyEnv: typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : p.apiKeyEnv,
+      ...(provider === 'custom' && baseUrl ? { baseUrl } : {}),
     };
   } catch {
     const p = providerFor('deepseek')!;
@@ -168,6 +181,7 @@ export function saveLlmConfig(cfg: LlmConfig): void {
     model: cfg.model || p.defaultModel,
     apiKeyEnv: p.apiKeyEnv,
   };
+  if (cfg.provider === 'custom' && cfg.baseUrl?.trim()) out.baseUrl = cfg.baseUrl.trim().replace(/\/+$/, '');
   if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
   mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
   atomicWriteYaml(userConfigPath('llm.user.yaml'), out);

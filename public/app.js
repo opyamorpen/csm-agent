@@ -21,6 +21,8 @@
   const llmProvider = document.getElementById('llmProvider');
   const llmModel = document.getElementById('llmModel');
   const llmKey = document.getElementById('llmKey');
+  const llmBaseUrlRow = document.getElementById('llmBaseUrlRow');
+  const llmBaseUrl = document.getElementById('llmBaseUrl');
   const searchKey = document.getElementById('searchKey');
   const searchMaxResults = document.getElementById('searchMaxResults');
 
@@ -740,16 +742,26 @@
     }
   }
 
+  // 自定义（OpenAI 兼容）服务商需要额外的 Base URL 输入框。
+  function syncLlmProviderUi() {
+    const isCustom = llmProvider.value === 'custom';
+    llmBaseUrlRow.classList.toggle('hidden', !isCustom);
+    llmModel.placeholder = isCustom ? '例如 ucloud-qwen3.8-max' : '例如 deepseek-v4-flash';
+  }
+  llmProvider.addEventListener('change', syncLlmProviderUi);
+
   async function loadLlmConfigUI() {
     try {
       const res = await fetch('/api/config/llm');
       const data = await res.json();
       llmProvider.value = data.provider || 'deepseek';
       llmModel.value = data.model || '';
+      llmBaseUrl.value = data.baseUrl || '';
       llmKey.value = '';
       llmKey.placeholder = data.apiKeyConfigured
         ? '已设置（留空则不修改）'
         : 'sk-... 或用 ${ENV_VAR}';
+      syncLlmProviderUi();
     } catch (err) {
       configResult.className = 'err';
       configResult.textContent = '加载失败: ' + err.message;
@@ -787,6 +799,7 @@
       model: llmModel.value.trim(),
       apiKey: llmKey.value.trim(),
     };
+    if (llmPayload.provider === 'custom') llmPayload.baseUrl = llmBaseUrl.value.trim();
     saveConfigBtn.disabled = true;
     configResult.className = '';
     configResult.textContent = '保存中…';
@@ -802,7 +815,7 @@
       if (!llmRes.ok) {
         results.push('模型: ' + (llmData.error || llmRes.status));
       } else {
-        results.push('模型: ' + llmData.provider + '/' + llmData.model + ' 已生效');
+        results.push('模型: ' + llmData.provider + '/' + llmData.model + (llmData.baseUrl ? ` @ ${llmData.baseUrl}` : '') + ' 已生效');
       }
 
       const searchPayload = { apiKey: searchKey.value.trim(), maxResults: Number(searchMaxResults.value) || 5 };
@@ -1792,6 +1805,7 @@
     ['anthropic', 'Anthropic (Claude)'],
     ['moonshotai', 'Moonshot (Kimi)'],
     ['groq', 'Groq'],
+    ['custom', '自定义（OpenAI 兼容）'],
   ];
   for (const [id, label] of PROVIDERS) {
     const opt = document.createElement('option');
