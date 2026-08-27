@@ -1,13 +1,19 @@
 # CSM agent — 联网搜索配置（种子）
 #
-# 客户公开动态检索使用 Tavily（https://tavily.com）。注册后在设置页填写 API Key，
-# 或将本文件另存为 config/search.user.yaml（优先加载，且被 gitignore 不会提交），
-# 或设置环境变量 TAVILY_API_KEY / 写入 ~/.csm-agent/.env。
+# 客户公开动态检索默认使用免费匿名搜索层（Exa/Parallel/Tavily/Firecrawl/
+# Keenable 五家轮换、限流自动切换，匿名请求不带用户身份），无需任何配置。
+#
+# 如需更稳定的服务和严格时间窗过滤，注册 Tavily（https://tavily.com）后在
+# 设置页填写 API Key，或将本文件另存为 config/search.user.yaml（优先加载，
+# 且被 gitignore 不会提交），或设置环境变量 TAVILY_API_KEY / 写入
+# ~/.csm-agent/.env。
 #
 # 示例（不要照抄）：
 #   provider: tavily
 #   apiKey: tvly-xxxxxxxxxxxxxxxxxxxx
 #   maxResults: 5
+#   keylessFallback: true   # 设为 false 可停用免费匿名层
 
 provider: tavily
 maxResults: 5
+keylessFallback: true

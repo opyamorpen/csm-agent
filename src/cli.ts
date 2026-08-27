@@ -130,7 +130,8 @@ function help(): void {
   csm-agent wecom
   csm-agent agent <客户ID或名称> <指令>
     （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
-     联网检索 web_search（需在设置中配置 Tavily key）、落库 record_web_intelligence）
+     联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
+     落库 record_web_intelligence）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
   csm-agent capabilities [--json]
   csm-agent version

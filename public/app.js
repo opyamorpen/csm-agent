@@ -659,7 +659,7 @@
       const res = await fetch('/api/config/search');
       const data = await res.json();
       searchKey.value = '';
-      searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...';
+      searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选，不填走免费匿名通道）';
       searchMaxResults.value = data.maxResults || 5;
     } catch (err) {
       configResult.className = 'err';
@@ -714,10 +714,10 @@
         results.push('联网搜索: ' + (searchData.error || searchRes.status));
       } else {
         results.push(searchData.apiKeyConfigured
-          ? `联网搜索: Tavily 已配置（每次 ${searchData.maxResults} 条）`
-          : '联网搜索: 未配置 API key（web_search 将提示未配置）');
+          ? `联网搜索: Tavily 已配置（每次 ${searchData.maxResults} 条，严格时间窗）`
+          : `联网搜索: 未配 key，走免费匿名通道（每次 ${searchData.maxResults} 条）`);
         searchKey.value = '';
-        searchKey.placeholder = searchData.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...';
+        searchKey.placeholder = searchData.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选）';
       }
 
       const mcpRes = await fetch('/api/config/mcp', {

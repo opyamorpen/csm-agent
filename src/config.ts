@@ -187,17 +187,19 @@ export interface SearchConfig {
   apiKey?: string;
   /** Max results per query, capped server-side. */
   maxResults: number;
+  /** Anonymous keyless search tier when no API key is set (default: on). */
+  keylessFallback: boolean;
 }
 
 export const SEARCH_PROVIDERS: Array<{ id: string; label: string; apiKeyEnv: string; defaultMaxResults: number }> = [
   { id: 'tavily', label: 'Tavily', apiKeyEnv: 'TAVILY_API_KEY', defaultMaxResults: 5 },
 ];
 
-export const DEFAULT_SEARCH_CONFIG: SearchConfig = { provider: 'tavily', maxResults: 5 };
+export const DEFAULT_SEARCH_CONFIG: SearchConfig = { provider: 'tavily', maxResults: 5, keylessFallback: true };
 
 /** Public view of the search config: key presence only, never the key itself. */
 export function searchConfigStatus(cfg: SearchConfig): Record<string, unknown> {
-  return { provider: cfg.provider, apiKeyConfigured: !!cfg.apiKey, maxResults: cfg.maxResults };
+  return { provider: cfg.provider, apiKeyConfigured: !!cfg.apiKey, maxResults: cfg.maxResults, keylessFallback: cfg.keylessFallback };
 }
 
 export function loadSearchConfig(): SearchConfig {
@@ -206,21 +208,25 @@ export function loadSearchConfig(): SearchConfig {
     if (!existsSync(path)) {
       // Fall back to env var when no user config exists yet.
       const key = process.env.TAVILY_API_KEY;
-      return key ? { provider: 'tavily', apiKey: key, maxResults: 5 } : DEFAULT_SEARCH_CONFIG;
+      return key ? { provider: 'tavily', apiKey: key, maxResults: 5, keylessFallback: true } : DEFAULT_SEARCH_CONFIG;
     }
     const parsed = yaml.load(readFileSync(path, 'utf8')) as Partial<SearchConfig> & { search?: Partial<SearchConfig> };
     const raw = parsed?.search && typeof parsed.search === 'object' ? parsed.search : parsed;
-    const provider = raw?.provider === 'tavily' ? 'tavily' : 'tavily';
     const apiKey = typeof raw?.apiKey === 'string' && raw.apiKey.trim() ? raw.apiKey.trim() : process.env.TAVILY_API_KEY;
     const maxResults = Math.min(10, Math.max(1, Number(raw?.maxResults ?? 5) || 5));
-    return { provider, apiKey, maxResults };
+    const keylessFallback = raw?.keylessFallback === false ? false : true;
+    return { provider: 'tavily', apiKey, maxResults, keylessFallback };
   } catch {
     return DEFAULT_SEARCH_CONFIG;
   }
 }
 
 export function saveSearchConfig(cfg: SearchConfig): void {
-  const out: SearchConfig = { provider: 'tavily', maxResults: Math.min(10, Math.max(1, Number(cfg.maxResults) || 5)) };
+  const out: SearchConfig = {
+    provider: 'tavily',
+    maxResults: Math.min(10, Math.max(1, Number(cfg.maxResults) || 5)),
+    keylessFallback: cfg.keylessFallback === false ? false : true,
+  };
   if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
   mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
   atomicWriteYaml(userConfigPath('search.user.yaml'), out);

@@ -187,6 +187,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     const webSearch = makeWebSearchHandler({
       getApiKey: () => loadSearchConfig().apiKey,
       getMaxResults: () => loadSearchConfig().maxResults ?? searchConfig.maxResults,
+      getKeylessEnabled: () => loadSearchConfig().keylessFallback,
     });
     const recordWebIntelligence = makeRecordWebIntelligenceHandler({
       getCustomer: boundCustomer,
@@ -615,7 +616,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const current = loadSearchConfig();
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey : current.apiKey;
         const maxResults = body.maxResults == null ? current.maxResults : Math.min(10, Math.max(1, Number(body.maxResults) || 5));
-        saveSearchConfig({ provider: 'tavily', apiKey: apiKey && apiKey.trim() ? apiKey.trim() : undefined, maxResults });
+        const keylessFallback = body.keylessFallback == null ? current.keylessFallback : body.keylessFallback !== false;
+        saveSearchConfig({ provider: 'tavily', apiKey: apiKey && apiKey.trim() ? apiKey.trim() : undefined, maxResults, keylessFallback });
         return json(res, 200, { ok: true, ...searchConfigStatus(loadSearchConfig()) });
       }
 

@@ -179,7 +179,8 @@ test('settings modal exposes Tavily web search configuration', () => {
   // 显示契约：设置页有联网搜索分区（key + 返回条数），保存走 /api/config/search，key 不回显。
   assert.match(html, /id="searchKey"/);
   assert.match(html, /id="searchMaxResults"/);
+  assert.match(html, /不填 Key 自动走免费匿名通道/);
   assert.match(source, /async function loadSearchConfigUI/);
   assert.match(source, /\/api\/config\/search/);
-  assert.ok(source.includes("searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...'"));
+  assert.ok(source.includes("searchKey.placeholder = data.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选，不填走免费匿名通道）'"));
 });

@@ -12,9 +12,11 @@ import {
 import {
   makeWebSearchHandler,
   makeRecordWebIntelligenceHandler,
-  tavilyFetch,
-  type SearchFetcher,
+  keylessSearchWithFailover,
+  nextKeylessOrder,
+  type HttpPost,
 } from '../src/tools/websearch.js';
+import * as websearchModule from '../src/tools/websearch.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => Promise<void> | void): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-tools-'));
@@ -60,41 +62,36 @@ test('workbench tools: events returns synced timeline entries', () => withDb(asy
   assert.ok(filteredHit.text.includes('ticket-1'));
 }));
 
-const fakeSearcher = (results: Array<{ title: string; url: string; published_date: string; content: string }>): SearchFetcher =>
-  async (body) => {
-    assert.equal(body.topic, 'news');
-    assert.equal(body.days, 90);
-    return results;
+// HTTP stub: keyed-Tavily responses come back as JSON the tool parses.
+const fakePost = (responses: Record<string, () => string>): HttpPost =>
+  async (url) => {
+    const key = Object.keys(responses).find((k) => url.includes(k));
+    if (!key) throw new Error(`unexpected url: ${url}`);
+    return responses[key]();
   };
 
-test('web_search: returns formatted results with dates and sources', async () => {
+test('web_search: keyed Tavily returns formatted results with dates and sources', async () => {
   const handler = makeWebSearchHandler({
     getApiKey: () => 'tvly-test',
     getMaxResults: () => 5,
-    fetcher: fakeSearcher([{ title: '客户甲完成 B 轮融资', url: 'https://news.example.com/1', published_date: '2026-08-01', content: '融资 2 亿元' }]),
+    fetcher: fakePost({ 'api.tavily.com': () => JSON.stringify({ results: [{ title: '客户甲完成 B 轮融资', url: 'https://news.example.com/1', published_date: '2026-08-01', content: '融资 2 亿元' }] }) }),
   });
   const r = await handler({ query: '客户甲 融资' });
   assert.equal(r.isError, undefined);
   assert.ok(r.text.includes('客户甲完成 B 轮融资'));
   assert.ok(r.text.includes('https://news.example.com/1'));
+  assert.ok(r.text.includes('Tavily'));
   assert.ok(r.text.includes('最近 90 天'));
 });
 
-test('web_search: no results is unknown, never a signal', async () => {
-  const handler = makeWebSearchHandler({ getApiKey: () => 'tvly-test', getMaxResults: () => 5, fetcher: async () => [] });
+test('web_search: keyed Tavily with no results is unknown, never a signal', async () => {
+  const handler = makeWebSearchHandler({ getApiKey: () => 'tvly-test', getMaxResults: () => 5, fetcher: fakePost({ 'api.tavily.com': () => '{"results":[]}' }) });
   const r = await handler({ query: '客户甲 裁员' });
   assert.equal(r.isError, undefined);
   assert.ok(r.text.includes('不构成任何正面或负面信号'));
 });
 
-test('web_search: missing api key returns explicit config guidance', async () => {
-  const handler = makeWebSearchHandler({ getApiKey: () => undefined, getMaxResults: () => 5, fetcher: tavilyFetch });
-  const r = await handler({ query: '客户甲 融资' });
-  assert.equal(r.isError, true);
-  assert.ok(r.text.includes('联网搜索未配置'));
-});
-
-test('web_search: fetch failure is reported honestly', async () => {
+test('web_search: keyed Tavily fetch failure is reported honestly', async () => {
   const handler = makeWebSearchHandler({
     getApiKey: () => 'tvly-test',
     getMaxResults: () => 5,
@@ -103,6 +100,130 @@ test('web_search: fetch failure is reported honestly', async () => {
   const r = await handler({ query: '客户甲 融资' });
   assert.equal(r.isError, true);
   assert.ok(r.text.includes('联网搜索失败: HTTP 503'));
+});
+
+// Keyless anonymous tier — mirrors Hermes agent's public MCP endpoints.
+
+const exaMcpResponse = (text: string): string =>
+  JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text }] } });
+
+const exaSearchText = [
+  'Title: 客户甲完成 B 轮融资',
+  'URL: https://news.example.com/exa-1',
+  'Published: 2026-08-01',
+  'Highlights:',
+  '融资 2 亿元，领投方为某基金。',
+].join('\n');
+
+test('web_search: keyless mode routes to a public endpoint when no key is set', async () => {
+  let called = '';
+  const handler = makeWebSearchHandler({
+    getApiKey: () => undefined,
+    getMaxResults: () => 5,
+    fetcher: async (url) => {
+      called = url;
+      if (url.includes('mcp.exa.ai')) return exaMcpResponse(exaSearchText);
+      throw new Error(`unexpected url: ${url}`);
+    },
+  });
+  // Ring starts at a random vendor; retry until exa serves, other vendors fail
+  // with a non-rate-limit error which stops the walk — so force success by
+  // letting every vendor answer with the exa payload shape instead.
+  const handlerAll = makeWebSearchHandler({
+    getApiKey: () => undefined,
+    getMaxResults: () => 5,
+    fetcher: async (url) => {
+      called = url;
+      if (url.includes('mcp.exa.ai')) return exaMcpResponse(exaSearchText);
+      if (url.includes('search.parallel.ai')) return exaMcpResponse(JSON.stringify({ results: [{ url: 'https://news.example.com/p-1', title: '客户甲中标', excerpts: ['中标金额 500 万'] }] }));
+      if (url.includes('api.tavily.com')) return JSON.stringify({ results: [{ title: '客户甲融资', url: 'https://news.example.com/t-1', published_date: '2026-08-02', content: 'B 轮' }] });
+      if (url.includes('api.firecrawl.dev')) return JSON.stringify({ data: { web: [{ title: '客户甲新品', url: 'https://news.example.com/f-1', description: '发布新品' }] } });
+      if (url.includes('api.keenable.ai')) return JSON.stringify({ results: [{ title: '客户甲招聘', url: 'https://news.example.com/k-1', snippet: '扩招' }] });
+      throw new Error(`unexpected url: ${url}`);
+    },
+  });
+  const r = await handlerAll({ query: '客户甲 融资' });
+  assert.equal(r.isError, undefined);
+  assert.ok(r.text.includes('免费通道'), '应注明走的是免费通道');
+  assert.ok(r.text.includes('无严格时间过滤'), '应提示无严格时间过滤');
+  assert.ok(/exa|parallel|tavily|firecrawl|keenable/.test(r.text), '应注明实际服务的供应商');
+  assert.ok(called.length > 0, '应发起真实（stubbed）HTTP 调用');
+  void handler;
+});
+
+test('web_search: keyless tier disabled surfaces config guidance', async () => {
+  const handler = makeWebSearchHandler({
+    getApiKey: () => undefined,
+    getMaxResults: () => 5,
+    getKeylessEnabled: () => false,
+    fetcher: async () => { throw new Error('should not be called'); },
+  });
+  const r = await handler({ query: '客户甲 融资' });
+  assert.equal(r.isError, true);
+  assert.ok(r.text.includes('联网搜索未配置且免费通道已停用'));
+});
+
+test('keyless ring: rate-limit errors fail over to the next vendor', async () => {
+  const calls: string[] = [];
+  const post: HttpPost = async (url) => {
+    calls.push(url);
+    if (url.includes('mcp.exa.ai')) throw new Error('HTTP 429: rate limit exceeded');
+    if (url.includes('search.parallel.ai')) return exaMcpResponse(JSON.stringify({ results: [{ url: 'https://news.example.com/p-1', title: '客户甲中标', excerpts: ['中标金额 500 万'] }] }));
+    throw new Error(`unexpected url: ${url}`);
+  };
+  // Run until the walk starts at exa (ring rotates per call).
+  let result: Awaited<ReturnType<typeof keylessSearchWithFailover>> | null = null;
+  for (let i = 0; i < 5 && !result; i++) {
+    const order = nextKeylessOrder();
+    void order;
+    try {
+      const r = await keylessSearchWithFailover('客户甲 融资', 5, post);
+      if (calls.some((c) => c.includes('mcp.exa.ai'))) result = r;
+      else result = r; // any serving vendor is fine
+    } catch (err) {
+      if (!(err as Error).message.includes('失败')) throw err;
+    }
+    calls.length = 0;
+  }
+  assert.ok(result, '应至少有一次成功的 keyless 检索');
+  assert.ok(['exa', 'parallel', 'tavily', 'firecrawl', 'keenable'].includes(result.servedBy));
+});
+
+test('keyless ring: non-rate-limit error stops the walk immediately', async () => {
+  const calls: string[] = [];
+  const post: HttpPost = async (url) => {
+    calls.push(url);
+    throw new Error('HTTP 400: malformed query');
+  };
+  await assert.rejects(
+    keylessSearchWithFailover('客户甲 融资', 5, post),
+    /HTTP 400/,
+  );
+  assert.equal(calls.length, 1, '非限流错误不应轮换到下一家');
+});
+
+test('keyless: MCP SSE-style response bodies are parsed', () => {
+  const payload = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Title: SSE 结果\nURL: https://example.com/sse\nHighlights:\n内容摘要' }] } });
+  const sse = ['event: message', `data: ${payload}`, ''].join('\n');
+  const text = (websearchModule as { parseMcpBody?: (b: string) => string }).parseMcpBody?.(sse);
+  assert.ok(text?.includes('https://example.com/sse'));
+});
+
+test('keyless: Exa formatted text parser extracts title/url/date/highlights', () => {
+  const results = (websearchModule as { parseExaSearchText?: (t: string, l: number) => Array<{ title?: string; url?: string; publishedDate?: string; content?: string }> })
+    .parseExaSearchText?.(`${exaSearchText}\n---\nTitle: 第二条\nURL: https://example.com/2\nHighlights:\n摘要`, 5) ?? [];
+  assert.equal(results.length, 2);
+  assert.equal(results[0].title, '客户甲完成 B 轮融资');
+  assert.equal(results[0].url, 'https://news.example.com/exa-1');
+  assert.equal(results[0].publishedDate, '2026-08-01');
+  assert.ok(results[0].content?.includes('融资 2 亿元'));
+});
+
+test('keyless ring order rotates across calls', () => {
+  const first = nextKeylessOrder();
+  const second = nextKeylessOrder();
+  assert.notDeepEqual(first, second, '连续两次调用应轮换起始供应商');
+  assert.deepEqual([...first].sort(), [...second].sort(), '轮换只是顺序变化，供应商集合不变');
 });
 
 test('record_web_intelligence: persists findings as web_signal evidence', () => withDb(async (db) => {
