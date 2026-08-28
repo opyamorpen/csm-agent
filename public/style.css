@@ -645,6 +645,8 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .agent-work-head h1 { margin: 0; font-size: 22px; }
 .agent-work-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .agent-work-head input { min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; }
+/* 「已归属」一键切换：激活（处于已归属视图）时高亮提示当前态，再点切回待归属。 */
+.agent-work-head .quiet-command.active { border-color: #2457c5; color: #174a9d; background: #eaf0fa; font-weight: 650; }
 /* 归属栏：单行操作条，全部控件垂直居中、统一 34px 高度；sticky 冻结在 tab 条下（z-index 低于 tab 条）。 */
 .hemory-assign-bar { position: sticky; top: 35px; z-index: 7; display: flex; align-items: center; gap: 8px; margin: 0 -18px 12px; padding: 10px 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: #f7f8fa; }
 .hemory-assign-bar input[list] { flex: 1 1 220px; min-width: 160px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
@@ -660,8 +662,8 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .hemory-filter-panel input, .hemory-filter-panel select { min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
 .hemory-filter-panel input[type="date"], .hemory-filter-panel input[type="time"] { width: 150px; }
 .hemory-filter-panel input[list] { flex: 1 1 220px; }
-/* 客户详情 tab 内的操作条：沿用收件箱组件，但 tab 面板无负 margin 展开场景，改为静态单行。 */
-.customer-hemory-bar { position: static; margin: 0 0 12px; padding: 0; border-top: none; border-bottom: none; background: transparent; }
+/* 客户详情片段 tab 的纯展示行：无勾选列，去掉 label 的点选手势。 */
+.hemory-fragment.readonly { grid-template-columns: minmax(0, 1fr); cursor: default; }
 .hemory-fragment-list, .draft-batch-list { display: grid; gap: 8px; }
 .fragment-group-title { margin-top: 6px; padding: 6px 0 2px; color: #5d6875; font-size: 11px; font-weight: 700; }
 .hemory-fragment { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 11px 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
@@ -739,6 +741,5 @@ footer { background: #fff; }
   .agent-work-head .row-actions { flex-wrap: wrap; }
   .hemory-assign-bar { top: 49px; flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
   .hemory-assign-bar input[list] { flex: 1 1 100%; }
-  .customer-hemory-bar { margin: 0 0 12px; padding: 0; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
 }

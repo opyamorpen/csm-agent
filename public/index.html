@@ -70,7 +70,7 @@
     <main id="chat" class="hidden">
       <div class="agent-mode-tabs" role="tablist" aria-label="Agent 工作区">
         <button class="agent-mode-tab active" data-agent-mode="conversation">对话</button>
-        <button class="agent-mode-tab" data-agent-mode="hemory">Hemory 待归属 <span id="hemoryPendingCount" class="nav-count"></span></button>
+        <button class="agent-mode-tab" data-agent-mode="hemory">Hemory 片段 <span id="hemoryPendingCount" class="nav-count"></span></button>
         <button class="agent-mode-tab" data-agent-mode="drafts">草稿箱 <span id="draftPendingCount" class="nav-count"></span></button>
       </div>
       <section id="agentConversation" class="agent-mode-panel">
@@ -97,8 +97,8 @@
 
       <section id="hemoryInbox" class="agent-mode-panel hidden">
         <div class="agent-work-head">
-          <div><h1>Hemory 待归属</h1><p>按片段绑定 CRM 售后客户，默认保留最近 7 天</p></div>
-        <div class="row-actions"><button id="hemoryFilterToggle" class="quiet-command">筛选</button><button id="hemorySync" class="quiet-command">增量同步</button></div>
+          <div><h1>Hemory 片段</h1><p>默认展示待归属（最近 7 天）；点「已归属」一键查看，复杂条件走筛选</p></div>
+        <div class="row-actions"><button id="hemoryConfirmedToggle" class="quiet-command" type="button">已归属</button><button id="hemoryFilterToggle" class="quiet-command">筛选</button><button id="hemorySync" class="quiet-command">增量同步</button></div>
       </div>
       <!-- 筛选面板：默认收起；点「筛选」才应用条件，草稿不实时生效。客户输入复用归属栏的 datalist。 -->
       <div id="hemoryFilterPanel" class="hemory-filter-panel hidden">

@@ -228,7 +228,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const updater = source.match(/function bindFragmentSelection[\s\S]*?\n  }\n\n  \/\*\* 单条片段行/)?.[0];
+  const updater = source.match(/function bindFragmentSelection[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 单条片段行/)?.[0] ?? source.match(/function bindFragmentSelection[\s\S]*?\n  \}\n/)?.[0];
 
   // 显示契约：归属栏是单行 flex 垂直居中的操作条（统一 34px 控件高、13px 辅助文字），sticky 冻结在 tab 条下。
   assert.match(styles, /\.hemory-assign-bar \{[^}]*display: flex/);
@@ -260,7 +260,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.match(updater, /selectAllEl\.onchange/);
 });
 
-test('hemory regenerate action is fragment-scoped and per-day, visible from inbox and customer tab', () => {
+test('hemory regenerate action is fragment-scoped and per-day in the inbox; customer tab is read-only', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const regenerator = source.match(/async function regenerateHemoryDrafts[\s\S]*?\n  }\n\n  async function updateHemoryAttribution/)?.[0];
@@ -271,18 +271,47 @@ test('hemory regenerate action is fragment-scoped and per-day, visible from inbo
   assert.match(regenerator, /trackDraftGeneration\(jobs \|\| \[\]\)/);
   assert.match(source, /dataset\.attribution !== 'confirmed'/);
   assert.match(source, /重生成草稿需要已归属片段/);
-  // 客户详情 Hemory 片段 tab：按客户过滤已归属片段 + 顶部操作条（计数 + 全选 + 重新生成）。
-  const panel = source.match(/async function buildCustomerHemoryPanel[\s\S]*?\n  }\n\n  async function openCustomer/)?.[0];
+  // 客户详情 Hemory 片段 tab：纯展示——按客户过滤已归属片段（取数在 openCustomer 的并行请求里），readonly 渲染，无勾选/操作条/重生成。
+  const panel = source.match(/function buildCustomerHemoryPanel[\s\S]*?\n  }\n\n  async function openCustomer/)?.[0];
   assert.ok(panel, 'buildCustomerHemoryPanel source was not found');
-  assert.match(panel, /customer_id=\$\{encodeURIComponent\(customer\.id\)\}&status=confirmed/);
-  assert.match(panel, /'重新生成草稿'/);
-  assert.match(panel, /bindFragmentSelection\(list, count, selectAll\)/);
+  assert.match(source, /customer_id=\$\{encodeURIComponent\(customerId\)\}&status=confirmed&limit=500/);
+  assert.match(panel, /readonly: true/);
+  assert.doesNotMatch(panel, /bindFragmentSelection/);
+  assert.doesNotMatch(panel, /'重新生成草稿'/);
   assert.match(source, /addTab\('hemory_fragments', 'Hemory 片段'/);
-  // 行尾客户显示用名称解析（customersCache），失败回退 CRM id。
+  // 行渲染器 readonly 分支：div 而非 label、无 checkbox、无行内忽略/恢复。
   const row = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
+  assert.match(row, /opts\.readonly \? 'div' : 'label'/);
+  assert.match(row, /if \(!opts\.readonly\) \{\n      const check = document\.createElement\('input'\)/);
+  // 行尾客户显示用名称解析（customersCache），失败回退 CRM id。
   assert.match(row, /customersCache\.find\(\(item\) => item\.id === fragment\.customerId\)\?\.name \?\? `CRM \$\{fragment\.customerId\}`/);
-  // 客户 tab 操作条样式：复用归属栏组件但静态布局（tab 面板无 sticky 展开场景）。
-  assert.match(styles, /\.customer-hemory-bar \{[^}]*position: static/);
+  // readonly 行样式：单列布局、无点选手势。
+  assert.match(styles, /\.hemory-fragment\.readonly \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /\.hemory-fragment\.readonly \{[^}]*cursor: default/);
+});
+
+test('hemory tab exposes one-click attributed view toggle', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 显示契约：tab 与标题不再叫「待归属」（已归属也是该 tab 的内容），头部有一键「已归属」按钮。
+  assert.match(html, /data-agent-mode="hemory">Hemory 片段 <span id="hemoryPendingCount"/);
+  assert.match(html, /<h1>Hemory 片段<\/h1>/);
+  assert.doesNotMatch(html, /Hemory 待归属/);
+  assert.match(html, /id="hemoryConfirmedToggle"[^>]*>已归属</);
+  // 切换语义：confirmed ↔ pending，其他已应用条件保留；激活态文案跟随（已归属视图下变「看待归属」）。
+  const toggle = source.match(/hemoryConfirmedToggle\.onclick = async \(\) => \{[\s\S]*?\n  \};/)?.[0];
+  assert.ok(toggle, 'hemoryConfirmedToggle handler was not found');
+  assert.match(toggle, /hemoryFilter\.status = hemoryFilter\.status === 'confirmed' \? 'pending' : 'confirmed'/);
+  assert.match(toggle, /hemoryFilterPanel\.classList\.add\('hidden'\)/);
+  const toggleState = source.match(/function updateHemoryConfirmedToggle[\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(toggleState, 'updateHemoryConfirmedToggle source was not found');
+  assert.match(toggleState, /hemoryFilter\.status === 'confirmed'/);
+  assert.match(toggleState, /'看待归属' : '已归属'/);
+  assert.match(source, /updateHemoryConfirmedToggle\(\)/);
+  // 激活态样式：头部 quiet-command.active 高亮。
+  assert.match(styles, /\.agent-work-head \.quiet-command\.active \{[^}]*background: #eaf0fa/);
 });
 
 test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
