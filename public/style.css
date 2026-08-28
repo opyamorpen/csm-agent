@@ -666,8 +666,15 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .hemory-fragment.readonly { grid-template-columns: minmax(0, 1fr); cursor: default; }
 .hemory-fragment-list, .draft-batch-list { display: grid; gap: 8px; }
 .fragment-group-title { margin-top: 6px; padding: 6px 0 2px; color: #5d6875; font-size: 11px; font-weight: 700; }
-/* 已归属视图的客户分组标题：层级高于组内录音分节，字号略大、颜色更深。 */
-.customer-group-title { font-size: 12px; color: #36414e; }
+/* 已归属视图的客户分组：details 原生折叠，summary 是客户名 + 条数，层级高于组内录音分节。 */
+.customer-group { border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.customer-group + .customer-group { margin-top: 8px; }
+.customer-group-title { display: flex; align-items: center; gap: 6px; padding: 9px 12px; color: #36414e; font-size: 12px; font-weight: 700; cursor: pointer; list-style: none; user-select: none; }
+.customer-group-title::-webkit-details-marker { display: none; }
+.customer-group-title::before { content: '▸'; color: var(--muted); font-size: 11px; transition: transform 0.12s ease; }
+.customer-group[open] > .customer-group-title::before { transform: rotate(90deg); }
+.customer-group-title:hover { color: #174a9d; }
+.customer-group-body { padding: 2px 10px 10px; }
 .hemory-fragment { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 11px 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
 .hemory-fragment:hover { border-color: #8ba8de; }
 .hemory-fragment input { width: 16px; height: 16px; margin-top: 5px; accent-color: var(--accent); }

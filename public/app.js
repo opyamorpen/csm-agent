@@ -978,6 +978,7 @@
    * 片段列表整列表渲染：按录音分组 + 逐行共享渲染器；收件箱与客户详情 tab 共用。
    * 已归属视图（opts.groupByCustomer）外层按客户分组——客户顺序跟随列表本身的时间倒序
    * （即最近有沟通的客户在前），组内仍按录音分节，方便跨录音阅读同一客户的沟通。
+   * 客户组默认折叠（details 原生交互），点组标题展开/收起，折叠时只看客户名与条数。
    */
   function renderHemoryFragmentList(listEl, fragments, opts = {}) {
     listEl.innerHTML = '';
@@ -985,26 +986,32 @@
       listEl.append(el('div', 'workspace-empty', opts.emptyText || '没有符合条件的 Hemory 片段'));
       return;
     }
-    const appendRows = (rows) => {
+    const appendRows = (container, rows) => {
       let recording = '';
       for (const fragment of rows) {
         const recordingId = fragment.payload?.recordingId || 'unknown';
         if (recordingId !== recording) {
           recording = recordingId;
-          listEl.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
+          container.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
         }
-        listEl.append(renderHemoryFragmentRow(fragment, opts));
+        container.append(renderHemoryFragmentRow(fragment, opts));
       }
     };
-    if (!opts.groupByCustomer) return appendRows(fragments);
+    if (!opts.groupByCustomer) return appendRows(listEl, fragments);
     const groups = new Map();
     for (const fragment of fragments) {
       const key = fragment.customerId || '';
       groups.set(key, [...(groups.get(key) ?? []), fragment]);
     }
     for (const [customerId, rows] of groups) {
-      listEl.append(el('div', 'fragment-group-title customer-group-title', `${fragmentCustomerLabel(customerId)} · ${rows.length} 条`));
-      appendRows(rows);
+      const group = document.createElement('details');
+      group.className = 'customer-group';
+      const summary = el('summary', 'customer-group-title', `${fragmentCustomerLabel(customerId)} · ${rows.length} 条`);
+      group.append(summary);
+      const body = el('div', 'customer-group-body');
+      appendRows(body, rows);
+      group.append(body);
+      listEl.append(group);
     }
   }
 

@@ -314,7 +314,7 @@ test('hemory tab exposes one-click attributed view toggle', () => {
   assert.match(styles, /\.agent-work-head \.quiet-command\.active \{[^}]*background: #eaf0fa/);
 });
 
-test('hemory attributed view groups fragments by customer', () => {
+test('hemory attributed view groups fragments by customer with collapsed folds', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  \}\n\n  async function ignoreHemoryFragments/)?.[0];
@@ -322,21 +322,28 @@ test('hemory attributed view groups fragments by customer', () => {
 
   // 显示契约：已归属视图外层按客户分组（客户名 + 片段数），组内仍按录音分节；客户顺序跟随时间倒序（最近沟通的客户在前）。
   assert.ok(renderer, 'renderHemoryFragmentList source was not found');
-  assert.match(renderer, /if \(!opts\.groupByCustomer\) return appendRows\(fragments\)/);
+  assert.match(renderer, /if \(!opts\.groupByCustomer\) return appendRows\(listEl, fragments\)/);
   assert.match(renderer, /const key = fragment\.customerId \|\| ''/);
-  assert.match(renderer, /customer-group-title/);
-  assert.match(renderer, /`\$\{fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 条`/);
-  assert.match(renderer, /const appendRows = \(rows\) =>/);
+  assert.match(renderer, /const appendRows = \(container, rows\) =>/);
   assert.ok(loader, 'loadHemoryInbox source was not found');
   assert.match(loader, /groupByCustomer: hemoryFilter\.status === 'confirmed'/);
+  // 折叠交互：客户组用 details/summary 原生折叠，默认收起（无 open 属性），点标题展开。
+  assert.match(renderer, /document\.createElement\('details'\)/);
+  assert.match(renderer, /group\.className = 'customer-group'/);
+  assert.match(renderer, /const summary = el\('summary', 'customer-group-title', `\$\{fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 条`\)/);
+  assert.doesNotMatch(renderer, /group\.open\s*=\s*true/);
   // 客户名解析：customersCache 优先，失败回退 CRM id；未绑定客户单列一组。
   const label = source.match(/function fragmentCustomerLabel[\s\S]*?\n  \}/)?.[0];
   assert.ok(label, 'fragmentCustomerLabel source was not found');
   assert.match(label, /if \(!customerId\) return '未绑定客户'/);
   assert.match(label, /customersCache\.find\(\(item\) => item\.id === customerId\)\?\.name \?\? `CRM \$\{customerId\}`/);
-  // 客户分组标题层级高于录音分节（字号略大、颜色更深）。
-  assert.match(styles, /\.customer-group-title \{[^}]*font-size: 12px/);
-  assert.match(styles, /\.customer-group-title \{[^}]*color: #36414e/);
+  // 折叠态样式：summary 可点击带 ▸ 指示（展开旋转 90°），隐藏原生 marker；组为白底卡片。
+  assert.match(styles, /\.customer-group \{[^}]*background: #fff/);
+  assert.match(styles, /\.customer-group-title \{[^}]*cursor: pointer/);
+  assert.match(styles, /\.customer-group-title \{[^}]*list-style: none/);
+  assert.match(styles, /\.customer-group-title::-webkit-details-marker \{ display: none/);
+  assert.match(styles, /\.customer-group-title::before \{ content: '▸'/);
+  assert.match(styles, /\.customer-group\[open\] > \.customer-group-title::before \{ transform: rotate\(90deg\)/);
 });
 
 test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
