@@ -416,42 +416,6 @@ function hasOnesDraftSignal(type: OnesDeskDraftType, events: SourceEvent[]): boo
   return ONES_SIGNAL_PATTERNS[type].test(onesSignalText(events, type !== 'ticket'));
 }
 
-export function classifyDraftTypes(events: SourceEvent[]): DraftItemType[] {
-  const text = events.map(textOf).join('\n');
-  const types = new Set<DraftItemType>(['followup']);
-  if (/(待办|需要|请.{0,12}(负责|跟进|准备|确认)|下周|月底|之前.{0,12}(完成|给到)|action\s*item|todo)/i.test(text)) types.add('internal_todo');
-  if (/(工时|小时|人天|投入.{0,8}(时间|天)|耗时|花了.{0,8}(小时|天))/i.test(text)) types.add('workhour');
-  // suggestion/ticket/operations 与信号门控共用同一套判定，规则兜底与 LLM 门控口径一致。
-  for (const type of Object.keys(ONES_SIGNAL_PATTERNS) as OnesDeskDraftType[]) {
-    if (hasOnesDraftSignal(type, events)) types.add(type);
-  }
-  return [...types];
-}
-
-function defaultProposal(type: DraftItemType, customer: Customer, events: SourceEvent[]): DraftProposal {
-  const quote = events.map(textOf).join('；').slice(0, 1200);
-  const first = events[0];
-  const dateKey = events.length ? shanghaiEventDate(events[0]) : shanghaiDateKey();
-  const base = { evidence_quotes: events.map(textOf), occurred_at: first?.occurredAt ?? new Date().toISOString() };
-  const topics = events.map((event) => event.title);
-  const speakers = [...new Set(events.flatMap((event) => (Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : []).filter(Boolean)))];
-  if (type === 'internal_todo') return { type, title: first?.title.slice(0, 100) || `跟进 ${customer.name}`,
-    summary: quote, fields: { ...base, owner: 'unknown', due_at: 'unknown', expected_outcome: 'unknown' }, unknowns: ['负责人', '截止时间'] };
-  if (type === 'workhour') return { type, title: `${customer.name} ${dateKey} 客户沟通工时`, summary: quote,
-    fields: { ...base, hours: 'unknown', description: quote, date_key: dateKey }, unknowns: ['工时时长'] };
-  if (type === 'suggestion') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户需求`, summary: quote,
-    fields: { ...base, description: quote }, unknowns: [] };
-  if (type === 'ticket') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户工单`, summary: quote,
-    fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
-  if (type === 'operations') return { type, title: first?.title.slice(0, 100) || `${customer.name}客户运维事项`, summary: quote,
-    fields: { ...base, description: quote, severity: 'unknown' }, unknowns: ['严重程度'] };
-  // followup：天粒度合并——全天片段按【话题】分节汇总，标题带日期；分节正文优先片段自带分段摘要。
-  return { type, title: `${customer.name} ${dateKey} 沟通记录`,
-    summary: events.map((event) => `【${event.title}】\n${segmentSummaryOf(event)}`).join('\n\n').slice(0, 3000),
-    fields: { ...base, date_key: dateKey, method: '会议', participants: speakers, key_topics: topics,
-      one_line_summary: `与${customer.name}就${topics.slice(0, 3).join('、')}等进行沟通`, next_steps: 'unknown' }, unknowns: ['下一步计划'] };
-}
-
 async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[]): Promise<DraftProposal[]> {
   const unpublished = new Set(unpublishedEvents.map((event) => event.id));
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
@@ -536,6 +500,24 @@ export function computeWorkhours(events: SourceEvent[]): number | null {
   return hours > 0 ? hours : null;
 }
 
+/**
+ * 分节正文的预算压缩：全天节数再多也不丢节——超预算时逐轮截短最长节的正文（保留标题），
+ * 直到总长落在预算内；单节正文至少保留 80 字。此前 `.slice(0, 3000)` 尾部截断会把末尾整节
+ * 悄悄丢掉（13 节只剩 12 节且末节残缺），沟通记录必须节节在场。
+ */
+export function fitFollowupSections(sections: Array<{ title: string; body: string }>, budget = 3000): string {
+  const render = (parts: Array<{ title: string; body: string }>) => parts.map((part) => `【${part.title}】\n${part.body}`).join('\n\n');
+  const MIN_BODY = 80;
+  let parts = sections.map((part) => ({ title: part.title, body: part.body }));
+  while (render(parts).length > budget) {
+    // 找出正文仍可压缩的最长一节；全部压到底仍超预算时只能整体截断（极端情形）。
+    const target = parts.reduce((longest, part) => part.body.length > longest.body.length && part.body.length > MIN_BODY ? part : longest, parts[0]);
+    if (!target || target.body.length <= MIN_BODY) return render(parts).slice(0, budget);
+    target.body = target.body.slice(0, Math.max(MIN_BODY, target.body.length - Math.ceil(target.body.length / 4))) + '…';
+  }
+  return render(parts);
+}
+
 export class HemoryDraftService {
   private processing = new Set<string>();
 
@@ -618,12 +600,14 @@ export class HemoryDraftService {
       const followupEvents = cutoff
         ? events.filter((event) => new Date(event.occurredAt).getTime() > new Date(cutoff).getTime())
         : events;
-      let ai: DraftProposal[] = [];
-      let generator = 'rules';
-      if (this.runtime) {
-        try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents); generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`; }
-        catch (error) { generator = `rules-fallback: ${(error as Error).message}`.slice(0, 160); }
-      }
+      // 草稿质量完全依赖模型：模型调用失败就令任务 failed 并给出明确错误，绝不静默降级到规则兜底
+      // （兜底草稿无分节摘要、无 ones_required 提案、描述塞原始转写，曾被误当正常草稿写入 CRM/ONES）。
+      // 失败任务不建批次，用户在草稿箱点「重新生成」即可重试。
+      if (!this.runtime) throw new Error('模型未配置，无法生成草稿（请检查 LLM 配置后重新生成）');
+      let ai: DraftProposal[];
+      try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents); }
+      catch (error) { throw new Error(`模型未生成草稿: ${(error as Error).message}`); }
+      const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const proposals = this.buildProposals(ai, customer, events, followupEvents, dateKey);
       // 工时草稿的写工具按 ONES 实例工时模式绑定；模式获取失败只降级为该草稿的校验错误，不拖垮整个生成任务。
       let workhourBinding: WorkhourToolBinding = { mode: null, error: null };
@@ -679,13 +663,6 @@ export class HemoryDraftService {
       seen.add(key);
       proposals.push(proposal);
     }
-    const covered = new Set(proposals.map((proposal) => proposal.type));
-    for (const type of classifyDraftTypes(events)) {
-      if (type === 'followup' || type === 'workhour') continue;
-      if (covered.has(type) || proposals.length >= MAX_DRAFT_ITEMS) continue;
-      proposals.push(defaultProposal(type, customer, events));
-      covered.add(type);
-    }
     return proposals;
   }
 
@@ -712,11 +689,11 @@ export class HemoryDraftService {
     }
     const sections = followupEvents.map((event) => {
       const own = sectionSummaries.get(event.id);
-      return `【${event.title}】\n${own ?? segmentSummaryOf(event)}`;
+      return { title: event.title, body: own ?? segmentSummaryOf(event) };
     });
     const speakers = [...new Set(followupEvents.flatMap((event) =>
       (Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : []).filter(Boolean)))];
-    return { type: 'followup', title: `${customer.name} ${dateKey} 沟通记录`, summary: sections.join('\n\n').slice(0, 3000),
+    return { type: 'followup', title: `${customer.name} ${dateKey} 沟通记录`, summary: fitFollowupSections(sections),
       fields: { date_key: dateKey, method: '会议', participants: speakers,
         key_topics: followupEvents.map((event) => event.title), one_line_summary: oneLine, next_steps: 'unknown' },
       evidenceRefs: followupEvents.map((event) => event.id), unknowns: ['下一步计划'] };

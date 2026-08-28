@@ -1073,7 +1073,7 @@
         for (const id of finished) draftJobTracking.delete(id);
         draftJobTimer = null;
         draftGenerationNotice.classList.add('hidden');
-        if (failed.length) setStatus('warn', `草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}`);
+        if (failed.length) setStatus('warn', `草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}——请在 Hemory 收件箱重新归属片段、或对既有批次点「重新生成」重试`);
         else setStatus('', '草稿生成完成');
         void loadDraftBatches();
         return;
