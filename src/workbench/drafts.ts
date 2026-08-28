@@ -7,7 +7,7 @@ import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
-export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-module-full-tree';
+export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-product-hints';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 export const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 export type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
@@ -194,13 +194,21 @@ export const ONES_DESK_CLASSIFICATION_HINTS: Record<'module' | 'product', string
     '其他：官网&区域运营业务、帮助中心和产品手册、证书平台、Assistant 智能助手、应用中心、订单和支付管理、授权管理、CRM数据对接、运维工具箱、基础设施、信创、混合云、审批业务场景、审批配置',
   ],
   product: [
-    'ONES Project（项目管理）：Project 场景与平台、Core 基础平台能力、Dashboard 仪表盘能力、Automation 流程自动化、Mobile 手机网页与客户端',
-    'ONES Wiki（知识库）：Wiki 知识库管理场景、ONES Note',
-    '测试：TestCase 测试管理场景',
-    '效能与项目集：Performance 效能管理场景、ONES Plan 项目集管理、ONES Resource 资源管理、ONES Task 任务协作',
-    '平台与账号：Account 基础平台能力、Admin-系统业务配置、Admin-订单中心、零号应用中心与 License 管理、证书平台、审批管理',
-    '服务与支持：Desk 工单管理、ONES 运维工具箱、帮助中心与产品手册',
-    '集成与开放：Open 开放平台、插件、Jira&Confluence 数据导入、ONES Assistant、ONES Design 组件库、CRM、CN 信创、基础设施（非业务需求）、海外官网、CN Official Website 官网',
+    '总则：工单是缺陷指认，所属产品按「缺陷出在哪个产品/功能区域」判定，不按客户业务领域判定',
+    '研发管理：工作项（需求/任务/缺陷）属性与工作流、迭代/看板/燃尽图、甘特图/瀑布/里程碑/基线、版本发布、视图筛选排序缺陷 → Project 场景与平台',
+    '测试：用例库、测试计划、测试执行、测试报告缺陷 → TestCase 测试管理场景（不选 Project）',
+    '效能与报表：效能指标/趋势/质量看板数据、DORA 指标、效能仪表盘 → Performance 效能管理场景；工作台仪表盘与报表卡片配置/展示 → Dashboard 仪表盘能力；项目内统计图 → Project 场景与平台',
+    '工时与资源：工时登记/审批/报表、成员排期、人员负载 → ONES Resource 资源管理（工时缺陷不选 Project）；项目集层级、项目集甘特图、跨项目统筹 → ONES Plan 项目集管理；非研发的轻量任务协作 → ONES Task 任务协作',
+    '知识库：页面编辑/页面树/数据表格/共享加密/公开发布/页面统计缺陷 → Wiki 知识库管理场景；轻量笔记 → ONES Note；审批流程、审批单、审批配置 → 审批管理',
+    '账号与安全：登录、单点登录、第三方账号集成（企业微信/钉钉/飞书/LDAP/AD/SAML）、成员/部门/用户组/多团队、MFA/密码/会话 → Account 基础平台能力',
+    '系统配置：管理后台邮件 SMTP、短信服务、安全水印、系统日志、风控、侧边栏、插件管理、工作日、baseURL → Admin-系统业务配置；订单支付/续费/发票 → Admin-订单中心；应用中心开通与 License 授权、证书上传激活 → 零号应用中心与 License 管理；证书申请下载平台自身 → 证书平台',
+    '工单系统自身：工单门户、提单表单、工单流转分派、对外状态别名、微信工单小程序 → Desk 工单管理',
+    '开放与集成：OpenAPI/Webhook/MCP 接口报错与第三方系统对接 → Open 开放平台；流水线/CI-CD 与代码仓库集成（Jenkins/GitLab/GitHub）的构建关联 → Pipeline DevOps 场景；插件安装/运行/交付 → 插件；Jira/Confluence 迁移工具与 CSV 导入 → Jira&Confluence 数据导入；AI 问答/文档生成/智能摘要 → ONES Assistant',
+    '自动化：自动化规则配置、触发、执行异常 → Automation 流程自动化',
+    '移动端：仅手机 App/H5 出现的缺陷（桌面端正常） → Mobile 手机网页与客户端',
+    '私有云环境：服务器/磁盘/网络/HTTPS 证书/域名/部署环境故障 → 基础设施（非业务需求）；运维工具箱产品自身功能缺陷 → ONES 运维工具箱；国产数据库（达梦/GaussDB/OceanBase 等）与信创环境适配 → CN 信创',
+    '官网与文档：ones.cn 国内官网 → CN Official Website 官网；ones.com 海外官网 → 海外官网；帮助文档站 → 帮助中心与产品手册；CRM 系统相关 → CRM；设计组件库 → ONES Design 组件库',
+    '平台底座兜底：全局搜索、通知中心、工作台、跨产品说不清归属的平台级缺陷 → Core 基础平台能力',
   ],
 };
 

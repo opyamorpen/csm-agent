@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { applyDeploymentTypeOverride, draftDisplayFields, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, draftDisplayFields, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 function withDb(fn: (db: WorkbenchDatabase) => void): void {
@@ -1332,6 +1332,16 @@ test('workbench: module options cover full category tree incl. performance effic
   assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '单点登录' }).some((value) => value.fieldID === 'field054' && value.value === 'R72Lci4T'));
   assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '系统日志' }).some((value) => value.fieldID === 'field054' && value.value === 'AVxWChdy'));
   assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '用例库' }).some((value) => value.fieldID === 'field054' && value.value === 'WKCt6kV3'));
+});
+
+test('workbench: classification hints reference every ticket product option label', () => {
+  // 防漂移：product 分类指引必须覆盖所属产品选项表的全部 label 字面值——指引提到选项表里
+  // 不存在的名字会把 LLM 引向 invalid label；未来加选项忘更新指引也会在此暴露。
+  const productHints = ONES_DESK_CLASSIFICATION_HINTS.product.join('\n');
+  const productSpec = ONES_DESK_FIELD_SPECS.ticket.find((spec) => spec.label === '所属产品');
+  assert.ok(productSpec?.options, 'ticket 所属产品选项表存在');
+  const missing = Object.keys(productSpec.options!).filter((label) => !productHints.includes(label));
+  assert.deepEqual(missing, [], `指引未覆盖的所属产品选项: ${missing.join('、')}`);
 });
 
 test('workbench: deployment type resolves from CRM usage version deterministically', () => {
