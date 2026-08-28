@@ -60,8 +60,8 @@ const CLI_CAPABILITIES = [
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
-  { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs'] },
-  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
+  { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory'] },
+  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
@@ -158,7 +158,11 @@ function help(): void {
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
   csm-agent draft regenerate <批次ID>
-  csm-agent draft jobs <任务ID...>
+  csm-agent draft dismiss <批次ID>
+    （忽略批次：未写入草稿软删除为已忽略，已写入项不受影响）
+  csm-agent draft jobs [任务ID...]
+    （无参列出最近失败的生成任务：客户/日期/片段数/错误；
+     带任务 ID 时查询单个任务状态与片段明细）
   csm-agent service install [端口]
   csm-agent service status|restart|uninstall|logs
   csm-agent update
@@ -828,17 +832,34 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!id) throw new Error('draft regenerate 缺少批次 ID');
     return regenerateDraftBatch(id);
   }
+  if (subcommand === 'dismiss') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error('draft dismiss 缺少批次 ID');
+    return print(await request(`/api/draft-batches/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }));
+  }
   if (subcommand === 'jobs') {
+    // 无参 = 列出最近失败的生成任务（失败明细可发现入口）；带 ID = 查询指定任务状态与片段明细。
     const ids = values.filter(Boolean);
-    if (!ids.length) throw new Error('draft jobs 缺少任务 ID');
-    const { jobs } = await request<any>(`/api/draft-jobs?ids=${encodeURIComponent(ids.join(','))}`);
+    const { jobs } = ids.length
+      ? await request<any>(`/api/draft-jobs?ids=${encodeURIComponent(ids.join(','))}`)
+      : await request<any>('/api/draft-jobs?status=failed&kind=hemory');
     if (jsonOutput) return print(jobs);
-    console.table(jobs.map((job: any) => ({ id: job.id, customerId: job.customerId, status: job.status,
-      attempts: job.attempts, error: job.error ?? '', updatedAt: job.updatedAt })));
-    if (!jobs.length) console.log('任务不存在（可能已清理或 ID 有误）');
+    if (!jobs.length) { console.log(ids.length ? '任务不存在（可能已清理或 ID 有误）' : '没有失败的生成任务'); return; }
+    const { customers } = await request<any>('/api/customers');
+    const nameOf = (customerId: string) => customers?.find((item: any) => item.id === customerId)?.name ?? customerId;
+    for (const job of jobs) {
+      console.log(`任务 ${job.id}`);
+      console.log(`  客户：${nameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''} · 状态 ${job.status} · 尝试 ${job.attempts} 次`);
+      if (job.error) console.log(`  错误：${job.error}`);
+      if (job.fragments?.length) {
+        console.log(`  涉及片段（${job.fragments.length} 个）：`);
+        for (const fragment of job.fragments) console.log(`    ${fragment.id} · ${fragment.topic}${fragment.summary ? `：${String(fragment.summary).slice(0, 60)}` : ''}`);
+      }
+    }
+    if (!ids.length) console.log('重试：csm-agent hemory regenerate <片段ID...>（按天重建）');
     return;
   }
-  throw new Error('draft 子命令只允许 review/retry/regenerate/jobs');
+  throw new Error('draft 子命令只允许 review/retry/regenerate/dismiss/jobs');
 }
 
 function serviceCommand(subcommand: string, values: string[]): void {

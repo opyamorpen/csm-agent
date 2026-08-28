@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { applyDeploymentTypeOverride, draftDisplayFields, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 function withDb(fn: (db: WorkbenchDatabase) => void): void {
@@ -488,17 +488,21 @@ test('workbench: model failure fails the job without any fallback drafts', async
     const fakeMcp = { listTools: () => [], isWrite: () => false, resolve: () => undefined,
       call: async () => ({ text: '', isError: false }) } as any;
     // 模型返回非 JSON：任务必须 failed、不建批次、错误消息可见——绝不静默降级出规则兜底草稿。
+    // 模型调用现在带指数退避自动重试（默认 5s/15s/45s），测试用 1ms 退避加速。
+    const previousBaseMs = draftModelRetryDelays.baseMs;
+    draftModelRetryDelays.baseMs = 1;
     const badModel = { llm: { provider: 'fake', model: 'broken' },
       models: { complete: async () => ({ content: [{ type: 'text', text: '服务暂时不可用' }], stopReason: 'stop' }) } } as any;
     const service = new HemoryDraftService(db, fakeMcp, badModel);
     const queued = service.enqueue('crm-d', [event.id]);
     assert.equal(queued.length, 1);
-    for (let i = 0; i < 40 && db.getDraftJob(queued[0].jobId)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 2000 && db.getDraftJob(queued[0].jobId)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const job = db.getDraftJob(queued[0].jobId)!;
     assert.equal(job.status, 'failed');
-    assert.match(job.error ?? '', /模型未生成草稿.*模型未返回 drafts 数组/);
+    assert.match(job.error ?? '', /模型未生成草稿.*模型未返回/);
     assert.equal(db.listDraftBatches('crm-d').length, 0, '失败任务不得创建草稿批次');
     // 模型未配置（runtime 缺失）同样 failed，不允许无模型的兜底生成。
+    draftModelRetryDelays.baseMs = previousBaseMs;
     const noModel = new HemoryDraftService(db, fakeMcp);
     const queued2 = noModel.enqueue('crm-d', [event.id]);
     for (let i = 0; i < 40 && db.getDraftJob(queued2[0].jobId)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -739,6 +743,118 @@ test('workbench: workhour falls back to unknown when recording times are missing
     assert.ok(batch.items!.some((item) => item.type === 'followup'));
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('workbench: workhour floors short topic spans to 0.1h instead of dropping to unknown', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-u', name: '客户乌' });
+    // 人工归属常把长会中的小话题片段标给客户：2.5 分钟跨度四舍五入为 0.0h，必须按最小 0.1h 计。
+    const topic = segment(db, 'crm-u', 'ru:a', 'ru', '小话题', '2026-08-25T06:26:00Z', '确认了款项安排');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T06:26:29Z','$.endAt','2026-08-25T06:29:02Z') WHERE id=?").run(topic.id);
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued = service.enqueue('crm-u', [topic.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-u').find((item) => item.status !== 'stale')!;
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour.targetArguments.hours, 0.1);
+    assert.deepEqual(workhour.unknowns, []);
+    assert.ok(!workhour.validationErrors.some((message) => message.includes('工时时长')));
+    // 纯函数口径：12 秒 → 0.1；缺录音 ID → null；跨度非法（end<=start）→ null。
+    const span = (startAt: string, endAt: string) => [{ payload: { recordingId: 'r', startAt, endAt } }] as any[];
+    assert.equal(computeWorkhours(span('2026-08-25T03:09:04Z', '2026-08-25T03:09:16Z')), 0.1);
+    assert.equal(computeWorkhours([{ payload: { startAt: '2026-08-25T03:09:04Z', endAt: '2026-08-25T03:09:16Z' } }] as any[]), null);
+    assert.equal(computeWorkhours(span('2026-08-25T03:09:04Z', '2026-08-25T03:09:04Z')), null);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: draft generation surfaces real model error and retries transient failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  const originalBaseMs = draftModelRetryDelays.baseMs;
+  draftModelRetryDelays.baseMs = 1;
+  try {
+    db.upsertCustomer({ id: 'crm-v', name: '客户沃' });
+    const frag = segment(db, 'crm-v', 'rv:a', 'rv', '话题', '2026-08-25T05:00:00Z', '沟通了部署安排');
+    // 场景一：provider 故障（complete 不抛异常，返回 stopReason=error）——真实错误必须透出，重试 3 次后任务 failed。
+    let errorCalls = 0;
+    const failing = { llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => { errorCalls++; return { stopReason: 'error', errorMessage: 'Request timed out.', content: [] }; } } } as any;
+    const failingService = new HemoryDraftService(db, fakeMcpForDrafts(), failing);
+    const job1 = failingService.enqueue('crm-v', [frag.id])[0]!;
+    for (let i = 0; i < 2000 && db.getDraftJob(job1.jobId)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(errorCalls, 3, '必须自动重试满 3 次');
+    const failed = db.getDraftJob(job1.jobId)!;
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error ?? '', /模型调用失败（第 3\/3 次）: Request timed out\./);
+    // 失败明细：sourceEventIds 回写为执行时真实片段集合，可按片段定位重生成。
+    assert.deepEqual(failed.sourceEventIds, [frag.id]);
+    // 场景二：首次连接超时、重试成功——瞬时故障不应导致任务失败。
+    let flakyCalls = 0;
+    const flaky = { llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => {
+        flakyCalls++;
+        if (flakyCalls === 1) return { stopReason: 'error', errorMessage: 'Request timed out.', content: [] };
+        return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify({ drafts: [] }) }] };
+      } } } as any;
+    const flakyService = new HemoryDraftService(db, fakeMcpForDrafts(), flaky);
+    const job2 = flakyService.regenerateByEventIds([frag.id]).jobs[0]!;
+    for (let i = 0; i < 2000 && db.getDraftJob(job2.jobId)?.status !== 'succeeded'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (db.getDraftJob(job2.jobId)?.status === 'failed') break;
+    }
+    assert.equal(db.getDraftJob(job2.jobId)?.status, 'succeeded', '瞬时故障重试后任务必须成功');
+    assert.equal(flakyCalls, 2);
+    // 重新生成成功后旧失败任务被标记 superseded：失败列表不再堆积、重启也不再重试。
+    assert.equal(db.getDraftJob(job1.jobId)?.status, 'superseded');
+    assert.ok(!db.listFailedDraftJobs().some((job) => job.id === job1.jobId));
+    assert.ok(!db.listPendingDraftJobs().some((job) => job.id === job1.jobId));
+  } finally { draftModelRetryDelays.baseMs = originalBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: failed draft jobs list exposes fragment details for regeneration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  const originalBaseMs = draftModelRetryDelays.baseMs;
+  draftModelRetryDelays.baseMs = 1;
+  try {
+    db.upsertCustomer({ id: 'crm-x', name: '客户夕' });
+    const f1 = segment(db, 'crm-x', 'rx:a', 'rx', '话题一', '2026-08-25T05:00:00Z', '聊了第一个话题', '第一个话题的分段摘要');
+    const f2 = segment(db, 'crm-x', 'rx2:a', 'rx2', '话题二', '2026-08-25T07:00:00Z', '聊了第二个话题', '第二个话题的分段摘要');
+    const failing = { llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => ({ stopReason: 'error', errorMessage: 'Request timed out.', content: [] }) } } as any;
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), failing);
+    const queued = service.enqueue('crm-x', [f1.id, f2.id]);
+    await waitForFailed(db, queued[0]!.jobId);
+    const failed = db.listFailedDraftJobs();
+    assert.equal(failed.length, 1);
+    // 执行时回写种子：失败任务的 sourceEventIds 就是当天真实参与片段集合。
+    assert.deepEqual(failed[0].sourceEventIds.sort(), [f1.id, f2.id].sort());
+  } finally { draftModelRetryDelays.baseMs = originalBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: dismissing a batch soft-deletes unwritten items and keeps written ones', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-y', name: '客户尧' });
+    const frag = segment(db, 'crm-y', 'ry:a', 'ry', '话题', '2026-08-25T05:00:00Z', '沟通了部署');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued = service.enqueue('crm-y', [frag.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-y')[0];
+    // dismiss：未写入项（followup/workhour）软删除为 dismissed，批次状态刷新为 stale。
+    const dismissed = service.dismissBatch(batch.id);
+    assert.ok(dismissed.items!.every((item) => item.status === 'dismissed'));
+    assert.equal(dismissed.status, 'stale');
+    assert.throws(() => service.dismissBatch('not-exist'), /draft batch not found/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+async function waitForFailed(db: WorkbenchDatabase, jobId: string): Promise<void> {
+  for (let i = 0; i < 2000 && db.getDraftJob(jobId)?.status !== 'failed'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(db.getDraftJob(jobId)?.status, 'failed');
+}
 
 test('workbench: stale batch heals on re-enqueue and regenerate works from CLI route semantics', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
@@ -2174,16 +2290,16 @@ test('workbench: weekly fingerprint is deterministic per customer-week-eventset'
   assert.notEqual(weeklyFingerprint('crm-w5', '2026-08-24', [a], []), weeklyFingerprint('crm-w6', '2026-08-24', [a], []));
 }));
 
-test('workbench: weekly jobs are isolated from hermory draft jobs by kind', () => withDb((db) => {
+test('workbench: weekly jobs are isolated from daily draft jobs by kind', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-w6', name: '周报客户六' });
   segment(db, 'crm-w6', 'w6:t1', 'w6-r1', '话题', '2026-08-25T05:00:00Z', '内容');
-  const hermoryJob = db.createDraftJob('crm-w6', 'fp-h-1', ['evt-1']);
+  const hemoryJob = db.createDraftJob('crm-w6', 'fp-h-1', ['evt-1']);
   const weeklyJob = db.createDraftJob('crm-w6', 'fp-w-1', ['evt-2'], 'weekly_report');
-  assert.equal(hermoryJob.kind, 'hemory');
+  assert.equal(hemoryJob.kind, 'hemory');
   assert.equal(weeklyJob.kind, 'weekly_report');
   assert.ok(db.listPendingDraftJobs().every((job) => job.kind === 'hemory'), 'hemory resume 不得认领周报任务');
   assert.ok(db.listPendingDraftJobs('weekly_report').every((job) => job.kind === 'weekly_report'));
-  assert.ok(!db.listPendingDraftJobs('weekly_report').some((job) => job.id === hermoryJob.id));
+  assert.ok(!db.listPendingDraftJobs('weekly_report').some((job) => job.id === hemoryJob.id));
   assert.ok(!db.listPendingDraftJobs().some((job) => job.id === weeklyJob.id));
 }));
 

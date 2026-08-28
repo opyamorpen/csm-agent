@@ -97,18 +97,18 @@ function parseOnesTime(value: string | null): number | null {
 
 interface WeeklyContext {
   events: SourceEvent[];
-  hermory: SourceEvent[];
+  hemory: SourceEvent[];
   /** 本周有更新（创建或 field010 落在本周）的工作项集合，按 id 去重。 */
   workItems: SourceEvent[];
   stats: WeeklyReportStats;
 }
 
 /** 沟通次数 = 去重 recordingId 的录音场数（一场长会切出的多个话题片段只算一次）。 */
-function recordingCount(hermory: SourceEvent[]): number {
-  return new Set(hermory.map((event) => String(event.payload?.recordingId ?? event.id))).size;
+function recordingCount(hemory: SourceEvent[]): number {
+  return new Set(hemory.map((event) => String(event.payload?.recordingId ?? event.id))).size;
 }
 
-function buildStats(weekStart: string, context: { workItems: SourceEvent[]; hermory: SourceEvent[]; workhours: number | null; actionsCompleted: number | null }): WeeklyReportStats {
+function buildStats(weekStart: string, context: { workItems: SourceEvent[]; hemory: SourceEvent[]; workhours: number | null; actionsCompleted: number | null }): WeeklyReportStats {
   const range = weekRange(weekStart);
   const inWeek = (at: number) => at >= Date.parse(range.start) && at <= Date.parse(range.end);
   const of = (type: string) => context.workItems.filter((event) => event.sourceType === type);
@@ -123,7 +123,7 @@ function buildStats(weekStart: string, context: { workItems: SourceEvent[]; herm
   };
   const tickets = of('support_ticket');
   return {
-    communications: recordingCount(context.hermory),
+    communications: recordingCount(context.hemory),
     newSuggestions: of('suggestion_feedback').filter(createdInWeek).length,
     newTickets: tickets.filter(createdInWeek).length,
     newOperations: of('operations_ticket').filter(createdInWeek).length,
@@ -148,7 +148,7 @@ interface PromptInput extends WeeklyContext {
 }
 
 function renderContext(input: PromptInput): string {
-  const { customer, weekStart, weekEnd, hermory, workItems, stats, workhourRecords, actions, risk } = input;
+  const { customer, weekStart, weekEnd, hemory, workItems, stats, workhourRecords, actions, risk } = input;
   const range = weekRange(weekStart);
   const itemContext = workItems
     .map((event) => ({ id: event.id, type: event.sourceType, display: event.displayId ?? '', title: event.title,
@@ -160,9 +160,9 @@ function renderContext(input: PromptInput): string {
   const followups = input.events.filter((event) => event.sourceType === 'crm_followup')
     .map((event) => ({ id: event.id, occurred_at: event.occurredAt, title: event.title, content: String(event.payload?.active_record_content ?? event.title).slice(0, 400) }));
   // 转写注入带预算：按片段均摊上限，超预算截取每段开头（约定/风险信号多在对话开头）。
-  const fragments = [...hermory].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).slice(-MAX_HISTORY_FRAGMENTS);
+  const fragments = [...hemory].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).slice(-MAX_HISTORY_FRAGMENTS);
   const perFragment = Math.max(400, Math.floor(TRANSCRIPT_BUDGET / Math.max(1, fragments.length)));
-  const hermoryContext = fragments.map((event) => ({
+  const hemoryContext = fragments.map((event) => ({
     id: event.id, occurred_at: event.occurredAt, topic: event.title, recording_id: String(event.payload?.recordingId ?? ''),
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [],
     summary: typeof event.payload?.summary === 'string' ? event.payload.summary : '',
@@ -173,7 +173,7 @@ function renderContext(input: PromptInput): string {
     week: { start: weekStart, end: weekEnd },
     stats,
     risk: risk ? { level: risk.level, score: risk.score } : null,
-    communications: hermoryContext,
+    communications: hemoryContext,
     work_items: itemContext,
     crm_followups: followups,
     workhours: { total: stats.workhours, records: workhourRecords.map((record) => ({ date: record.startTime, hours: record.hours, description: record.description.slice(0, 120), owner: record.owner ?? '' })) },
@@ -288,27 +288,27 @@ export class WeeklyReportService {
    * 某客户某周的完整事件上下文：创建在本周的全部事件（Hemory 片段、CRM 跟进、工作项等）
    * + 更新在本周的 ONES 工作项（不限创建时间），工作项按 id 去重。
    */
-  private weeklyEvents(customerId: string, weekStart: string): { events: SourceEvent[]; hermory: SourceEvent[]; workItems: SourceEvent[] } {
+  private weeklyEvents(customerId: string, weekStart: string): { events: SourceEvent[]; hemory: SourceEvent[]; workItems: SourceEvent[] } {
     const range = weekRange(weekStart);
     const events = this.db.listSourceEventsInRange(customerId, { since: range.start, until: range.end });
-    const hermory = this.db.listHemoryFragments({ customerId, status: 'confirmed', since: range.start, until: range.end, limit: 500 });
+    const hemory = this.db.listHemoryFragments({ customerId, status: 'confirmed', since: range.start, until: range.end, limit: 500 });
     const updated = this.db.listOnesWorkItemsUpdatedInRange(customerId, range.start, range.end);
     const seen = new Set(events.map((event) => event.id));
     const workItems = [...events.filter((event) => event.sourceSystem === 'ones'
       && ['suggestion_feedback', 'support_ticket', 'operations_ticket', 'private_cloud_instance'].includes(event.sourceType)),
     ...updated.filter((event) => !seen.has(event.id))];
-    return { events, hermory, workItems };
+    return { events, hemory, workItems };
   }
 
   generate(customerId: string, weekStartInput: string, force = false): { jobId: string | null; fingerprint: string; weekStart: string } {
     const customer = this.db.getCustomer(customerId);
     if (!customer) throw new Error('customer not found');
     const weekStart = weekMonday(weekStartInput);
-    const { events, hermory, workItems } = this.weeklyEvents(customerId, weekStart);
-    if (!events.length && !hermory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据（请先同步）`);
+    const { events, hemory, workItems } = this.weeklyEvents(customerId, weekStart);
+    if (!events.length && !hemory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据（请先同步）`);
     // 指纹覆盖创建在本周的事件 + 更新在本周的工作项（按 id 去重），任一变化都会换指纹重建。
     const all = [...events, ...workItems.filter((item) => !events.some((event) => event.id === item.id))];
-    const fingerprint = weeklyFingerprint(customerId, weekStart, all, hermory);
+    const fingerprint = weeklyFingerprint(customerId, weekStart, all, hemory);
     const existingReport = this.db.getWeeklyReportByWeek(customerId, weekStart);
     if (existingReport && !force && existingReport.fingerprint === fingerprint) {
       const job = this.db.findDraftJobByFingerprint(fingerprint);
@@ -317,7 +317,7 @@ export class WeeklyReportService {
     const finalFingerprint = existingReport || force
       ? hash(`${fingerprint}:regenerate:${Date.now()}:${Math.random()}`)
       : fingerprint;
-    const sourceEventIds = [...new Set([...events.map((event) => event.id), ...hermory.map((event) => event.id), ...workItems.map((event) => event.id)])];
+    const sourceEventIds = [...new Set([...events.map((event) => event.id), ...hemory.map((event) => event.id), ...workItems.map((event) => event.id)])];
     const job = this.db.createDraftJob(customerId, finalFingerprint, sourceEventIds, 'weekly_report');
     if (job.status !== 'succeeded') void this.process(job.id);
     return { jobId: job.id, fingerprint: finalFingerprint, weekStart };
@@ -343,8 +343,8 @@ export class WeeklyReportService {
       const anchor = seeded[0];
       const weekStart = weekMonday(anchor.occurredAt);
       const range = weekRange(weekStart);
-      const { events, hermory, workItems } = this.weeklyEvents(customer.id, weekStart);
-      if (!events.length && !hermory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据`);
+      const { events, hemory, workItems } = this.weeklyEvents(customer.id, weekStart);
+      if (!events.length && !hemory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据`);
       // 工时从已同步 payload 取（避免生成路径实时打 ONES MCP）；缺失时按 unknown 处理，不阻塞生成。
       let workhourRecords: Array<{ startTime: string; hours: number; description: string; owner?: string }> = [];
       let workhoursTotal: number | null = null;
@@ -363,10 +363,10 @@ export class WeeklyReportService {
         return action.status === 'completed' && !Number.isNaN(at) && at >= Date.parse(range.start) && at <= Date.parse(range.end);
       }).length;
       const riskRow = this.db.latestRisk(customer.id);
-      const stats = buildStats(weekStart, { workItems, hermory, workhours: workhoursTotal, actionsCompleted });
+      const stats = buildStats(weekStart, { workItems, hemory, workhours: workhoursTotal, actionsCompleted });
       if (!this.runtime) throw new Error('模型未配置，无法生成周报（请检查 LLM 配置后重新生成）');
       let content: WeeklyReportContent;
-      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hermory, workItems, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }); }
+      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hemory, workItems, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }); }
       catch (error) { throw new Error(`模型未生成周报: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const report = this.db.upsertWeeklyReport({ customerId: customer.id, weekStart, weekEnd: range.weekEnd,
@@ -415,7 +415,7 @@ export class WeeklyReportService {
 }
 
 /** 周粒度指纹：同客户同周同事件集合（含内容 hash）复用同一任务；数据变化自然换指纹重建。 */
-export function weeklyFingerprint(customerId: string, weekStart: string, events: SourceEvent[], hermory: SourceEvent[]): string {
-  const all = [...events, ...hermory].sort((a, b) => a.id.localeCompare(b.id)).map((event) => `${event.id}:${event.payloadHash}`);
+export function weeklyFingerprint(customerId: string, weekStart: string, events: SourceEvent[], hemory: SourceEvent[]): string {
+  const all = [...events, ...hemory].sort((a, b) => a.id.localeCompare(b.id)).map((event) => `${event.id}:${event.payloadHash}`);
   return hash(`${WEEKLY_REPORT_GENERATION_VERSION}:${customerId}:${weekStart}:${all.join('|')}`);
 }

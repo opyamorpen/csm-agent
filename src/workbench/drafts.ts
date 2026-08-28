@@ -521,12 +521,10 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
     + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
     + `只输出 JSON：{"drafts":[{"type":"...","title":"...","summary":"...","fields":{},"evidence_refs":["..."],"unknowns":[]}]}。\n`
     + `客户：${customer.name}（CRM ${customer.id}${customer.usageVersion ? `，使用版本 ${customer.usageVersion}` : ''}）\n证据：${JSON.stringify(evidence)}`;
-  const response = await runtime.models.complete(runtime.model, {
-    systemPrompt: '你是 CSM 草稿分类器。你只能整理用户提供的证据，不执行任何工具或外部写入。',
-    messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-    tools: [],
-  });
-  const value = cleanJson(extractText(response.content)) as { drafts?: unknown[] } | null;
+  // 中继端点偶发连接超时（坏窗口可持续数分钟）：complete 不抛异常而是返回 stopReason='error' +
+  // errorMessage，必须显式透出真实原因并指数退避重试（与周报同款 5s→15s→45s），固定短间隔会整个
+  // 落在同一坏窗口内。baseMs 可注入：测试用 1ms 加速。
+  const value = await completeDraftModelWithRetry(runtime, prompt) as { drafts?: unknown[] } | null;
   if (!Array.isArray(value?.drafts)) throw new Error('模型未返回 drafts 数组');
   const allowed = new Set<DraftItemType>(['internal_todo', 'workhour', 'followup', 'suggestion', 'ticket', 'operations']);
   return value.drafts.flatMap((raw) => {
@@ -538,6 +536,33 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
       evidenceRefs: Array.isArray(item.evidence_refs) ? item.evidence_refs.map(String) : undefined,
       unknowns: Array.isArray(item.unknowns) ? item.unknowns.map(String) : [] }];
   });
+}
+
+/** 草稿模型调用重试退避基值（5s→15s→45s）；测试注入 1ms 加速。 */
+export const draftModelRetryDelays = { baseMs: 5_000 };
+
+/** 带指数退避的草稿模型调用：provider 故障（stopReason=error）与不可解析输出都重试，返回可解析 JSON。 */
+async function completeDraftModelWithRetry(runtime: Runtime, prompt: string): Promise<unknown> {
+  const MAX_MODEL_ATTEMPTS = 3;
+  const retryDelayMs = (attempt: number) => draftModelRetryDelays.baseMs * 3 ** (attempt - 1);
+  let lastError = '模型未返回 drafts 数组';
+  for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
+    const response = await runtime.models.complete(runtime.model, {
+      systemPrompt: '你是 CSM 草稿分类器。你只能整理用户提供的证据，不执行任何工具或外部写入。',
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    });
+    if (response.stopReason === 'error') {
+      lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      continue;
+    }
+    const value = cleanJson(extractText(response.content));
+    if (value && Array.isArray((value as { drafts?: unknown[] }).drafts)) return value;
+    lastError = `模型未返回可解析的草稿 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+    if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+  throw new Error(lastError);
 }
 
 /** 片段所属上海自然日；occurred_at 无效时按当前日期兜底。 */
@@ -577,8 +602,10 @@ export function computeWorkhours(events: SourceEvent[]): number | null {
     if (span.end <= span.start) return null;
     total += span.end - span.start;
   }
+  // 人工归属常把长会中的小话题片段标给客户：真实沟通跨度不足 3 分钟会四舍五入成 0.0 小时，
+  // 但沟通确实发生了，按最小计 0.1 小时（6 分钟）产出；只有数据缺失/跨度非法才回退待补充。
   const hours = Math.round((total / 3_600_000) * 10) / 10;
-  return hours > 0 ? hours : null;
+  return hours > 0 ? hours : total > 0 ? 0.1 : null;
 }
 
 /**
@@ -626,6 +653,14 @@ export class HemoryDraftService {
       .filter((job): job is { jobId: string; fingerprint: string } => !!job);
   }
 
+  /** 忽略草稿批次：未写入项软删除为 dismissed（保留审计轨迹），written/writing 项不受影响。 */
+  dismissBatch(batchId: string): DraftBatch {
+    const batch = this.db.dismissDraftBatch(batchId);
+    if (!batch) throw new Error('draft batch not found');
+    this.db.audit('csm', 'dismiss_draft_batch', 'draft_batch', batchId, { customerId: batch.customerId });
+    return batch;
+  }
+
   /**
    * 片段级强制重生成：选中片段只用于确定要重建哪些「客户 + 上海自然日」，各天重取该客户
    * 当天全部已确认活跃片段（与 enqueue/regenerate 同一引擎，不是片段子集生成）。无效片段逐条列明原因。
@@ -668,6 +703,8 @@ export class HemoryDraftService {
       return { jobId: this.db.findDraftJobByFingerprint(fingerprint)?.id ?? '', fingerprint };
     }
     this.db.markDraftsStaleForEvents(events.map((event) => event.id));
+    // 同日重建即宣告旧失败任务已被替代：标记 superseded，失败卡片不再堆积、重启也不再重试。
+    this.db.supersedeFailedDraftJobsForDay(customerId, dateKey);
     const finalFingerprint = existing || force
       ? hash(`${fingerprint}:regenerate:${Date.now()}:${Math.random()}`)
       : fingerprint;
@@ -700,6 +737,9 @@ export class HemoryDraftService {
       const dateKey = shanghaiEventDate(seeded[0]);
       const events = this.db.listConfirmedHemorySegmentsForDay(customer.id, dateKey);
       if (!events.length) throw new Error('没有仍归属于该客户的 Hemory 片段');
+      // 执行时回写实际参与片段集合：任务失败时 sourceEventIds 即失败明细的真实集合
+      //（排队种子可能因期间新归属/忽略片段而与执行集合有偏差）。
+      this.db.updateDraftJobSourceEventIds(jobId, events.map((event) => event.id));
       // 发布豁免：当天已写入 CRM 的沟通（工作台确认的草稿或 CRM 已有跟进记录）之后才算新沟通。
       const cutoff = this.db.followupPublishedCutoff(customer.id, dateKey);
       const followupEvents = cutoff

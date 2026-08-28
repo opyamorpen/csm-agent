@@ -1198,6 +1198,44 @@ export class WorkbenchDatabase {
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
+  /** 失败任务清单（最近 limit 条，默认 50）：失败明细展示与 CLI 入口；不含已被新任务取代的 superseded。 */
+  listFailedDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory', limit = 50): DraftGenerationJob[] {
+    const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status='failed' ORDER BY updated_at DESC LIMIT ?").all(kind, limit) as Row[];
+    return rows.map((row) => this.draftJobFromRow(row));
+  }
+
+  /** 执行时回写实际参与的片段集合：失败任务的 sourceEventIds 即失败明细的真实集合。 */
+  updateDraftJobSourceEventIds(id: string, sourceEventIds: string[]): void {
+    this.db.prepare('UPDATE draft_generation_jobs SET source_event_ids_json=?,updated_at=? WHERE id=?')
+      .run(json(sourceEventIds), nowIso(), id);
+  }
+
+  /** 同客户同日重建时宣告旧失败任务已被取代：不再出现在失败列表，重启也不再重试。 */
+  supersedeFailedDraftJobsForDay(customerId: string, dateKey: string): void {
+    const range = shanghaiDayRange(dateKey);
+    const rows = this.db.prepare("SELECT id,source_event_ids_json FROM draft_generation_jobs WHERE customer_id=? AND status='failed'").all(customerId) as Row[];
+    for (const row of rows) {
+      const ids = parseJson<string[]>(row.source_event_ids_json, []);
+      const inDay = ids.some((id) => {
+        const event = this.getSourceEvent(id);
+        if (!event) return false;
+        const at = new Date(event.occurredAt).getTime();
+        return at >= new Date(range.start).getTime() && at <= new Date(range.end).getTime();
+      });
+      if (inDay) this.db.prepare("UPDATE draft_generation_jobs SET status='superseded',updated_at=? WHERE id=?").run(nowIso(), String(row.id));
+    }
+  }
+
+  /** 忽略草稿批次：未写入项软删除为 dismissed（保留审计轨迹），written/writing 项不受影响。 */
+  dismissDraftBatch(batchId: string): DraftBatch | undefined {
+    const batch = this.getDraftBatch(batchId);
+    if (!batch) return undefined;
+    this.db.prepare("UPDATE draft_items SET status='dismissed',updated_at=? WHERE batch_id=? AND status NOT IN ('written','writing')")
+      .run(nowIso(), batchId);
+    this.refreshDraftBatchStatus(batchId);
+    return this.getDraftBatch(batchId);
+  }
+
   updateDraftJob(id: string, status: DraftGenerationJob['status'], error?: string | null): DraftGenerationJob | undefined {
     this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,updated_at=? WHERE id=?`)
       .run(status, status, error ?? null, nowIso(), id);

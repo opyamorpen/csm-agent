@@ -20,7 +20,7 @@ import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { CaseService } from './workbench/cases.js';
 import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
-import { HemoryDraftService, draftDisplayFields } from './workbench/drafts.js';
+import { HemoryDraftService, draftDisplayFields, shanghaiEventDate } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
@@ -163,13 +163,31 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   const sessions = new Map<string, Session>();
 
   // 草稿确认视图共用最小必填项结构（displayFields），Web 卡片与 CLI 渲染同一份数据。
+  const DRAFT_ITEM_STATUS_LABELS: Record<string, string> = { draft: '草稿', ready: '就绪', writing: '写入中', written: '已写入', failed: '失败', dismissed: '已忽略', stale: '已作废' };
   function decorateDraftBatch(batch: DraftBatch): DraftBatch {
     if (!batch.items) return batch;
-    return { ...batch, items: batch.items.map((item) => decorateDraftItem(item)) };
+    // actionableItemCount：仍需处理（可勾选确认）的条目数；为 0 的批次是纯已作废/已忽略批次，前端默认折叠。
+    const actionableItemCount = batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
+    return { ...batch, actionableItemCount, items: batch.items.map((item) => decorateDraftItem(item)) };
   }
   function decorateDraftItem(item: DraftItem): DraftItem {
     const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
-    return customer ? { ...item, displayFields: draftDisplayFields(workbench.db, item, customer) } : item;
+    const decorated = customer ? { ...item, displayFields: draftDisplayFields(workbench.db, item, customer) } : item;
+    return { ...decorated, statusLabel: DRAFT_ITEM_STATUS_LABELS[item.status] ?? item.status };
+  }
+  // 失败生成任务的片段明细：客户名 + 上海日 + 逐片段摘要（截断），支撑「失败后选片段重新生成」。
+  function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }> } {
+    if (job.status !== 'failed') return job;
+    const fragments: Array<{ id: string; occurredAt: string; topic: string; summary: string }> = [];
+    let dateKey = '';
+    for (const id of job.sourceEventIds) {
+      const event = workbench.db.getSourceEvent(id);
+      if (!event) continue;
+      if (!dateKey) dateKey = shanghaiEventDate(event);
+      const summary = String(event.payload?.summary ?? '').trim();
+      fragments.push({ id: event.id, occurredAt: event.occurredAt, topic: event.title, summary: summary.slice(0, 120) });
+    }
+    return { ...job, dateKey: dateKey || undefined, fragments };
   }
 
   function makeAgent(session: Session): AgentSession {
@@ -530,8 +548,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       // 生成任务状态查询：归属/重生成响应里的 jobId 在此轮询。失败任务不会创建批次，只能通过任务状态感知。
       if (req.method === 'GET' && path === '/api/draft-jobs') {
         const ids = (url.searchParams.get('ids') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
-        const jobs = ids.map((id) => workbench.db.getDraftJob(id)).filter((job): job is DraftGenerationJob => !!job);
-        return json(res, 200, { jobs });
+        // 无 ids 时列出最近失败任务（kind=hemory 日草稿）：失败明细的可发现入口，页面刷新后仍可见。
+        const status = url.searchParams.get('status') ?? 'failed';
+        const kind = url.searchParams.get('kind') === 'weekly_report' ? 'weekly_report' : 'hemory';
+        const jobs = ids.length
+          ? ids.map((id) => workbench.db.getDraftJob(id)).filter((job): job is DraftGenerationJob => !!job)
+          : status === 'failed' ? workbench.db.listFailedDraftJobs(kind) : [];
+        return json(res, 200, { jobs: jobs.map(decorateDraftJob) });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);
       if (draftBatchMatch) {
@@ -548,6 +571,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
         if (req.method === 'POST' && sub === '/regenerate') {
           try { return json(res, 200, { jobs: workbench.drafts.regenerate(batchId) }); }
+          catch (error) { return json(res, 400, { error: (error as Error).message }); }
+        }
+        if (req.method === 'POST' && sub === '/dismiss') {
+          try { return json(res, 200, decorateDraftBatch(workbench.drafts.dismissBatch(batchId))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/confirm') {

@@ -3,7 +3,7 @@ export type ActionStatus = 'new' | 'accepted' | 'in_progress' | 'completed' | 's
 export type AttributionStatus = 'confirmed' | 'ambiguous' | 'unattributed' | 'ignored';
 export type DraftItemType = 'internal_todo' | 'workhour' | 'followup' | 'suggestion' | 'ticket' | 'operations';
 export type DraftItemStatus = 'draft' | 'ready' | 'writing' | 'written' | 'failed' | 'dismissed' | 'stale';
-export type DraftGenerationStatus = 'pending' | 'running' | 'succeeded' | 'failed';
+export type DraftGenerationStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'superseded';
 export type HemorySegmentationStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 export interface CustomerInput {
@@ -180,6 +180,8 @@ export interface DraftBatch {
   generator: string;
   status: string;
   items?: DraftItem[];
+  /** 服务端装饰：仍需处理（可确认）的条目数；0 = 纯已作废/已忽略批次，前端默认折叠。 */
+  actionableItemCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -211,6 +213,8 @@ export interface DraftItem {
   result?: Record<string, unknown> | null;
   error?: string | null;
   displayFields?: DraftDisplayField[];
+  /** 服务端装饰：状态中文标签（草稿/就绪/写入中/已写入/失败/已忽略/已作废）。 */
+  statusLabel?: string;
   createdAt: string;
   updatedAt: string;
 }

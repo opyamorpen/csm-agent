@@ -67,6 +67,7 @@
   const hemorySelectedCount = document.getElementById('hemorySelectedCount');
   const hemoryFragmentList = document.getElementById('hemoryFragmentList');
   const draftBatchList = document.getElementById('draftBatchList');
+  const draftFailedJobs = document.getElementById('draftFailedJobs');
   const draftGenerationNotice = document.getElementById('draftGenerationNotice');
   const draftGenerationText = document.getElementById('draftGenerationText');
   const globalSync = document.getElementById('globalSync');
@@ -105,6 +106,7 @@
   let archivedExpanded = false;
   const draftJobTracking = new Map();
   let draftJobTimer = null;
+  let draftArchivedExpanded = false;
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -1355,20 +1357,35 @@
     const pending = batches.flatMap((batch) => batch.items || []).filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
     draftPendingCount.textContent = pending || '';
     updateAgentNavCount();
+    await renderDraftFailedJobs();
     draftBatchList.innerHTML = '';
     if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
-    for (const batch of batches) {
+    // 纯已作废/已忽略批次默认折叠成一行摘要（点击展开，展开态在整表重渲染间保持）：
+    // 这些卡片 checkbox 被禁用且不再需要处理，留在列表里只会让「选不中」像故障。
+    const actionable = batches.filter((batch) => (batch.actionableItemCount ?? batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length) > 0);
+    const archived = batches.filter((batch) => !actionable.includes(batch));
+    if (archived.length) {
+      const row = el('button', 'draft-archive-toggle');
+      row.type = 'button';
+      row.textContent = draftArchivedExpanded ? `收起已作废/已忽略批次（${archived.length} 个）` : `已作废/已忽略批次（${archived.length} 个），点击展开`;
+      row.onclick = () => { draftArchivedExpanded = !draftArchivedExpanded; void loadDraftBatches(); };
+      draftBatchList.append(row);
+    }
+    for (const batch of (draftArchivedExpanded ? [...actionable, ...archived] : actionable)) {
       const section = el('section', 'draft-batch');
       const head = el('div', 'draft-batch-head');
       const customer = customersCache.find((item) => item.id === batch.customerId);
       const title = el('div'); title.append(el('strong', null, customer?.name || batch.customerId), el('div', 'cell-sub', `${formatDateTime(batch.updatedAt)} · ${batch.generator} · ${batch.status}`));
+      const headActions = el('div', 'row-actions');
       const confirmButton = el('button', 'primary-command small', '确认所选草稿');
+      confirmButton.type = 'button';
       confirmButton.onclick = () => confirmDraftBatch(batch, section);
-      head.append(title, confirmButton);
+      headActions.append(confirmButton);
       // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
       const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
-      if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors) {
+      if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch)) {
         const regenerate = el('button', 'quiet-command small', '重新生成');
+        regenerate.type = 'button';
         regenerate.onclick = async () => {
           if (!await confirmDialog('重新生成将作废该批次未写入的草稿并按当前片段重新整理，继续？')) return;
           try {
@@ -1378,8 +1395,20 @@
           }
           catch (error) { alertDialog(error.message); }
         };
-        head.append(regenerate);
+        headActions.append(regenerate);
       }
+      // 忽略批次：作废/阻断批次不需要重生成时的软删除出口（已写入项不受影响）。
+      if ((batch.items || []).some((item) => !['written', 'writing'].includes(item.status))) {
+        const dismiss = el('button', 'quiet-command small', '忽略批次');
+        dismiss.type = 'button';
+        dismiss.onclick = async () => {
+          if (!await confirmDialog('忽略后未写入的草稿不再出现在待处理列表（已写入项不受影响），继续？')) return;
+          try { await api(`/api/draft-batches/${batch.id}/dismiss`, { method: 'POST' }); await loadDraftBatches(); }
+          catch (error) { alertDialog(error.message); }
+        };
+        headActions.append(dismiss);
+      }
+      head.append(title, headActions);
       section.append(head);
       for (const item of batch.items || []) {
         // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing）点击无效，仅去掉手型提示。
@@ -1388,7 +1417,7 @@
         selector.disabled = ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
         if (selector.disabled) row.classList.add('draft-item-disabled');
         const body = el('div', 'draft-item-body');
-        const itemHead = el('div', 'draft-item-head'); itemHead.append(badge(draftTypeLabel(item.type), 'accent'), el('strong', null, item.title), badge(item.status, item.status === 'written' ? 'success' : item.status === 'failed' ? 'risk-high' : 'warning'));
+        const itemHead = el('div', 'draft-item-head'); itemHead.append(badge(draftTypeLabel(item.type), 'accent'), el('strong', null, item.title), badge(item.statusLabel || item.status, item.status === 'written' ? 'success' : item.status === 'failed' ? 'risk-high' : item.status === 'stale' || item.status === 'dismissed' ? 'muted' : 'warning'));
         body.append(itemHead);
         // 最小必填项结构化展示（displayFields 由服务端按类型生成），取代原来的整段摘要。
         if (item.displayFields?.length) {
@@ -1423,6 +1452,63 @@
         body.append(actions); row.append(selector, body); section.append(row);
       }
       draftBatchList.append(section);
+    }
+  }
+
+  /**
+   * 失败生成任务卡片：失败任务不建批次、轮询状态栏刷新即丢——这里是持久入口。
+   * 展示客户+日期+真实错误+涉及片段明细（默认收起），并提供「重新生成」（按天重建，与收件箱同引擎）。
+   */
+  async function renderDraftFailedJobs() {
+    let failed = [];
+    try {
+      const data = await api('/api/draft-jobs?status=failed&kind=hemory');
+      failed = (data.jobs || []).filter((job) => job.status === 'failed');
+    } catch (error) { /* 失败列表加载失败不打断草稿箱主体 */ }
+    draftFailedJobs.innerHTML = '';
+    if (!failed.length) { draftFailedJobs.classList.add('hidden'); return; }
+    draftFailedJobs.classList.remove('hidden');
+    const heading = el('div', 'draft-failed-head', `草稿生成失败（${failed.length} 个任务）`);
+    draftFailedJobs.append(heading);
+    for (const job of failed) {
+      const customer = customersCache.find((item) => item.id === job.customerId);
+      const card = el('div', 'draft-failed-card');
+      const cardHead = el('div', 'draft-failed-card-head');
+      cardHead.append(el('strong', null, `${customer?.name || job.customerId}${job.dateKey ? ` · ${job.dateKey}` : ''}（${(job.fragments || []).length} 个片段）`));
+      const actions = el('div', 'row-actions');
+      if ((job.fragments || []).length) {
+        const details = el('button', 'quiet-command small', '片段明细');
+        details.type = 'button';
+        details.onclick = () => {
+          const list = card.querySelector('.draft-failed-fragments');
+          if (!list) return;
+          const expanding = list.classList.contains('hidden');
+          list.classList.toggle('hidden', !expanding);
+          details.textContent = expanding ? '收起明细' : '片段明细';
+        };
+        actions.append(details);
+      }
+      const regenerate = el('button', 'primary-command small', '重新生成');
+      regenerate.type = 'button';
+      withLoading(regenerate, '重新生成中…', async () => {
+        try {
+          const eventIds = (job.fragments || []).map((fragment) => fragment.id);
+          if (!eventIds.length) return alertDialog('该任务没有可用的片段明细，请在 Hemory 收件箱重新归属后生成');
+          await regenerateHemoryDrafts(eventIds);
+          await loadDraftBatches();
+        } catch (error) { await alertDialog(error.message); }
+      });
+      actions.append(regenerate);
+      cardHead.append(actions);
+      card.append(cardHead);
+      card.append(el('div', 'draft-errors', job.error || '未知原因'));
+      const list = el('div', 'draft-failed-fragments hidden');
+      for (const fragment of job.fragments || []) {
+        list.append(el('div', 'draft-failed-fragment-row',
+          `${formatDateTime(fragment.occurredAt)} · ${fragment.topic}${fragment.summary ? `：${fragment.summary}` : ''}`));
+      }
+      card.append(list);
+      draftFailedJobs.append(card);
     }
   }
 

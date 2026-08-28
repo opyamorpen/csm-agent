@@ -39,6 +39,43 @@ test('draft inbox exposes regenerate control and operations label', () => {
   assert.match(source, /operations: '运维工单'/);
 });
 
+test('draft inbox collapses fully stale batches and exposes dismiss control', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // 纯已作废/已忽略批次折叠成一行摘要按钮，展开态跨重渲染保持。
+  assert.match(renderer, /actionableItemCount/);
+  assert.match(renderer, /draftArchivedExpanded/);
+  assert.match(renderer, /已作废\/已忽略批次/);
+  assert.match(renderer, /draft-archive-toggle/);
+  // 忽略批次：软删除出口，已写入项不受影响。
+  assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/dismiss/);
+  assert.match(renderer, /忽略后未写入的草稿不再出现在待处理列表/);
+  // 状态徽标用服务端中文标签（statusLabel），禁用卡片灰化增强。
+  assert.match(renderer, /item\.statusLabel \|\| item\.status/);
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.draft-item-disabled \{ cursor: default; background: #f7f8fa; opacity: 0\.62; \}/);
+  assert.match(styles, /\.draft-archive-toggle \{/);
+});
+
+test('draft inbox renders persistent failed generation jobs with fragment details', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function renderDraftFailedJobs[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'renderDraftFailedJobs source was not found');
+  // 失败任务列表来自 /api/draft-jobs?status=failed&kind=hemory：页面刷新后失败明细仍可见。
+  assert.match(renderer, /\/api\/draft-jobs\?status=failed&kind=hemory/);
+  // 卡片展示客户+日期+片段数、真实错误、片段明细（默认收起可展开）与重新生成入口。
+  assert.match(renderer, /job\.fragments \|\| \[\]/);
+  assert.match(renderer, /fragment\.topic/);
+  assert.match(renderer, /draft-failed-fragments/);
+  assert.match(renderer, /regenerateHemoryDrafts\(eventIds\)/);
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.draft-failed-card \{/);
+  assert.match(styles, /\.draft-failed-fragment-row \{/);
+});
+
 test('draft cards render structured minimal required fields instead of a summary blob', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
