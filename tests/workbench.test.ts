@@ -563,6 +563,33 @@ async function waitForJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
   assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
 }
 
+test('workbench: draft prompt carries the ONES ASR phonetic-alias rule', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-asr-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-asr', name: '近音客户' });
+    // 转写里产品名被 ASR 误转为「万斯」：草稿提示词必须携带近音词规则供模型订正。
+    const event = segment(db, 'crm-asr', 'rasr:t1', 'rasr', '万斯报表话题', '2026-08-25T05:00:00Z',
+      '客户说万斯报表还不支持导出，希望后续能加上');
+    let capturedPrompt = '';
+    const runtime = { llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify({ drafts: [] }) }], stopReason: 'stop' };
+      } } } as any;
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), runtime);
+    const queued = service.enqueue('crm-asr', [event.id]);
+    assert.equal(queued.length, 1);
+    await waitForJob(db, queued[0].jobId);
+    assert.match(capturedPrompt, /语音识别/);
+    assert.match(capturedPrompt, /发音相近/);
+    for (const alias of ['万死', '万斯', '万四', 'vans']) assert.ok(capturedPrompt.includes(alias), `提示词必须包含近音词 ${alias}`);
+    assert.match(capturedPrompt, /优先理解为并写作 ONES/);
+    assert.match(capturedPrompt, /仅当上下文明确指向其他事物/);
+    assert.match(capturedPrompt, /所属产品\/所属模块按对应的 ONES 产品线归类/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: same-day fragments merge into one batch with a single followup and a paired workhour draft', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
   const db = new WorkbenchDatabase(dir);
@@ -2205,6 +2232,11 @@ test('workbench: weekly report generation uses full-context model call and persi
     assert.match(capturedPrompt, /约定周四复测/);
     assert.match(capturedPrompt, /问题排查/);
     assert.match(capturedPrompt, /next_week_plan/);
+    // 近音词规则与「原话保持口语原样」的订正优先级说明都必须注入周报提示词。
+    assert.match(capturedPrompt, /发音相近/);
+    for (const alias of ['万死', '万斯', 'vans']) assert.ok(capturedPrompt.includes(alias), `周报提示词必须包含近音词 ${alias}`);
+    assert.match(capturedPrompt, /优先理解为并写作 ONES/);
+    assert.match(capturedPrompt, /订正优先于/);
     // 幂等：同指纹再次生成复用任务，不新建。
     const again = service.generate('crm-w2', '2026-08-26');
     assert.equal(again.jobId, result.jobId);

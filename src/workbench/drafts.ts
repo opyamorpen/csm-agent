@@ -7,7 +7,7 @@ import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
-export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-product-hints';
+export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v4-ones-asr-aliases';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 export const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 export type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
@@ -497,6 +497,14 @@ function hasOnesDraftSignal(type: OnesDeskDraftType, events: SourceEvent[]): boo
   return ONES_SIGNAL_PATTERNS[type].test(onesSignalText(events, type !== 'ticket'));
 }
 
+/** ASR 近音误转词表：产品名 ONES 在转写里常见的同/近音误写，供草稿/周报/写回提示词共用。 */
+export const ONES_PHONETIC_ALIASES = ['万死', '万斯', '万四', '万思', '旺斯', '万私', 'one 死', 'one 思', "one's", 'once', 'vans'];
+
+/** 转写近音词规则（草稿/周报提示词共用）：误转的产品名优先匹配为 ONES，靠上下文避免误伤其他含义。 */
+export function onesAsrAliasRule(): string {
+  return `转写由语音识别生成，产品名 ONES 常被误转为发音相近的词（如 ${ONES_PHONETIC_ALIASES.join('、')} 等）。凡上下文指代产品之处，一律优先理解为并写作 ONES（引用客户原话时同样订正为 ONES）；仅当上下文明确指向其他事物（如人名）时保留原词。`;
+}
+
 async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[]): Promise<DraftProposal[]> {
   const unpublished = new Set(unpublishedEvents.map((event) => event.id));
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
@@ -510,6 +518,7 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
   const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
     + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段；其 fields 必须包含 one_line_summary（一句话总结当天沟通）和 sections 数组——published=false 的每个片段恰好一项 {"evidence_id":"片段id","summary":"该片段的摘要"}。每段 summary 2~4 句，忠于该片段自己的转写，写明该话题的关键结论、决定与后续行动，不得与其他片段的 summary 雷同、不得写成全天综述。sections 必须覆盖全部 published=false 片段，不得遗漏。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
     + `workhour 不必输出（系统按录音时长自动计算并连带生成）。internal_todo 可以输出多条，每条对应独立的行动；只返回有证据支持的草稿。\n`
+    + `${onesAsrAliasRule()}ones_required 的所属产品/所属模块按对应的 ONES 产品线归类。\n`
     + `suggestion/ticket/operations 是要写入 ONES 的工作项，宁缺毋滥：必须严格满足以下判定标准，沟通证据不足以判定就不输出该草稿（相关内容仍会保留在沟通记录里）。\n`
     + `- suggestion（建议和反馈）：客户明确表达产品能力不满足——如“现在还满足不了我们的需求”“标品还不支持这个”“这个需求我反馈一下”“希望以后支持/增加某功能”。方案讨论、workaround、客户内部流程、商务与付费话题、对交付节奏的不满都不算。\n`
     + `- ticket（工单）：客户明确指认产品缺陷——如“这是个 bug”“这不符合预期”“行为不正常”“数据算错了”。单纯的疑问、配置咨询、使用方法讨论、性能慢的抱怨不算。\n`

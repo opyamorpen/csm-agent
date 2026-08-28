@@ -4,10 +4,11 @@ import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
 import { shanghaiDateKey } from './sync.js';
+import { onesAsrAliasRule } from './drafts.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, SourceEvent, WeeklyReport, WeeklyReportContent, WeeklyReportStats } from './types.js';
 
-export const WEEKLY_REPORT_GENERATION_VERSION = 'weekly-report-v1';
+export const WEEKLY_REPORT_GENERATION_VERSION = 'weekly-report-v2-asr-alias';
 
 /** 周报四章节的字段契约（templates/weekly-report.json 同源描述，供前端/CLI 展示）。 */
 export const WEEKLY_REPORT_SECTIONS: Array<{ key: keyof WeeklyReportContent; label: string }> = [
@@ -215,6 +216,7 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
     + `3. next_week_plan（下周工作计划）：**主要证据是本周沟通片段（communications 里的 transcript/summary）中双方约定的后续动作与承诺**——复测/验证时间点、答应交付的事项、约定下次沟通主题、正在推进事项的下一步；再合并 actions 里未完成的行动事项与未关闭工单/建议，去重后逐条列出。每条 source 标注依据（如 "08-27 会议约定"、"行动事项"、"工单 T-2005"）。沟通中没有约定的事项不得编造。\n`
     + `4. risks（问题风险与阻塞）：**主要证据是本周沟通片段中客户表达的问题与风险信号**——不满/抱怨、担忧、疑虑、外部依赖（客户机房窗口、第三方配合）、悬而未决的争议点；再合并阻塞工单（status 含阻塞/挂起）与当前风险评级。每条 source 标注依据（如 "08-26 电话"、"工单 T-2005"、"风险评级 medium"）。沟通中没有表达的担忧不得编造。\n`
     + `通用规则：缺失数据按 unknown 表述，不得虚构事实；引用客户原话时保持口语原样可加引号；source 里的日期用 MM-DD。\n`
+    + `${onesAsrAliasRule()}该订正优先于“引用客户原话时保持口语原样”的规则。\n`
     + `上下文：${renderContext(input)}`;
   // 中继端点偶发连接超时（undici 10s 连接超时，实测坏窗口可持续数分钟）：complete 不抛异常而是
   // 返回 stopReason='error' + errorMessage，必须显式透出真实原因并自动重试；固定短间隔重试会整个
