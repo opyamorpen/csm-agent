@@ -203,6 +203,37 @@ test('app dialogs replace native confirm/alert/prompt for WKWebView compatibilit
   assert.match(html, /id="appDialogInput"/);
 });
 
+test('weekly actions view exposes bulk accept and bulk complete with selection toolbar', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 工具条：全选 + 已选计数 + 批量接受/完成按钮（静态 DOM，仅本周行动页）。
+  assert.match(html, /id="actionSelectAll"/);
+  assert.match(html, /id="actionSelectedCount"/);
+  assert.match(html, /id="actionBulkAccept"/);
+  assert.match(html, /id="actionBulkComplete"/);
+  assert.match(html, />批量接受</);
+  assert.match(html, />批量完成</);
+  // 卡片勾选：仅可操作状态（new/accepted/in_progress）头插 checkbox，dataset 带 actionId。
+  const card = source.match(/function actionCard[\s\S]*?\n  }\n\n  function inputField/)?.[0];
+  assert.ok(card, 'actionCard source was not found');
+  assert.match(card, /selectable && \['new', 'accepted', 'in_progress'\]\.includes\(action\.status\)/);
+  assert.match(card, /check\.dataset\.actionId = action\.id/);
+  // 批量接口与逐项语义：批量完成弹一次共用结果输入（取消中止、留空用默认）。
+  assert.match(source, /\/api\/action-items\/bulk-accept/);
+  assert.match(source, /\/api\/action-items\/bulk-complete/);
+  assert.match(source, /记录实际结果（留空使用默认）/);
+  assert.match(source, /仅待处理状态会被接受，其余跳过/);
+  // 勾选联动：全选跟随 + 已选 n/m 计数 + 批量期间按钮禁用。
+  assert.match(source, /function updateActionSelection\(\)/);
+  assert.match(source, /已选 \$\{selected\}\/\$\{checks\.length\}/);
+  assert.match(source, /function setActionBulkBusy\(busy\)/);
+  // 操作条样式。
+  assert.match(styles, /\.action-bulk-bar \{/);
+  assert.match(styles, /\.action-head input\[type="checkbox"\]/);
+});
+
 test('hemory inbox exposes ignore and restore actions with incremental sync', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');

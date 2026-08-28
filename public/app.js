@@ -80,6 +80,10 @@
   const customerOverview = document.getElementById('customerOverview');
   const actionBoard = document.getElementById('actionBoard');
   const actionNavCount = document.getElementById('actionNavCount');
+  const actionSelectAll = document.getElementById('actionSelectAll');
+  const actionSelectedCount = document.getElementById('actionSelectedCount');
+  const actionBulkAccept = document.getElementById('actionBulkAccept');
+  const actionBulkComplete = document.getElementById('actionBulkComplete');
   const caseList = document.getElementById('caseList');
   const workbenchModal = document.getElementById('workbenchModal');
   const workbenchModalTitle = document.getElementById('workbenchModalTitle');
@@ -1893,9 +1897,19 @@
     return button;
   }
 
-  function actionCard(action, customerMode) {
+  /**
+   * 单条行动卡。selectable（本周行动页）：可操作状态（待处理/已接受/进行中）头插勾选框参与批量接受/完成；
+   * 客户详情行动 tab 不传参，维持纯单条操作。
+   */
+  function actionCard(action, customerMode, selectable = false) {
     const card = el('article', 'action-card');
     const head = el('div', 'action-head');
+    if (selectable && ['new', 'accepted', 'in_progress'].includes(action.status)) {
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.dataset.actionId = action.id;
+      head.append(check);
+    }
     head.append(el('strong', null, action.title), badge(action.status, `status-${action.status}`));
     card.append(head, el('p', null, action.whyNow), el('div', 'action-meta', `${action.owner || '未分配'} · ${action.dueAt ? formatDateTime(action.dueAt) : '无截止时间'} · 置信度 ${Math.round((action.confidence || 0) * 100)}%`));
     const buttons = el('div', 'row-actions');
@@ -2323,8 +2337,75 @@
     actionNavCount.textContent = actions.filter((a) => !['completed', 'false_positive'].includes(a.status)).length || '';
     actionBoard.innerHTML = '';
     if (!actions.length) actionBoard.append(el('div', 'workspace-empty', '暂无待处理行动'));
-    for (const action of actions) actionBoard.append(actionCard(action, false));
+    for (const action of actions) actionBoard.append(actionCard(action, false, true));
+    updateActionSelection();
   }
+
+  // ── 本周行动批量操作：勾选联动 + 批量接受/完成（逐项处理，单项失败/跳过不影响其他项）──
+  function selectedActionIds() {
+    return [...actionBoard.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.actionId);
+  }
+
+  function updateActionSelection() {
+    const checks = [...actionBoard.querySelectorAll('input[type="checkbox"]')];
+    const selected = checks.filter((input) => input.checked).length;
+    actionSelectedCount.textContent = checks.length ? `已选 ${selected}/${checks.length}` : '';
+    actionSelectAll.checked = checks.length > 0 && selected === checks.length;
+  }
+
+  function setActionBulkBusy(busy) {
+    actionBulkAccept.disabled = busy;
+    actionBulkComplete.disabled = busy;
+  }
+
+  function actionBulkSummary(label, items) {
+    const counts = { accepted: 0, completed: 0, skipped: 0, failed: 0 };
+    for (const item of items) counts[item.result] = (counts[item.result] ?? 0) + 1;
+    const parts = [];
+    if (counts.accepted) parts.push(`${counts.accepted} 项接受`);
+    if (counts.completed) parts.push(`${counts.completed} 项完成`);
+    if (counts.skipped) parts.push(`${counts.skipped} 项跳过`);
+    if (counts.failed) parts.push(`${counts.failed} 项失败`);
+    setStatus(counts.failed ? 'warn' : 'ok', `${label}：${parts.join('，')}`);
+    if (counts.failed) {
+      const detail = items.filter((item) => item.result === 'failed')
+        .map((item) => `${item.title || item.id}：${item.error || item.reason || '失败'}`).join('\n');
+      void alertDialog(`以下行动处理失败：\n${detail}`);
+    }
+  }
+
+  actionBoard.addEventListener('change', (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') updateActionSelection();
+  });
+  actionSelectAll.onchange = () => {
+    for (const input of actionBoard.querySelectorAll('input[type="checkbox"]')) input.checked = actionSelectAll.checked;
+    updateActionSelection();
+  };
+  actionBulkAccept.onclick = async () => {
+    const ids = selectedActionIds();
+    if (!ids.length) return alertDialog('请先选择行动');
+    if (!await confirmDialog(`确认接受选中的 ${ids.length} 项行动？仅待处理状态会被接受，其余跳过。`)) return;
+    setActionBulkBusy(true);
+    try {
+      const data = await api('/api/action-items/bulk-accept', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+      await loadActions();
+      actionBulkSummary('批量接受', data.items || []);
+    } catch (error) { await alertDialog(error.message); }
+    finally { setActionBulkBusy(false); }
+  };
+  actionBulkComplete.onclick = async () => {
+    const ids = selectedActionIds();
+    if (!ids.length) return alertDialog('请先选择行动');
+    const outcome = await promptDialog(`完成选中的 ${ids.length} 项行动，记录实际结果（留空使用默认）：`, '');
+    if (outcome === null) return;
+    setActionBulkBusy(true);
+    try {
+      const data = await api('/api/action-items/bulk-complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, outcome: outcome.trim() || undefined }) });
+      await loadActions();
+      actionBulkSummary('批量完成', data.items || []);
+    } catch (error) { await alertDialog(error.message); }
+    finally { setActionBulkBusy(false); }
+  };
 
   function caseCard(draft) {
     const card = el('article', 'case-card-item');

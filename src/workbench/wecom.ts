@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { WorkbenchDatabase } from './database.js';
+import type { ActionBulkResult } from './types.js';
 
 export interface WecomConfig {
   corpId?: string;
@@ -162,6 +163,29 @@ export class WecomTodoService {
     this.db.updateAction(actionItemId, { status: 'completed', outcome: outcome ?? 'CSM 在工作台确认完成' });
     if (link) this.db.updateWecomTodoStatus(actionItemId, 0);
     this.db.audit('csm', 'complete_action', 'action_item', actionItemId, { todoId: link?.todo_id, outcome });
+  }
+
+  /** 批量完成：逐项复用 complete（含企微回写与审计）；单项失败/跳过不影响其他项，不整体回滚。 */
+  async bulkComplete(ids: string[], outcome?: string): Promise<ActionBulkResult[]> {
+    const results: ActionBulkResult[] = [];
+    for (const id of [...new Set(ids)]) {
+      const action = this.db.getAction(id);
+      if (!action) {
+        results.push({ id, title: null, result: 'failed', error: '行动不存在' });
+        continue;
+      }
+      if (!['accepted', 'in_progress'].includes(action.status)) {
+        results.push({ id, title: action.title, result: 'skipped', reason: `当前状态 ${action.status}，仅已接受/进行中可完成` });
+        continue;
+      }
+      try {
+        await this.complete(id, outcome);
+        results.push({ id, title: action.title, result: 'completed' });
+      } catch (error) {
+        results.push({ id, title: action.title, result: 'failed', error: (error as Error).message });
+      }
+    }
+    return results;
   }
 
   async syncActive(): Promise<{ synced: number; failed: number }> {

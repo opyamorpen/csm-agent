@@ -8,11 +8,12 @@ import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
+import { WecomTodoService } from '../src/workbench/wecom.js';
 
-function withDb(fn: (db: WorkbenchDatabase) => void): void {
+async function withDb(fn: (db: WorkbenchDatabase) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-workbench-'));
   const db = new WorkbenchDatabase(dir);
-  try { fn(db); } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+  try { await fn(db); } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 }
 
 test('workbench: CRM id is the stable customer key and missing data stays unknown', () => withDb((db) => {
@@ -217,6 +218,57 @@ test('workbench: todo intents are one-time and action completion is persisted', 
   db.linkWecomTodo(action.id, 'todo-1', 'bo', ['bo']);
   db.updateWecomTodoStatus(action.id, 0);
   assert.equal(db.getAction(action.id)?.status, 'completed');
+}));
+
+test('workbench: bulk accept applies per item with skipped/failed and per-item audit', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-b1', name: '批量客户' });
+  const a1 = db.createAction({ customerId: 'crm-b1', title: '行动一', whyNow: '原因一' });
+  const a2 = db.createAction({ customerId: 'crm-b1', title: '行动二', whyNow: '原因二' });
+  const a3 = db.createAction({ customerId: 'crm-b1', title: '行动三', whyNow: '原因三' });
+  db.updateAction(a3.id, { status: 'accepted' });
+  // 重复 ID 去重：同一次调用里 a1 只处理一次，结果条数与输入去重后一致。
+  const results = db.bulkAcceptActions([a1.id, a2.id, a3.id, 'missing-id', a1.id]);
+  assert.deepEqual(results.map((item) => item.result), ['accepted', 'accepted', 'skipped', 'failed']);
+  assert.equal(results[2].reason, '当前状态 accepted，仅待处理可接受');
+  assert.equal(results[3].title, null);
+  assert.equal(db.getAction(a1.id)?.status, 'accepted');
+  assert.equal(db.getAction(a2.id)?.status, 'accepted');
+  assert.equal(db.getAction(a3.id)?.status, 'accepted');
+  const audited = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='accept_action' AND entity_type='action_item'").get() as { n: number };
+  assert.equal(audited.n, 2);
+  // 再跑一遍：已接受的全部跳过，幂等不重复审计。
+  const again = db.bulkAcceptActions([a1.id, a2.id]);
+  assert.deepEqual(again.map((item) => item.result), ['skipped', 'skipped']);
+  const auditedAgain = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='accept_action'").get() as { n: number };
+  assert.equal(auditedAgain.n, 2);
+}));
+
+test('workbench: bulk complete degrades only failing item and keeps default outcome', async () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-b2', name: '完成客户' });
+  const ok = db.createAction({ customerId: 'crm-b2', title: '普通行动', whyNow: '原因' });
+  db.updateAction(ok.id, { status: 'accepted' });
+  const linked = db.createAction({ customerId: 'crm-b2', title: '带企微待办', whyNow: '原因', ownerWecomUserid: 'bo' });
+  db.updateAction(linked.id, { status: 'in_progress' });
+  db.linkWecomTodo(linked.id, 'todo-x', 'bo', ['bo']);
+  const fresh = db.createAction({ customerId: 'crm-b2', title: '未接受行动', whyNow: '原因' });
+  // 未配置企微（无 corpId 等 env）时 updateTodo 必抛：链接项 failed，其余照常完成，验证部分失败不回滚。
+  const service = new WecomTodoService(db);
+  const results = await service.bulkComplete([ok.id, linked.id, fresh.id, 'missing-id']);
+  assert.deepEqual(results.map((item) => item.result), ['completed', 'failed', 'skipped', 'failed']);
+  assert.match(results[1].error ?? '', /企业微信未配置/);
+  assert.equal(results[2].reason, '当前状态 new，仅已接受/进行中可完成');
+  assert.equal(db.getAction(ok.id)?.status, 'completed');
+  assert.equal(db.getAction(ok.id)?.outcome, 'CSM 在工作台确认完成');
+  assert.equal(db.getAction(linked.id)?.status, 'in_progress');
+  assert.equal(db.getAction(fresh.id)?.status, 'new');
+  const completed = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='complete_action' AND entity_id=?").get(ok.id) as { n: number };
+  assert.equal(completed.n, 1);
+  // 显式 outcome 传播到完成项。
+  const next = db.createAction({ customerId: 'crm-b2', title: '指定结果行动', whyNow: '原因' });
+  db.updateAction(next.id, { status: 'accepted' });
+  const withOutcome = await service.bulkComplete([next.id], '已同步上线');
+  assert.equal(withOutcome[0].result, 'completed');
+  assert.equal(db.getAction(next.id)?.outcome, '已同步上线');
 }));
 
 test('workbench: case drafts use optimistic versions', () => withDb((db) => {

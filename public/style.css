@@ -557,6 +557,11 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .recommended { margin-top: 9px; padding: 8px 10px; background: #edf6f0; border-left: 3px solid #2a8253; color: #245d40; }
 .action-board, .case-list { display: grid; gap: 9px; }
 .action-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+/* 批量接受/完成操作条：复用 Hemory 归属栏的 34px 单行居中契约（select-all/计数沿用同款类）。 */
+.action-bulk-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; background: #f7f8fa; }
+/* 勾选框入卡片头：标题占据剩余宽度，徽标靠右不位移。 */
+.action-head input[type="checkbox"] { width: 16px; height: 16px; margin: 3px 0 0; flex: none; accent-color: var(--accent); cursor: pointer; }
+.action-head strong { flex: 1; }
 .action-meta { margin: 7px 0 10px; color: var(--muted); font-size: 12px; }
 .business-badge.status-new { color: #845400; }
 .business-badge.status-accepted, .business-badge.status-in_progress { color: #1e4eaa; }

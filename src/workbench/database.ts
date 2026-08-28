@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type {
+  ActionBulkResult,
   ActionItem,
   ActionItemInput,
   ActionStatus,
@@ -1097,6 +1098,26 @@ export class WorkbenchDatabase {
         patch.expectedOutcome ?? current.expectedOutcome ?? null, json(patch.evidenceRefs ?? current.evidenceRefs ?? []),
         patch.status ?? current.status, patch.outcome ?? current.outcome ?? null, nowIso(), id);
     return this.getAction(id)!;
+  }
+
+  /** 批量接受：逐项处理互不影响——不存在 failed、非待处理 skipped、其余置 accepted 并逐条审计。 */
+  bulkAcceptActions(ids: string[], actor = 'csm'): ActionBulkResult[] {
+    const results: ActionBulkResult[] = [];
+    for (const id of [...new Set(ids)]) {
+      const action = this.getAction(id);
+      if (!action) {
+        results.push({ id, title: null, result: 'failed', error: '行动不存在' });
+        continue;
+      }
+      if (action.status !== 'new') {
+        results.push({ id, title: action.title, result: 'skipped', reason: `当前状态 ${action.status}，仅待处理可接受` });
+        continue;
+      }
+      this.updateAction(id, { status: 'accepted' });
+      this.audit(actor, 'accept_action', 'action_item', id, {});
+      results.push({ id, title: action.title, result: 'accepted' });
+    }
+    return results;
   }
 
   createSyncRun(scope: string, customerId?: string | null): SyncRun {

@@ -59,6 +59,12 @@
 
       <section id="actionsView" class="workbench-view hidden">
         <div class="view-head"><div><h1>本周行动</h1><p>按状态和截止时间排序</p></div></div>
+        <div class="action-bulk-bar">
+          <label class="hemory-select-all"><input id="actionSelectAll" type="checkbox" /><span>全选</span></label>
+          <span id="actionSelectedCount" class="hemory-selected-count"></span>
+          <button id="actionBulkAccept" class="primary-command" type="button">批量接受</button>
+          <button id="actionBulkComplete" class="quiet-command" type="button">批量完成</button>
+        </div>
         <div id="actionBoard" class="action-board"></div>
       </section>
 

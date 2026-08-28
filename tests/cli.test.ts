@@ -30,6 +30,8 @@ test('CLI exposes machine-readable core capability coverage without a running se
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/:id/complete')));
+  assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-accept')));
+  assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-complete')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
@@ -56,7 +58,8 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent serve/);
   assert.match(help.stdout, /csm-agent customers .*--sort default\|renewal_date\|renewal_amount/);
   assert.match(help.stdout, /csm-agent capabilities/);
-  assert.match(help.stdout, /csm-agent action complete/);
+  assert.match(help.stdout, /csm-agent action accept <行动ID\.\.\.>/);
+  assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
   assert.match(help.stdout, /csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <批准哈希>/);

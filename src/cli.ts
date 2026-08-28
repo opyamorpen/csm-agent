@@ -55,7 +55,7 @@ const CLI_CAPABILITIES = [
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
-  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents'] },
+  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents', '/api/action-items/bulk-accept', '/api/action-items/bulk-complete'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
@@ -121,8 +121,12 @@ function help(): void {
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
+  csm-agent action accept <行动ID...>
+    （批量接受：仅待处理状态生效，其余跳过；逐项处理互不影响）
+  csm-agent action complete <行动ID...> [--outcome <实际结果>]
+    （批量完成：仅已接受/进行中状态生效，其余跳过；单项失败不影响其他项；
+     --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
-  csm-agent action complete <行动ID> [实际结果]
   csm-agent action wecom <行动ID>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称>
@@ -322,26 +326,55 @@ function parseObject(input: string, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-async function actionCommand(subcommand: string, values: string[]): Promise<void> {
-  if (subcommand === 'list') return showActions(values.join(' ') || undefined);
-  const actionId = values.shift() ?? '';
-  if (!actionId) throw new Error(`action ${subcommand || '(空)'} 缺少行动 ID`);
-  if (subcommand === 'update') {
-    const body = parseObject(values.join(' '), 'action update');
-    return print(await request(`/api/action-items/${encodeURIComponent(actionId)}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }));
+  /** inlineOption：从 values 中取 `--flag 值` 或 `--flag=值`（值不能以 -- 开头）。 */
+  function inlineOptionOf(values: string[], flag: string): string | undefined {
+    const index = values.findIndex((value) => value === flag || value.startsWith(`${flag}=`));
+    if (index === -1) return undefined;
+    const inline = values[index].startsWith(`${flag}=`);
+    const raw = inline ? values[index].slice(flag.length + 1) : values[index + 1];
+    return raw && !raw.startsWith('--') ? raw : undefined;
   }
-  if (subcommand === 'complete') {
-    return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/complete`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome: values.join(' ') }),
-    }));
+
+  /** 批量操作统一输出：--json 全量；否则逐项表格 + 汇总行（成功/跳过/失败）。 */
+  function printActionBulkResult(label: string, body: unknown): void {
+    const items = (body as { items?: Array<Record<string, unknown>> }).items ?? [];
+    if (jsonOutput) return print(body);
+    if (items.length) console.table(items.map((item) => ({ 行动ID: item.id, 标题: item.title ?? '', 结果: item.result, 说明: item.error ?? item.reason ?? '' })));
+    const counts: Record<string, number> = {};
+    for (const item of items) counts[item.result as string] = (counts[item.result as string] ?? 0) + 1;
+    console.log(`${label}：共 ${items.length} 项` + (items.length ? `（${Object.entries(counts).map(([key, value]) => `${value} ${key}`).join('，')}）` : ''));
   }
-  if (subcommand === 'wecom') {
-    return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/wecom-todo-intents`, { method: 'POST' }));
+
+  async function actionCommand(subcommand: string, values: string[]): Promise<void> {
+    if (subcommand === 'list') return showActions(values.join(' ') || undefined);
+    if (subcommand === 'accept' || subcommand === 'complete') {
+      const positional = values.filter((value) => !value.startsWith('--'));
+      if (!positional.length) throw new Error(`action ${subcommand} 缺少行动 ID`);
+      const endpoint = subcommand === 'accept' ? '/api/action-items/bulk-accept' : '/api/action-items/bulk-complete';
+      const outcome = subcommand === 'accept' ? undefined : inlineOptionOf(values, '--outcome');
+      const body: Record<string, unknown> = { ids: positional };
+      if (outcome !== undefined) body.outcome = outcome;
+      const result = await request(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return printActionBulkResult(subcommand === 'accept' ? '批量接受' : '批量完成', result);
+    }
+    const actionId = values.shift() ?? '';
+    if (!actionId) throw new Error(`action ${subcommand || '(空)'} 缺少行动 ID`);
+    if (subcommand === 'update') {
+      const body = parseObject(values.join(' '), 'action update');
+      return print(await request(`/api/action-items/${encodeURIComponent(actionId)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      }));
+    }
+    if (subcommand === 'complete') {
+      return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/complete`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome: values.join(' ') }),
+      }));
+    }
+    if (subcommand === 'wecom') {
+      return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/wecom-todo-intents`, { method: 'POST' }));
+    }
+    throw new Error('action 子命令只允许 list/update/accept/complete/wecom');
   }
-  throw new Error('action 子命令只允许 list/update/complete/wecom');
-}
 
 async function caseCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'list') return showCases(values.join(' ') || undefined);

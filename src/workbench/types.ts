@@ -157,6 +157,14 @@ export interface ActionItem extends ActionItemInput {
   wecomTodoId?: string | null;
 }
 
+export interface ActionBulkResult {
+  id: string;
+  title: string | null;
+  result: 'accepted' | 'completed' | 'skipped' | 'failed';
+  reason?: string;
+  error?: string;
+}
+
 export interface CaseDraft {
   id: string;
   customerId: string;

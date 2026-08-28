@@ -489,6 +489,19 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (req.method === 'GET' && path === '/api/action-items') {
         return json(res, 200, { actions: workbench.db.listActions(url.searchParams.get('customer_id') ?? undefined) });
       }
+      if (req.method === 'POST' && path === '/api/action-items/bulk-accept') {
+        const body = await readBody(req);
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        if (!ids.length) return json(res, 400, { error: 'ids 不能为空' });
+        return json(res, 200, { items: workbench.db.bulkAcceptActions(ids) });
+      }
+      if (req.method === 'POST' && path === '/api/action-items/bulk-complete') {
+        const body = await readBody(req);
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        if (!ids.length) return json(res, 400, { error: 'ids 不能为空' });
+        const outcome = typeof body.outcome === 'string' && body.outcome.trim() ? body.outcome.trim() : undefined;
+        return json(res, 200, { items: await workbench.wecom.bulkComplete(ids, outcome) });
+      }
       const actionMatch = path.match(/^\/api\/action-items\/([0-9A-Za-z_-]+)(\/.*)?$/);
       if (actionMatch) {
         const actionId = actionMatch[1];
