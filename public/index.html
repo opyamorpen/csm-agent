@@ -100,11 +100,11 @@
           <div><h1>Hemory 片段</h1><p>默认展示待归属（最近 7 天）；点「已归属」一键查看，按日期走筛选</p></div>
         <div class="row-actions"><button id="hemoryConfirmedToggle" class="quiet-command" type="button">已归属</button><button id="hemoryFilterToggle" class="quiet-command">筛选</button><button id="hemorySync" class="quiet-command">增量同步</button></div>
       </div>
-      <!-- 筛选面板：默认收起；点「筛选」才应用条件，草稿不实时生效。只按日期时间过滤；状态走「已归属」切换、客户走归属栏。 -->
+      <!-- 筛选面板：默认收起；打开时预填今天 00:00–23:59 真实默认值（点「筛选」即按该整天过滤），再自行修改；只按日期时间过滤，状态走「已归属」切换、客户走归属栏。 -->
       <div id="hemoryFilterPanel" class="hemory-filter-panel hidden">
-        <label><span>日期</span><input id="hemoryDate" type="date" required /></label>
-        <label><span>开始时间</span><input id="hemoryTimeFrom" type="time" title="上海时区" required /></label>
-        <label><span>结束时间</span><input id="hemoryTimeTo" type="time" title="上海时区" required /></label>
+        <label><span>日期</span><input id="hemoryDate" type="date" /></label>
+        <label><span>开始时间</span><input id="hemoryTimeFrom" type="time" title="上海时区" /></label>
+        <label><span>结束时间</span><input id="hemoryTimeTo" type="time" title="上海时区" /></label>
         <button id="hemoryFilterApply" class="primary-command" type="button">筛选</button>
         <button id="hemoryFilterReset" class="quiet-command" type="button">重置</button>
       </div>

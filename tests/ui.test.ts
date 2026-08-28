@@ -156,7 +156,7 @@ test('hemory inbox exposes ignore and restore actions with incremental sync', ()
   assert.ok(ignorer, 'ignoreHemoryFragments source was not found');
   assert.match(ignorer, /\/api\/hemory\/fragments\/ignore/);
 
-  // 不再默认把日期过滤器钉死为今天，由服务端 7 天窗口控制默认可见范围。
+  // 列表默认不把日期钉死为今天（待归属走服务端 7 天窗口）；「今天」只作为面板草稿的预填默认值。
   assert.doesNotMatch(source, /hemoryDate\.value = chinaDate\(\)/);
 
   // 同步按钮：增量同步；状态下拉已随筛选面板裁撤移除（忽略片段恢复走行内「恢复」按钮）。
@@ -185,7 +185,6 @@ test('hemory inbox shows topic-part badges for recurring events', () => {
 test('hemory inbox filters via an explicit panel: drafts apply on submit only', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
   const apply = source.match(/async function applyHemoryFilter[\s\S]*?\n  \}\n\n  async function resetHemoryFilter/)?.[0] ?? source.match(/async function applyHemoryFilter[\s\S]*?\n  \}\n\n  async function resetHemoryFilter/)?.[0] ?? source.match(/async function applyHemoryFilter[\s\S]*?\}\n\n  async function resetHemoryFilter/)?.[0];
   const state = source.match(/let hemoryFilter = \{[\s\S]*?\};/)?.[0];
@@ -206,15 +205,16 @@ test('hemory inbox filters via an explicit panel: drafts apply on submit only', 
   assert.match(html, /id="hemoryFilterPanel"[\s\S]*?id="hemoryDate" type="date"/);
   assert.doesNotMatch(source, /hemoryStatus/);
   assert.doesNotMatch(source, /hemoryFilterCustomer/);
-  // 空置的 date/time 输入在 WebKit 会灰字渲染“今天/当前时刻”假默认值但不参与筛选；
-  // required 使空值匹配 :invalid，配合未聚焦时文字透明隐藏，聚焦编辑或已选值后正常显示。
+  // 面板打开时预填真实默认值：今天（上海时区实时计算）+ 00:00–23:59，点「筛选」即按该整天实际过滤；
+  // 已应用过筛选则回填已应用值（仅日期无时刻时补全整天边界）。WebKit 空框的灰色假默认值因预填而不复存在。
+  assert.match(source, /function shanghaiToday\(\)[\s\S]*?Asia\/Shanghai/);
+  assert.match(source, /hemoryDate\.value = hemoryFilter\.date \|\| shanghaiToday\(\)/);
+  assert.match(source, /hemoryTimeFrom\.value = hemoryFilter\.from \|\| '00:00'/);
+  assert.match(source, /hemoryTimeTo\.value = hemoryFilter\.to \|\| '23:59'/);
   const filterPanel = html.match(/<div id="hemoryFilterPanel"[\s\S]*?<\/div>/)?.[0];
   assert.ok(filterPanel, 'hemoryFilterPanel markup was not found');
-  assert.match(filterPanel, /id="hemoryDate" type="date" required/);
-  assert.match(filterPanel, /id="hemoryTimeFrom" type="time"[^>]*required/);
-  assert.match(filterPanel, /id="hemoryTimeTo" type="time"[^>]*required/);
-  assert.match(styles, /\.hemory-filter-panel input\[type="date"\]:not\(:focus\):invalid,\s*\n\.hemory-filter-panel input\[type="time"\]:not\(:focus\):invalid \{[^}]*color: transparent/);
-  assert.match(styles, /:not\(:focus\):invalid::-webkit-date-and-time-value[^{]*\{[^}]*color: transparent/);
+  assert.match(filterPanel, /id="hemoryDate" type="date"/);
+  assert.doesNotMatch(filterPanel, /required/);
   // 应用 = 校验草稿 → 拷入已应用状态 → 收起面板 → 重载；重置清日期但保留当前状态视图。
   assert.match(apply, /hemoryFilter = draft/);
   assert.match(apply, /hemoryFilterPanel\.classList\.add\('hidden'\)/);

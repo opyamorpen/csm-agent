@@ -1016,11 +1016,16 @@
   /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；面板只筛日期时间，状态走「已归属」切换、客户走归属栏；面板控件只是草稿，点「筛选」才生效。 */
   let hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
 
-  /** 把已应用筛选同步到面板控件（打开面板时预填当前生效值）。 */
+  /** 上海时区今天的 YYYY-MM-DD（en-CA 的日期格式恰好是 ISO 形式）；每次打开面板实时计算，跨午夜不残留旧日期。 */
+  function shanghaiToday() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+  }
+
+  /** 把已应用筛选同步到面板控件；无已应用日期时预填今天 00:00–23:59 真实默认值（点「筛选」即过滤该整天），已应用仅日期无时刻时补全整天边界。 */
   function syncHemoryFilterDrafts() {
-    hemoryDate.value = hemoryFilter.date;
-    hemoryTimeFrom.value = hemoryFilter.from;
-    hemoryTimeTo.value = hemoryFilter.to;
+    hemoryDate.value = hemoryFilter.date || shanghaiToday();
+    hemoryTimeFrom.value = hemoryFilter.from || '00:00';
+    hemoryTimeTo.value = hemoryFilter.to || '23:59';
   }
 
   /** 「已归属」一键切换按钮的激活态与文案跟随当前已应用状态：已归属视图下提示再点切回。 */
