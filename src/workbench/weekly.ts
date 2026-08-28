@@ -185,14 +185,29 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
     + `4. risks（问题风险与阻塞）：**主要证据是本周沟通片段中客户表达的问题与风险信号**——不满/抱怨、担忧、疑虑、外部依赖（客户机房窗口、第三方配合）、悬而未决的争议点；再合并阻塞工单（status 含阻塞/挂起）与当前风险评级。每条 source 标注依据（如 "08-26 电话"、"工单 T-2005"、"风险评级 medium"）。沟通中没有表达的担忧不得编造。\n`
     + `通用规则：缺失数据按 unknown 表述，不得虚构事实；引用客户原话时保持口语原样可加引号；source 里的日期用 MM-DD。\n`
     + `上下文：${renderContext(input)}`;
-  const response = await runtime.models.complete(runtime.model, {
-    systemPrompt: '你是 CSM 实施周报撰写助手。你只能基于用户提供的证据写作周报，不执行任何工具或外部写入。',
-    messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-    tools: [],
-  });
-  const value = cleanJson(extractText(response.content));
-  if (!value) throw new Error('模型未返回可解析的周报 JSON');
-  return parseContent(value);
+  // 中继端点偶发连接超时（undici 10s 连接超时，实测坏窗口可持续数分钟）：complete 不抛异常而是
+  // 返回 stopReason='error' + errorMessage，必须显式透出真实原因并自动重试；固定短间隔重试会整个
+  // 落在同一坏窗口内，指数退避（5s→15s→45s）才能跨出去。
+  const MAX_MODEL_ATTEMPTS = 3;
+  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  let lastError = '模型未返回可解析的周报 JSON';
+  for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
+    const response = await runtime.models.complete(runtime.model, {
+      systemPrompt: '你是 CSM 实施周报撰写助手。你只能基于用户提供的证据写作周报，不执行任何工具或外部写入。',
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    });
+    if (response.stopReason === 'error') {
+      lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      continue;
+    }
+    const value = cleanJson(extractText(response.content));
+    if (value) return parseContent(value);
+    lastError = `模型未返回可解析的周报 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+    if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+  throw new Error(lastError);
 }
 
 export function renderWeeklyMarkdown(report: WeeklyReport, customerName = '客户'): string {

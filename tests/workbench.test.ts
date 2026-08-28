@@ -2111,7 +2111,8 @@ test('workbench: weekly report failure marks job failed and manual regenerate is
     const mcp = { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any;
     const service = new WeeklyReportService(db, mcp, badModel);
     const first = service.generate('crm-w3', '2026-08-25');
-    for (let i = 0; i < 40 && db.getDraftJob(first.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    // badModel 返回非 JSON，会走满 3 次重试（指数退避 5s+15s）：等待窗口放宽到 75 秒。
+    for (let i = 0; i < 3750 && db.getDraftJob(first.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(db.getDraftJob(first.jobId!)?.status, 'failed');
     assert.match(db.getDraftJob(first.jobId!)?.error ?? '', /模型未生成周报/);
     assert.ok(!db.getWeeklyReportByWeek('crm-w3', '2026-08-24'), '失败任务不得落周报');
@@ -2119,8 +2120,8 @@ test('workbench: weekly report failure marks job failed and manual regenerate is
     const retry = service.generate('crm-w3', '2026-08-25', true);
     assert.notEqual(retry.jobId, first.jobId);
     assert.equal(db.getDraftJob(retry.jobId!)?.kind, 'weekly_report');
-    for (let i = 0; i < 40 && ['pending', 'running'].includes(db.getDraftJob(retry.jobId!)?.status ?? ''); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 3750 && ['pending', 'running'].includes(db.getDraftJob(retry.jobId!)?.status ?? ''); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(db.getDraftJob(retry.jobId!)?.status, 'failed');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
@@ -2183,3 +2184,50 @@ test('workbench: weekly jobs are isolated from hermory draft jobs by kind', () =
   assert.ok(!db.listPendingDraftJobs('weekly_report').some((job) => job.id === hermoryJob.id));
   assert.ok(!db.listPendingDraftJobs().some((job) => job.id === weeklyJob.id));
 }));
+
+test('workbench: weekly report surfaces real model error and retries transient failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w7', name: '周报客户七' });
+    segment(db, 'crm-w7', 'w7-r1:t1', 'w7-r1', '沟通', '2026-08-25T05:00:00Z', '内容');
+    const mcp = { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any;
+    // 场景一：provider 错误（complete 不抛异常，返回 stopReason=error）——错误消息必须透出真实原因，
+    // 不再被「模型未返回可解析的周报 JSON」掩盖；且重试 3 次都失败后任务 failed。
+    let errorCalls = 0;
+    const failing = {
+      llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => { errorCalls++; return { stopReason: 'error', errorMessage: 'Request timed out.', content: [] }; } },
+    } as any;
+    const failingService = new WeeklyReportService(db, mcp, failing);
+    const job1 = failingService.generate('crm-w7', '2026-08-25');
+    // 指数退避 5s+15s：等待窗口放宽到 75 秒。
+    for (let i = 0; i < 3750 && db.getDraftJob(job1.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(errorCalls, 3, '必须自动重试满 3 次');
+    const failed = db.getDraftJob(job1.jobId!)!;
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error ?? '', /模型调用失败（第 3\/3 次）: Request timed out\./);
+    // 场景二：首次连接超时、重试成功——一次瞬时故障不应导致任务失败。
+    let flakyCalls = 0;
+    const flaky = {
+      llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => {
+        flakyCalls++;
+        if (flakyCalls === 1) return { stopReason: 'error', errorMessage: 'Request timed out.', content: [] };
+        return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(WEEKLY_CONTENT) }] };
+      } },
+    } as any;
+    const flakyService = new WeeklyReportService(db, mcp, flaky);
+    const job2 = flakyService.generate('crm-w7', '2026-08-25', true);
+    // 首次失败后要等 5s 退避间隔再重试：窗口放宽到 75 秒。
+    for (let i = 0; i < 3750 && db.getDraftJob(job2.jobId!)?.status !== 'succeeded'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (db.getDraftJob(job2.jobId!)?.status === 'failed') break;
+    }
+    assert.equal(db.getDraftJob(job2.jobId!)?.status, 'succeeded');
+    const report = db.getWeeklyReportByWeek('crm-w7', '2026-08-24')!;
+    assert.ok(report, '瞬时故障重试后周报必须成功落库');
+    assert.equal(report.content.summary, WEEKLY_CONTENT.summary);
+    assert.equal(flakyCalls, 2);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
