@@ -968,21 +968,43 @@
     return row;
   }
 
-  /** 片段列表整列表渲染：按录音分组 + 逐行共享渲染器；收件箱与客户详情 tab 共用。 */
+  /** 已归属视图的客户分组标题：客户名（customersCache 解析，失败回退 CRM id）。 */
+  function fragmentCustomerLabel(customerId) {
+    if (!customerId) return '未绑定客户';
+    return customersCache.find((item) => item.id === customerId)?.name ?? `CRM ${customerId}`;
+  }
+
+  /**
+   * 片段列表整列表渲染：按录音分组 + 逐行共享渲染器；收件箱与客户详情 tab 共用。
+   * 已归属视图（opts.groupByCustomer）外层按客户分组——客户顺序跟随列表本身的时间倒序
+   * （即最近有沟通的客户在前），组内仍按录音分节，方便跨录音阅读同一客户的沟通。
+   */
   function renderHemoryFragmentList(listEl, fragments, opts = {}) {
     listEl.innerHTML = '';
     if (!fragments.length) {
       listEl.append(el('div', 'workspace-empty', opts.emptyText || '没有符合条件的 Hemory 片段'));
       return;
     }
-    let recording = '';
-    for (const fragment of fragments) {
-      const recordingId = fragment.payload?.recordingId || 'unknown';
-      if (recordingId !== recording) {
-        recording = recordingId;
-        listEl.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
+    const appendRows = (rows) => {
+      let recording = '';
+      for (const fragment of rows) {
+        const recordingId = fragment.payload?.recordingId || 'unknown';
+        if (recordingId !== recording) {
+          recording = recordingId;
+          listEl.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
+        }
+        listEl.append(renderHemoryFragmentRow(fragment, opts));
       }
-      listEl.append(renderHemoryFragmentRow(fragment, opts));
+    };
+    if (!opts.groupByCustomer) return appendRows(fragments);
+    const groups = new Map();
+    for (const fragment of fragments) {
+      const key = fragment.customerId || '';
+      groups.set(key, [...(groups.get(key) ?? []), fragment]);
+    }
+    for (const [customerId, rows] of groups) {
+      listEl.append(el('div', 'fragment-group-title customer-group-title', `${fragmentCustomerLabel(customerId)} · ${rows.length} 条`));
+      appendRows(rows);
     }
   }
 
@@ -1059,7 +1081,8 @@
     if (hemoryFilter.status === 'pending') hemoryPendingCount.textContent = fragments.length || '';
     updateAgentNavCount();
     renderHemoryFragmentList(hemoryFragmentList, fragments,
-      { emptyText: hemoryFilter.status === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段' });
+      { groupByCustomer: hemoryFilter.status === 'confirmed',
+        emptyText: hemoryFilter.status === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段' });
     updateHemorySelection();
   }
 

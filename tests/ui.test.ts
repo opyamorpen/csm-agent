@@ -144,8 +144,8 @@ test('app dialogs replace native confirm/alert/prompt for WKWebView compatibilit
 test('hemory inbox exposes ignore and restore actions with incremental sync', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
-  const ignorer = source.match(/async function ignoreHemoryFragments[\s\S]*?\n  }\n\n  \/\*\* 归属\/清除归属期间冻结归属栏操作/)?.[0];
+  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  \}\n\n  \/\*\* 已归属视图的客户分组标题/)?.[0];
+  const ignorer = source.match(/async function ignoreHemoryFragments[\s\S]*?\n  \}\n\n  \/\*\* 归属\/清除归属期间冻结归属栏操作/)?.[0];
 
   // 显示契约：忽略/恢复按钮、已忽略徽章、忽略走专用接口（行渲染器由收件箱与客户详情 tab 共用）。
   assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
@@ -171,7 +171,7 @@ test('hemory inbox exposes ignore and restore actions with incremental sync', ()
 test('hemory inbox shows topic-part badges for recurring events', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
-  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
+  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  \}\n\n  \/\*\* 已归属视图的客户分组标题/)?.[0];
 
   // v2 事件级切片：同一事件被打断后再次出现的片段共享话题组，收件箱显示「同话题 m/n」。
   assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
@@ -280,7 +280,7 @@ test('hemory regenerate action is fragment-scoped and per-day in the inbox; cust
   assert.doesNotMatch(panel, /'重新生成草稿'/);
   assert.match(source, /addTab\('hemory_fragments', 'Hemory 片段'/);
   // 行渲染器 readonly 分支：div 而非 label、无 checkbox、无行内忽略/恢复。
-  const row = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
+  const row = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  \}\n\n  \/\*\* 已归属视图的客户分组标题/)?.[0];
   assert.match(row, /opts\.readonly \? 'div' : 'label'/);
   assert.match(row, /if \(!opts\.readonly\) \{\n      const check = document\.createElement\('input'\)/);
   // 行尾客户显示用名称解析（customersCache），失败回退 CRM id。
@@ -312,6 +312,31 @@ test('hemory tab exposes one-click attributed view toggle', () => {
   assert.match(source, /updateHemoryConfirmedToggle\(\)/);
   // 激活态样式：头部 quiet-command.active 高亮。
   assert.match(styles, /\.agent-work-head \.quiet-command\.active \{[^}]*background: #eaf0fa/);
+});
+
+test('hemory attributed view groups fragments by customer', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  \}\n\n  async function ignoreHemoryFragments/)?.[0];
+  const renderer = source.match(/function renderHemoryFragmentList[\s\S]*?\n  \}\n\n  \/\*\* 已应用的筛选条件/)?.[0];
+
+  // 显示契约：已归属视图外层按客户分组（客户名 + 片段数），组内仍按录音分节；客户顺序跟随时间倒序（最近沟通的客户在前）。
+  assert.ok(renderer, 'renderHemoryFragmentList source was not found');
+  assert.match(renderer, /if \(!opts\.groupByCustomer\) return appendRows\(fragments\)/);
+  assert.match(renderer, /const key = fragment\.customerId \|\| ''/);
+  assert.match(renderer, /customer-group-title/);
+  assert.match(renderer, /`\$\{fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 条`/);
+  assert.match(renderer, /const appendRows = \(rows\) =>/);
+  assert.ok(loader, 'loadHemoryInbox source was not found');
+  assert.match(loader, /groupByCustomer: hemoryFilter\.status === 'confirmed'/);
+  // 客户名解析：customersCache 优先，失败回退 CRM id；未绑定客户单列一组。
+  const label = source.match(/function fragmentCustomerLabel[\s\S]*?\n  \}/)?.[0];
+  assert.ok(label, 'fragmentCustomerLabel source was not found');
+  assert.match(label, /if \(!customerId\) return '未绑定客户'/);
+  assert.match(label, /customersCache\.find\(\(item\) => item\.id === customerId\)\?\.name \?\? `CRM \$\{customerId\}`/);
+  // 客户分组标题层级高于录音分节（字号略大、颜色更深）。
+  assert.match(styles, /\.customer-group-title \{[^}]*font-size: 12px/);
+  assert.match(styles, /\.customer-group-title \{[^}]*color: #36414e/);
 });
 
 test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
