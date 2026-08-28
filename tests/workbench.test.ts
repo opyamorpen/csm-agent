@@ -2075,15 +2075,17 @@ test('workbench: weekly report generation uses full-context model call and persi
     const report = db.getWeeklyReportByWeek('crm-w2', '2026-08-24')!;
     assert.ok(report, '周报必须落库');
     assert.equal(report.content.summary, WEEKLY_CONTENT.summary);
-    assert.equal(report.stats.communications, 1);
+    assert.equal(report.stats.communications, 1, '单录音一场沟通');
     assert.equal(report.stats.newTickets, 2);
     assert.equal(report.stats.resolvedTickets, 1);
+    assert.equal(report.stats.resolvedSuggestions, 0);
     assert.equal(report.stats.blockedTickets, 1);
     assert.equal(report.stats.openTickets, 1);
     assert.equal(report.stats.workhours, 2);
     // 全量上下文注入：工单、片段转写、工时记录都在 prompt 里。
     assert.match(capturedPrompt, /导出超时/);
     assert.match(capturedPrompt, /阻塞中/);
+    assert.match(capturedPrompt, /created_in_week/);
     assert.match(capturedPrompt, /约定周四复测/);
     assert.match(capturedPrompt, /问题排查/);
     assert.match(capturedPrompt, /next_week_plan/);
@@ -2229,5 +2231,93 @@ test('workbench: weekly report surfaces real model error and retries transient f
     assert.ok(report, '瞬时故障重试后周报必须成功落库');
     assert.equal(report.content.summary, WEEKLY_CONTENT.summary);
     assert.equal(flakyCalls, 2);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: weekly report aggregates work items by update time across weeks and counts recordings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w8', name: '周报客户八' });
+    // 上周创建、本周解决（field010 本周且已完成）：必须进本周周报（newTickets=0、resolvedTickets=1）。
+    db.upsertSourceEvent({ customerId: 'crm-w8', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'T-old-1', displayId: 'T-old-1', title: '上周创建本周解决的工单', occurredAt: '2026-08-18T03:00:00Z',
+      payload: { field001: '上周创建本周解决的工单', field005: { name: '已完成' }, field009: '2026-08-18 11:00:00', field010: '2026-08-26 11:00:00' } });
+    // 上周创建、本周无更新（field010 上周）：不得进本周周报。
+    db.upsertSourceEvent({ customerId: 'crm-w8', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'T-old-2', displayId: 'T-old-2', title: '上周创建无更新的工单', occurredAt: '2026-08-19T03:00:00Z',
+      payload: { field001: '上周创建无更新的工单', field005: { name: '进行中' }, field009: '2026-08-19 11:00:00', field010: '2026-08-20 11:00:00' } });
+    // 同一场录音的两个片段（rec-8）+ 另一场录音一个片段（rec-9）：沟通 = 2 场。
+    const rec8 = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
+      externalId: 'rec-8', title: '录音 rec-8', occurredAt: '2026-08-25T05:00:00Z', payload: {} });
+    const rec9 = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
+      externalId: 'rec-9', title: '录音 rec-9', occurredAt: '2026-08-26T05:00:00Z', payload: {} });
+    const f1 = db.upsertSourceEvent({ customerId: 'crm-w8', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+      externalId: 'rec-8:t1', title: '话题一', occurredAt: '2026-08-25T05:00:00Z', attributionStatus: 'confirmed',
+      payload: { recordingId: 'rec-8', transcript: '话题一内容' } });
+    const f2 = db.upsertSourceEvent({ customerId: 'crm-w8', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+      externalId: 'rec-8:t2', title: '话题二', occurredAt: '2026-08-25T05:30:00Z', attributionStatus: 'confirmed',
+      payload: { recordingId: 'rec-8', transcript: '话题二内容' } });
+    const f3 = db.upsertSourceEvent({ customerId: 'crm-w8', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+      externalId: 'rec-9:t1', title: '话题三', occurredAt: '2026-08-26T05:00:00Z', attributionStatus: 'confirmed',
+      payload: { recordingId: 'rec-9', transcript: '话题三内容' } });
+    db.activateHemoryFragments(rec8.id, 'fp-w8-8', [f1.id, f2.id]);
+    db.activateHemoryFragments(rec9.id, 'fp-w8-9', [f3.id]);
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(WEEKLY_CONTENT) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any, runtime);
+    const queued = service.generate('crm-w8', '2026-08-28');
+    await waitForJob(db, queued.jobId!);
+    const report = db.getWeeklyReportByWeek('crm-w8', '2026-08-24')!;
+    assert.ok(report, '周报必须落库');
+    // 沟通按录音场数：2 场（rec-8 的两个片段只算一场）。
+    assert.equal(report.stats.communications, 2);
+    // 跨周聚合：本周没有新建工单，但有 1 条本周解决的旧工单。
+    assert.equal(report.stats.newTickets, 0);
+    assert.equal(report.stats.resolvedTickets, 1);
+    // 上下文：本周解决的旧工单在场（created_in_week=false），上周无更新的不在场。
+    assert.match(capturedPrompt, /上周创建本周解决的工单/);
+    assert.match(capturedPrompt, /"created_in_week":false/);
+    assert.doesNotMatch(capturedPrompt, /上周创建无更新的工单/);
+    // 每个片段注入时带 recording_id，LLM 可感知同场关系。
+    assert.match(capturedPrompt, /rec-8/);
+    assert.match(capturedPrompt, /rec-9/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: segmentation resume failure does not become an unhandled rejection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-seg-resume-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-seg', name: '分段客户' });
+    const recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
+      externalId: 'r-seg', title: '录音', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r-seg', lines: [{ speaker: 'CSM', text: '内容', spokenAt: '2026-08-25T05:00:00+08:00' }] } });
+    // 建一个 pending 任务模拟服务重启后的 resume；模型恒超时 → process rethrow。
+    db.createHemorySegmentationJob(recording.id, 'fp-seg-resume');
+    let rejections = 0;
+    const onUnhandled = () => { rejections++; };
+    process.on('unhandledRejection', onUnhandled);
+    const badRuntime = {
+      llm: { provider: 'fake', model: 'broken' },
+      models: { complete: async () => ({ stopReason: 'error', errorMessage: 'Request timed out.', content: [] }) },
+    } as any;
+    const service = new HemorySegmentationService(db, badRuntime);
+    // resumePending 内部吞掉失败（job 已落 failed）；这里等待任务终态，断言无 unhandledRejection。
+    service.resumePending();
+    for (let i = 0; i < 400 && db.listPendingHemorySegmentationJobs().some((job) => job.status === 'running'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const jobs = db.listPendingHemorySegmentationJobs();
+    assert.ok(jobs.some((job) => job.status === 'failed'), '分段任务应落 failed');
+    assert.equal(rejections, 0, 'resumePending 不得产生 unhandledRejection（会打崩服务进程）');
+    process.off('unhandledRejection', onUnhandled);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

@@ -376,7 +376,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
 function printWeeklyReport(report: any, customerName = ''): void {
   const stats = report.stats ?? {};
   console.log(`${customerName ? `${customerName} · ` : ''}${report.weekStart} ~ ${report.weekEnd} · ${report.status === 'published' ? `已发布(${report.publishedPageId ?? ''})` : `草稿 v${report.version}`} · ${report.generator ?? 'unknown'}`);
-  console.log(`统计: 沟通 ${stats.communications ?? 0} · 新增建议 ${stats.newSuggestions ?? 0} · 新增工单 ${stats.newTickets ?? 0}(解决约 ${stats.resolvedTickets ?? 'unknown'}) · 新增运维 ${stats.newOperations ?? 0} · 工时 ${stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`}`);
+  console.log(`统计: 沟通 ${stats.communications ?? 0} 场 · 新增建议 ${stats.newSuggestions ?? 0}(解决 ${stats.resolvedSuggestions ?? 'unknown'}) · 新增工单 ${stats.newTickets ?? 0}(解决 ${stats.resolvedTickets ?? 'unknown'}) · 新增运维 ${stats.newOperations ?? 0}(解决 ${stats.resolvedOperations ?? 'unknown'}) · 工时 ${stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`}`);
   const content = report.content ?? {};
   console.log(`\n一、本周执行摘要\n${content.summary ?? '(空)'}`);
   console.log(`\n二、本周完成情况`);

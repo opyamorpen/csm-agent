@@ -1227,13 +1227,32 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow);
   }
 
+  /**
+   * 该客户全部 ONES 工作项中 field010 更新时间落在 [since, until] 闭区间的条目（不限创建时间，
+   * 供周报按「本周有更新」聚合）。时间比较在 JS 侧做：field010 是 naive 上海时间，
+   * SQLite datetime() 会按 UTC 解析错位 8 小时；field010 缺失的条目无法判定，不纳入。
+   */
+  listOnesWorkItemsUpdatedInRange(customerId: string, since: string, until: string): SourceEvent[] {
+    const rows = this.db.prepare(`SELECT * FROM source_events WHERE customer_id=? AND source_system='ones'
+      AND source_type IN ('suggestion_feedback','support_ticket','operations_ticket','private_cloud_instance')`).all(customerId) as Row[];
+    const start = new Date(since).getTime();
+    const end = new Date(until).getTime();
+    return (rows.map(sourceEventFromRow) as SourceEvent[]).filter((event) => {
+      const updated = event.payload?.field010;
+      if (typeof updated !== 'string' || !updated.trim()) return false;
+      const at = parseOccurredAt(updated);
+      return at != null && at >= start && at <= end;
+    });
+  }
+
   private weeklyReportFromRow(row: Row): WeeklyReport {
     return {
       id: String(row.id), customerId: String(row.customer_id), weekStart: String(row.week_start), weekEnd: String(row.week_end),
       version: Number(row.version), status: String(row.status) as WeeklyReport['status'],
       content: parseJson<WeeklyReportContent>(row.content_json, { summary: '', accomplishments: [], next_week_plan: [], risks: [] }),
       stats: parseJson<WeeklyReportStats>(row.stats_json, { communications: 0, newSuggestions: 0, newTickets: 0, newOperations: 0,
-        resolvedTickets: null, blockedTickets: null, openTickets: null, workhours: null, actionsCompleted: null, notes: [] }),
+        resolvedSuggestions: null, resolvedTickets: null, resolvedOperations: null, blockedTickets: null, openTickets: null,
+        workhours: null, actionsCompleted: null, notes: [] }),
       generator: row.generator as string | null, fingerprint: String(row.fingerprint),
       publishedPageId: row.published_page_id as string | null, publishedAt: row.published_at as string | null,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),

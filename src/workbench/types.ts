@@ -243,11 +243,14 @@ export interface WeeklyReportContent {
 
 /** 实施周报代码确定性统计（叙述之外的一眼指标）。 */
 export interface WeeklyReportStats {
+  /** 沟通场数（按录音去重，一场长会的多个话题片段只算一次） */
   communications: number;
   newSuggestions: number;
   newTickets: number;
   newOperations: number;
+  resolvedSuggestions: number | null;
   resolvedTickets: number | null;
+  resolvedOperations: number | null;
   blockedTickets: number | null;
   openTickets: number | null;
   workhours: number | null;

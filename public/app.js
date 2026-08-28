@@ -1890,7 +1890,7 @@
   function weeklyStatsLine(stats) {
     if (!stats) return '';
     const workhours = stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`;
-    return `沟通 ${stats.communications} 次 · 新增建议 ${stats.newSuggestions} · 新增工单 ${stats.newTickets}（解决约 ${stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${stats.newOperations} · 工时 ${workhours}`;
+    return `沟通 ${stats.communications} 场 · 新增建议 ${stats.newSuggestions}（解决 ${stats.resolvedSuggestions ?? 'unknown'}）· 新增工单 ${stats.newTickets}（解决 ${stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${stats.newOperations}（解决 ${stats.resolvedOperations ?? 'unknown'}）· 工时 ${workhours}`;
   }
 
   function editWeeklyReport(customer, report, onUpdated) {

@@ -84,31 +84,57 @@ function updatedAtOf(event: SourceEvent): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+/**
+ * ONES payload 里的 naive 时间（field009/field010 无时区后缀，实为上海时间）解析为毫秒；
+ * 与 database.parseOccurredAt 同逻辑。无法解析返回 null。
+ */
+function parseOnesTime(value: string | null): number | null {
+  if (!value) return null;
+  const text = value.trim();
+  const at = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? Date.parse(`${text.replace(' ', 'T')}+08:00`) : Date.parse(text);
+  return Number.isNaN(at) ? null : at;
+}
+
 interface WeeklyContext {
   events: SourceEvent[];
   hermory: SourceEvent[];
+  /** 本周有更新（创建或 field010 落在本周）的工作项集合，按 id 去重。 */
+  workItems: SourceEvent[];
   stats: WeeklyReportStats;
 }
 
-function buildStats(events: SourceEvent[], hermory: SourceEvent[], workhours: number | null, actionsCompleted: number | null): WeeklyReportStats {
-  const of = (type: string) => events.filter((event) => event.sourceType === type);
+/** 沟通次数 = 去重 recordingId 的录音场数（一场长会切出的多个话题片段只算一次）。 */
+function recordingCount(hermory: SourceEvent[]): number {
+  return new Set(hermory.map((event) => String(event.payload?.recordingId ?? event.id))).size;
+}
+
+function buildStats(weekStart: string, context: { workItems: SourceEvent[]; hermory: SourceEvent[]; workhours: number | null; actionsCompleted: number | null }): WeeklyReportStats {
+  const range = weekRange(weekStart);
+  const inWeek = (at: number) => at >= Date.parse(range.start) && at <= Date.parse(range.end);
+  const of = (type: string) => context.workItems.filter((event) => event.sourceType === type);
+  const createdInWeek = (event: SourceEvent) => {
+    const at = parseOnesTime(event.payload?.field009 as string ?? event.occurredAt);
+    return at != null && inWeek(at);
+  };
+  // 「本周解决」：field010 更新在本周且当前状态已完成/关闭（快照近似口径）。
+  const resolvedInWeek = (event: SourceEvent) => {
+    const updated = parseOnesTime(updatedAtOf(event));
+    return isDoneStatus(nestedStatus(event)) && updated != null && inWeek(updated);
+  };
   const tickets = of('support_ticket');
-  // 「本周解决」为快照近似口径：field010 更新时间在本周且当前状态已完成。
-  const resolved = tickets.filter((event) => {
-    const updated = updatedAtOf(event);
-    return isDoneStatus(nestedStatus(event)) && updated != null && !Number.isNaN(Date.parse(updated));
-  });
   return {
-    communications: hermory.length,
-    newSuggestions: of('suggestion_feedback').length,
-    newTickets: tickets.length,
-    newOperations: of('operations_ticket').length,
-    resolvedTickets: resolved.length,
+    communications: recordingCount(context.hermory),
+    newSuggestions: of('suggestion_feedback').filter(createdInWeek).length,
+    newTickets: tickets.filter(createdInWeek).length,
+    newOperations: of('operations_ticket').filter(createdInWeek).length,
+    resolvedSuggestions: of('suggestion_feedback').filter(resolvedInWeek).length,
+    resolvedTickets: tickets.filter(resolvedInWeek).length,
+    resolvedOperations: of('operations_ticket').filter(resolvedInWeek).length,
     blockedTickets: tickets.filter((event) => isBlockedStatus(nestedStatus(event))).length,
     openTickets: tickets.filter((event) => !isDoneStatus(nestedStatus(event))).length,
-    workhours,
-    actionsCompleted,
-    notes: ['「本周解决」按当前状态快照与更新时间近似判定'],
+    workhours: context.workhours,
+    actionsCompleted: context.actionsCompleted,
+    notes: ['沟通次数按录音场数计（一场会议的多个话题片段只算一次）', '工作项按本周有更新聚合去重；「解决」按当前状态快照与更新时间近似判定'],
   };
 }
 
@@ -122,17 +148,22 @@ interface PromptInput extends WeeklyContext {
 }
 
 function renderContext(input: PromptInput): string {
-  const { customer, weekStart, weekEnd, events, hermory, stats, workhourRecords, actions, risk } = input;
-  const workItems = events.filter((event) => ['suggestion_feedback', 'support_ticket', 'operations_ticket', 'private_cloud_instance'].includes(event.sourceType))
+  const { customer, weekStart, weekEnd, hermory, workItems, stats, workhourRecords, actions, risk } = input;
+  const range = weekRange(weekStart);
+  const itemContext = workItems
     .map((event) => ({ id: event.id, type: event.sourceType, display: event.displayId ?? '', title: event.title,
-      occurred_at: event.occurredAt, status: nestedStatus(event) || 'unknown', updated_at: updatedAtOf(event) ?? 'unknown', url: event.url ?? '' }));
-  const followups = events.filter((event) => event.sourceType === 'crm_followup')
+      occurred_at: event.occurredAt, status: nestedStatus(event) || 'unknown', updated_at: updatedAtOf(event) ?? 'unknown',
+      created_in_week: parseOnesTime(event.payload?.field009 as string ?? event.occurredAt) != null
+        && parseOnesTime(event.payload?.field009 as string ?? event.occurredAt)! >= Date.parse(range.start)
+        && parseOnesTime(event.payload?.field009 as string ?? event.occurredAt)! <= Date.parse(range.end),
+      url: event.url ?? '' }));
+  const followups = input.events.filter((event) => event.sourceType === 'crm_followup')
     .map((event) => ({ id: event.id, occurred_at: event.occurredAt, title: event.title, content: String(event.payload?.active_record_content ?? event.title).slice(0, 400) }));
   // 转写注入带预算：按片段均摊上限，超预算截取每段开头（约定/风险信号多在对话开头）。
   const fragments = [...hermory].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).slice(-MAX_HISTORY_FRAGMENTS);
   const perFragment = Math.max(400, Math.floor(TRANSCRIPT_BUDGET / Math.max(1, fragments.length)));
   const hermoryContext = fragments.map((event) => ({
-    id: event.id, occurred_at: event.occurredAt, topic: event.title,
+    id: event.id, occurred_at: event.occurredAt, topic: event.title, recording_id: String(event.payload?.recordingId ?? ''),
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [],
     summary: typeof event.payload?.summary === 'string' ? event.payload.summary : '',
     transcript: textOf(event).slice(0, perFragment),
@@ -143,7 +174,7 @@ function renderContext(input: PromptInput): string {
     stats,
     risk: risk ? { level: risk.level, score: risk.score } : null,
     communications: hermoryContext,
-    work_items: workItems,
+    work_items: itemContext,
     crm_followups: followups,
     workhours: { total: stats.workhours, records: workhourRecords.map((record) => ({ date: record.startTime, hours: record.hours, description: record.description.slice(0, 120), owner: record.owner ?? '' })) },
     actions: actions.map((action) => ({ title: action.title, status: action.status, due: action.dueAt ?? null })),
@@ -179,8 +210,8 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
     + `输出四个章节，只输出 JSON：\n`
     + `{"summary":"...","accomplishments":[{"category":"...","date":"YYYY-MM-DD","text":"...","source":"..."}],"next_week_plan":[{"text":"...","source":"..."}],"risks":[{"text":"...","source":"..."}]}\n`
     + `章节要求：\n`
-    + `1. summary（本周执行摘要）：3~6 句总括叙述，引用统计（沟通次数、新增建议/工单/运维工单、工时合计等），并给出整体基调判断。\n`
-    + `2. accomplishments（本周完成情况）：按小类逐条列出本周发生的全部事项，category 从以下选择：沟通与会议、建议与反馈、工单处理、运维事项、私有云实例、CRM 跟进、工时投入；每条 date 为 YYYY-MM-DD，text 写明事项内容与结果，source 标注来源（如 "Hemory 片段 2026-08-25"、"工单 T-2001"、"CRM 跟进"）。「本周解决」的工单按 field010 更新时间在本周且状态已完成近似判定，必要时在 text 中说明是近似口径。\n`
+    + `1. summary（本周执行摘要）：3~6 句总括叙述，引用统计（沟通场数、新增/解决的建议、工单、运维工单、工时合计等），并给出整体基调判断。\n`
+    + `2. accomplishments（本周完成情况）：按小类逐条列出本周发生的全部事项，category 从以下选择：沟通与会议、建议与反馈、工单处理、运维事项、私有云实例、CRM 跟进、工时投入；每条 date 为 YYYY-MM-DD，text 写明事项内容与结果，source 标注来源（如 "Hemory 片段 2026-08-25"、"工单 T-2001"、"CRM 跟进"）。工作项（work_items）已按「本周有更新」聚合去重——created_in_week=true 写新增、状态已完成/关闭且 updated_at 在本周写解决，其余按本周状态变化或持续处理描述；上周创建且本周无更新的事项不在列表中，不得凭空提及。建议/工单数量多时同状态的可适当合并成一条概述并注明条数，不必逐条罗列。\n`
     + `3. next_week_plan（下周工作计划）：**主要证据是本周沟通片段（communications 里的 transcript/summary）中双方约定的后续动作与承诺**——复测/验证时间点、答应交付的事项、约定下次沟通主题、正在推进事项的下一步；再合并 actions 里未完成的行动事项与未关闭工单/建议，去重后逐条列出。每条 source 标注依据（如 "08-27 会议约定"、"行动事项"、"工单 T-2005"）。沟通中没有约定的事项不得编造。\n`
     + `4. risks（问题风险与阻塞）：**主要证据是本周沟通片段中客户表达的问题与风险信号**——不满/抱怨、担忧、疑虑、外部依赖（客户机房窗口、第三方配合）、悬而未决的争议点；再合并阻塞工单（status 含阻塞/挂起）与当前风险评级。每条 source 标注依据（如 "08-26 电话"、"工单 T-2005"、"风险评级 medium"）。沟通中没有表达的担忧不得编造。\n`
     + `通用规则：缺失数据按 unknown 表述，不得虚构事实；引用客户原话时保持口语原样可加引号；source 里的日期用 MM-DD。\n`
@@ -221,7 +252,7 @@ export function renderWeeklyMarkdown(report: WeeklyReport, customerName = '客�
   const risks = report.content.risks.length
     ? report.content.risks.map((item) => `- ${item.text}${item.source ? `（${item.source}）` : ''}`).join('\n')
     : '';
-  const statsLine = `沟通 ${report.stats.communications} 次 · 新增建议 ${report.stats.newSuggestions} · 新增工单 ${report.stats.newTickets}（解决约 ${report.stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${report.stats.newOperations} · 工时 ${report.stats.workhours == null ? 'unknown' : `${Number(report.stats.workhours).toFixed(1)}h`}`;
+  const statsLine = `沟通 ${report.stats.communications} 场 · 新增建议 ${report.stats.newSuggestions}（解决 ${report.stats.resolvedSuggestions ?? 'unknown'}）· 新增工单 ${report.stats.newTickets}（解决 ${report.stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${report.stats.newOperations}（解决 ${report.stats.resolvedOperations ?? 'unknown'}）· 工时 ${report.stats.workhours == null ? 'unknown' : `${Number(report.stats.workhours).toFixed(1)}h`}`;
   return [
     `# ${customerName} 实施周报（${report.weekStart} ~ ${report.weekEnd}）\n`,
     section('本周执行摘要', `${report.content.summary}\n\n> ${statsLine}`),
@@ -253,15 +284,31 @@ export class WeeklyReportService {
    * 生成（或幂等复用）某客户某周的周报任务。指纹 = 版本:客户:周:事件集哈希；
    * 已有同指纹周报直接返回原任务；force 加盐换指纹强制重建。失败任务不落墓碑指纹，重试不会被幂等短路。
    */
+  /**
+   * 某客户某周的完整事件上下文：创建在本周的全部事件（Hemory 片段、CRM 跟进、工作项等）
+   * + 更新在本周的 ONES 工作项（不限创建时间），工作项按 id 去重。
+   */
+  private weeklyEvents(customerId: string, weekStart: string): { events: SourceEvent[]; hermory: SourceEvent[]; workItems: SourceEvent[] } {
+    const range = weekRange(weekStart);
+    const events = this.db.listSourceEventsInRange(customerId, { since: range.start, until: range.end });
+    const hermory = this.db.listHemoryFragments({ customerId, status: 'confirmed', since: range.start, until: range.end, limit: 500 });
+    const updated = this.db.listOnesWorkItemsUpdatedInRange(customerId, range.start, range.end);
+    const seen = new Set(events.map((event) => event.id));
+    const workItems = [...events.filter((event) => event.sourceSystem === 'ones'
+      && ['suggestion_feedback', 'support_ticket', 'operations_ticket', 'private_cloud_instance'].includes(event.sourceType)),
+    ...updated.filter((event) => !seen.has(event.id))];
+    return { events, hermory, workItems };
+  }
+
   generate(customerId: string, weekStartInput: string, force = false): { jobId: string | null; fingerprint: string; weekStart: string } {
     const customer = this.db.getCustomer(customerId);
     if (!customer) throw new Error('customer not found');
     const weekStart = weekMonday(weekStartInput);
-    const range = weekRange(weekStart);
-    const events = this.db.listSourceEventsInRange(customerId, { since: range.start, until: range.end });
-    const hermory = this.db.listHemoryFragments({ customerId, status: 'confirmed', since: range.start, until: range.end, limit: 500 });
+    const { events, hermory, workItems } = this.weeklyEvents(customerId, weekStart);
     if (!events.length && !hermory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据（请先同步）`);
-    const fingerprint = weeklyFingerprint(customerId, weekStart, events, hermory);
+    // 指纹覆盖创建在本周的事件 + 更新在本周的工作项（按 id 去重），任一变化都会换指纹重建。
+    const all = [...events, ...workItems.filter((item) => !events.some((event) => event.id === item.id))];
+    const fingerprint = weeklyFingerprint(customerId, weekStart, all, hermory);
     const existingReport = this.db.getWeeklyReportByWeek(customerId, weekStart);
     if (existingReport && !force && existingReport.fingerprint === fingerprint) {
       const job = this.db.findDraftJobByFingerprint(fingerprint);
@@ -270,7 +317,7 @@ export class WeeklyReportService {
     const finalFingerprint = existingReport || force
       ? hash(`${fingerprint}:regenerate:${Date.now()}:${Math.random()}`)
       : fingerprint;
-    const sourceEventIds = [...new Set([...events.map((event) => event.id), ...hermory.map((event) => event.id)])];
+    const sourceEventIds = [...new Set([...events.map((event) => event.id), ...hermory.map((event) => event.id), ...workItems.map((event) => event.id)])];
     const job = this.db.createDraftJob(customerId, finalFingerprint, sourceEventIds, 'weekly_report');
     if (job.status !== 'succeeded') void this.process(job.id);
     return { jobId: job.id, fingerprint: finalFingerprint, weekStart };
@@ -296,8 +343,7 @@ export class WeeklyReportService {
       const anchor = seeded[0];
       const weekStart = weekMonday(anchor.occurredAt);
       const range = weekRange(weekStart);
-      const events = this.db.listSourceEventsInRange(customer.id, { since: range.start, until: range.end });
-      const hermory = this.db.listHemoryFragments({ customerId: customer.id, status: 'confirmed', since: range.start, until: range.end, limit: 500 });
+      const { events, hermory, workItems } = this.weeklyEvents(customer.id, weekStart);
       if (!events.length && !hermory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据`);
       // 工时从已同步 payload 取（避免生成路径实时打 ONES MCP）；缺失时按 unknown 处理，不阻塞生成。
       let workhourRecords: Array<{ startTime: string; hours: number; description: string; owner?: string }> = [];
@@ -317,10 +363,10 @@ export class WeeklyReportService {
         return action.status === 'completed' && !Number.isNaN(at) && at >= Date.parse(range.start) && at <= Date.parse(range.end);
       }).length;
       const riskRow = this.db.latestRisk(customer.id);
-      const stats = buildStats(events, hermory, workhoursTotal, actionsCompleted);
+      const stats = buildStats(weekStart, { workItems, hermory, workhours: workhoursTotal, actionsCompleted });
       if (!this.runtime) throw new Error('模型未配置，无法生成周报（请检查 LLM 配置后重新生成）');
       let content: WeeklyReportContent;
-      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hermory, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }); }
+      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hermory, workItems, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }); }
       catch (error) { throw new Error(`模型未生成周报: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const report = this.db.upsertWeeklyReport({ customerId: customer.id, weekStart, weekEnd: range.weekEnd,

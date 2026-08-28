@@ -219,7 +219,9 @@ export class HemorySegmentationService {
     for (const job of this.db.listPendingHemorySegmentationJobs()) {
       if (job.attempts >= 3) continue;
       const recording = this.db.getSourceEvent(job.recordingEventId);
-      if (recording) void this.segmentRecording(recording);
+      // 失败已在 process 内落库（job failed + error），这里必须吞掉 rethrow：
+      // 裸 void 的 unhandledRejection 会打崩整个服务进程（实测：分段 3 次超时后服务退出）。
+      if (recording) void this.segmentRecording(recording).catch(() => {});
     }
   }
 

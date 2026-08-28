@@ -3,6 +3,12 @@ import { startServer } from './server.js';
 import { loadMcpServers } from './config.js';
 
 async function main(): Promise<void> {
+  // 后台任务（分段/草稿/周报生成等）的未处理 rejection 只记日志，绝不打崩常驻服务进程
+  // （曾因分段 3 次超时 rethrow 未接 catch 导致整个服务退出）。
+  process.on('unhandledRejection', (reason) => {
+    console.error('[unhandledRejection]', reason);
+  });
+
   const runtime = await createRuntime();
   const port = Number(process.env.CSM_PORT ?? 3210);
 
