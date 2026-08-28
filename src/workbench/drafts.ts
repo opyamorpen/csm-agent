@@ -7,7 +7,7 @@ import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
 
-export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-required-fields';
+export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v3-ones-module-full-tree';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
 export const ONES_DESK_PROJECT_ID = 'GL3ysesFPdnAQNIU';
 export type OnesDeskDraftType = 'suggestion' | 'ticket' | 'operations';
@@ -30,29 +30,92 @@ export interface OnesDeskFieldSpec {
   defaultValue?: string;
 }
 
-// 所属模块（建议和反馈）：必须用 search_for_modules 的 UUID（工具说明明确指定，且 2026-08-27 逐个
-// 试写验证 50/50 全部有效）。search_for_issue_field_options 对 field054 的返回混入约 40 个无效 UUID
-//（如 QVtmNu5r 会报 InvalidParameter invalidOption），不可采用。
+// 所属模块（建议和反馈）：完整类目树（用户提供的 ONES Desk 模块全集）。UUID 来源：
+// 2026-08-27 首 50 项经 search_for_modules 解析并逐个试写验证（50/50 有效）；
+// 2026-08-28 补全其余类目（效能管理/账号安全/系统配置等）时同样经 search_for_modules
+// 按精确名逐一解析（141/141 命中，projectID=ONES Desk 过滤），按当次决策未再逐个试写——
+// search_for_issue_field_options 对 field054 的返回混入约 40 个无效 UUID，不可采用。
 const ONES_DESK_MODULE_OPTIONS: Record<string, string> = {
-  '事件': 'HhvtUuNJ',
-  '平台开放能力（OpenAPI、功能扩展、事件）': 'K21NYczY', '功能扩展': 'RbrMxh1n',
-  '甘特图属性': 'HBCFxdSD', '甘特图性能问题': 'LiUTxk93', '导入导出': '7UrGLPKZ',
-  '基线': 'Dd3YVhjo', '页面组分类': 'N3PEm4a4', '页面属性': 'J2pFBfU9',
-  '模版管理': 'Pj5TM5ii', '搜索+筛选': 'QMKwmJLi', '移动端': 'FWMr6KX6',
-  '页面通知': 'Rb6xGxRR', '附件管理': 'VQEN9ujx', '审批业务场景': '4PZG5h2H',
-  '审批配置': 'EUDLYiHj', 'Wiki+Project': 'LcMQhTkj', '页面标签': '5mMbyUGz',
-  '页面复制移动等操作': 'WXVm4nue', '页面导入': 'Y1mmnuBF', '页面导出': 'LUgM6TKk',
-  '页面操作': 'RR4cBGRA', '权限配置': 'VeZfQC4e', '工时审批': '5ykWtsNF',
-  '工作台-工时日历': 'DZwpkKqi', '燃尽图': '4iN3LVJg', '规划与跟踪': 'PuvUvoEA',
-  '计算属性': 'VARew4eQ', '项目集管理': '5mzB3MTu',
-  'Project 项目管理 -- 父子工作项（层级关系）': 'SjAPKztR', '甘特图列表和操作': 'KSjNJ3Zc',
-  '前后置和排期规则': '4J5Twcvi', '里程碑和交付物': 'QSVA12xn', '甘特图配置': 'J6Bz1JBX',
-  '模块组件': '8uWY6XbB', '表单详情': 'VoQt7sGp',
-  'Project 项目管理 -- 瀑布组件（甘特图、里程碑...)': '5WswRWSv', '外部门户': '3mhZk41U',
-  '表单组件': 'EiqH8C2x', 'OpenAPI': '4udPkSYK', '多数据中心': 'Uf6KenG1',
-  '插件（标品插件不要选此项）': '9wUeS6tR', '资源管理配置（工时表单&登记规则&工时提醒）': 'D5d2rcK2',
-  '工时报表': 'WsbzjX5T', '工时管理（登记工时&预估工时）': 'AC5rA1w8', '运行历史日志': '4nFayDF8',
-  '管理自动化规则': 'ATcQ6cso', '新建自动化规则': 'RiDwmLXr', '条件判断': 'Ef4Bo8BC', '条件分支': 'SV5PSU14',
+  // 平台开放能力
+  '平台开放能力（OpenAPI、功能扩展、事件）': 'K21NYczY', 'OpenAPI': '4udPkSYK', '功能扩展': 'RbrMxh1n', '事件': 'HhvtUuNJ',
+  '开放平台基础设施': '7hdvLDN7',
+  // Project 项目管理 -- 工作项相关
+  '工作项属性': 'JMU4jWTw', '计算属性': 'VARew4eQ', '工作项列表视图&筛选器&分组排序': 'MisRwo3A', '工作流': 'B1qftfH9',
+  '工作项操作': 'Dc5j8vXc', '表单配置': 'AGY8b1Xe', '通知提醒': 'xAjtYFTP', '评论动态': 'MDfkTfKM',
+  '关联关系': 'KqdzYXbs', '其他工作项相关': '54DYb3up',
+  // Project 项目管理 -- 敏捷组件
+  '规划组件': 'XZCLgeqK', '迭代管理': 'JTUpoL6z', '迭代概览': '9cqYmsWq', '敏捷看板': 'WZsd9y96',
+  '迭代计划': '6J3wzptW', '燃尽图': '4iN3LVJg', '史诗管理': 'PmwTNgrs', '发布管理': 'HgyauQD1',
+  '路线图': 'RS6MBHda', '看板组件': 'YYHarYwz', '其他敏捷组件': 'KiHTLHmP',
+  // Project 项目管理 -- 瀑布组件
+  '甘特图配置': 'J6Bz1JBX', '甘特图属性': 'HBCFxdSD', '甘特图列表和操作': 'KSjNJ3Zc', '甘特图性能问题': 'LiUTxk93',
+  '里程碑和交付物': 'QSVA12xn', '前后置和排期规则': '4J5Twcvi', '项目集管理': '5mzB3MTu',
+  '项目计划、里程碑、交付物组件（旧）': 'XfGnootp', '基线': 'Dd3YVhjo', '导入导出': '7UrGLPKZ',
+  // Project 项目管理 -- 父子工作项
+  'Project 项目管理 -- 父子工作项（层级关系）': 'SjAPKztR',
+  // Project 项目管理 -- 项目报表
+  'Dashboard 仪表盘': 'YSot3xoE',
+  // Project 项目管理 -- 其他
+  'Project 项目管理 -- 瀑布组件（甘特图、里程碑...)': '5WswRWSv',
+  '项目管理': 'GL66ihcK', '项目属性': 'Mihrb2S4', '项目列表': '6ev7CQN8', '创建项目/项目模板': 'UCuCUaLD',
+  '项目配置': 'Guh1tuBV', '模块组件': '8uWY6XbB', '项目成员': 'ADdz53p8', '进度管理器': 'Ji7NhqHo',
+  '文档管理': 'TJQUAnfp', '附件管理': 'VQEN9ujx', '权限配置': 'VeZfQC4e', 'Project配置中心': 'G3rvQUc4',
+  '产品管理（旧）': 'Cktvz8WD', '版本管理（旧）': 'QGNqpKBq',
+  // Wiki 知识库管理
+  'Wiki+Project': 'LcMQhTkj', '编辑器+宏': '4x6giyaq', '页面树管理': 'CqULhqBB', '思维导图': 'H3jvKuLZ',
+  '办公协同（WPS）': 'MscSN45c', '页面数据统计': 'T9V4ZWW6', '页面组权限': 'HYisDAPY',
+  '页面共享+公开发布+加密': '7J7h9kFV', '数据表格': 'Vo9h1HPy', '页面操作': 'RR4cBGRA',
+  '页面导出': 'LUgM6TKk', '页面导入': 'Y1mmnuBF', '页面复制移动等操作': 'WXVm4nue',
+  '页面标签': '5mMbyUGz', '页面通知': 'Rb6xGxRR', '移动端': 'FWMr6KX6', '搜索+筛选': 'QMKwmJLi',
+  '模版管理': 'Pj5TM5ii', '页面属性': 'J2pFBfU9', '页面组分类': 'N3PEm4a4',
+  // Testcase 测试管理场景
+  'Testcase 测试管理场景': '5d2FEBZr', '用例库': 'WKCt6kV3', '测试计划': 'RqyNANMo', '测试报告': 'Ps9D59pV',
+  // Plan 项目集管理
+  '项目集': 'PHZXgsHV',
+  // Resource 资源管理&工时管理
+  '规划与跟踪': 'PuvUvoEA', '工时管理（登记工时&预估工时）': 'AC5rA1w8', '工时报表': 'WsbzjX5T',
+  '资源管理配置（工时表单&登记规则&工时提醒）': 'D5d2rcK2', '工作台-工时日历': 'DZwpkKqi', '工时审批': '5ykWtsNF',
+  // Performance 效能管理
+  'Performance 效能管理': 'BjkWAPRj', '仪表盘': '2xGRM1Dk', '数据卡片': 'W1kPUZWx',
+  '仪表盘模板&卡片模板': 'Wx5iGww1', '效能管理权限': 'XHNdBqX9',
+  // Automation 自动化管理
+  '触发事件': '9WPXxsZT', '动作执行': 'HkzCCJLb', '联动数据对象': 'SJo7M6gK', '条件分支': 'SV5PSU14',
+  '条件判断': 'Ef4Bo8BC', '新建自动化规则': 'RiDwmLXr', '管理自动化规则': 'ATcQ6cso', '运行历史日志': '4nFayDF8',
+  // Desk 工单管理
+  '外部门户': '3mhZk41U', '表单组件': 'EiqH8C2x', '表单详情': 'VoQt7sGp',
+  '工单小程序（旧)': 'MhQUQ4ng', '工单管理概览(旧）': 'Ljwbhfsh', '表单配置（旧）': 'FsgWMBGv',
+  // Account 账号和安全管理（节点多，按子树分组）
+  '组织架构': 'AKNSYLiu', '添加成员': 'Ckvr1bVh', '邀请成员': 'XTVnMyqv', '批量导入': 'RJ9DWXir',
+  '成员管理': 'U2uU6vjw', '组织/团队负责人': '8HhKET76', '部门管理': 'LLrcheLY', '用户组': 'GDSLGwrz',
+  '团队管理': 'Hx1rAryN', '账号集成': 'WCcde2Fp', '账号集成功能': 'XZVFLxNZ', '添加集成及其详情': '62rQwF78',
+  '账号绑定方式': 'X8XnmaWX', '用户属性映射': 'GPX11p1i', '用户目录同步': 'Fxgqca5b', '单点登录': 'R72Lci4T',
+  '登录即时创建': '46EhCfN6', '消息通知': 'EhLV9xTE', '登录登出设置': 'HAKc142A', '第三方账号集成': 'MYRd9WMD',
+  '企业微信': 'LJi7Xe5X', '飞书': 'HLSVCqXs', '钉钉': 'WaXZt1it', '有度': 'Uns8Jidi', 'LDAP/AD': 'SJeDVvb8',
+  'SAML': 'XNP3YKfg', 'CAS': '31MJW3GJ', 'API同步': '2UZmtybv', 'Google SAML': '5CHALhNK',
+  'Microsoft Azure AD': 'KnumWhzR', '成员安全': 'Ax1bFQbN', '密码规则': 'SWHu2FcH', '会话设置': '7sXP9RQK',
+  '两步验证': 'ChdsRXU4', '信息安全': '8VESR3kE', '多团队': '2Zkq4edy', '多数据中心': 'Uf6KenG1',
+  '登录与退登流程': 'QvA9Hw6A', '登录': '14TAXe5t', '退登': 'BuKTfjrJ', '个人中心': 'UgUcFb74',
+  '基础信息': 'HigtRFJL', '账号信息': 'KFfy2HGK', '邮箱': '7mUQYxHZ', '密码': 'C1g9SFsc', 'MFA设备': 'PZ5RA8fk',
+  '账号合并': '8f6SSQ1W', '绑定第三方账号': 'DTVYmnt1', '语言和时区': 'Ni2nbpyd', '我的组织': 'Nb1xdCUV',
+  'Account 应用（应用移除/过期表现、授权策略、说明等）': 'NmCEnZfb',
+  // Admin 系统配置
+  '企业信息设置': 'NvifVGfs', '团队/组织信息（Logo与名称）': 'UfBsE9hC', '团队/组织语言和时区': 'MK8z1LN3',
+  '浏览器 Favicon': 'YTMUZR2U', '高级设置（baseURL等）': '6PKHLLSv', '侧边栏导航': 'KwmjHctq',
+  '侧边栏颜色设置': 'NWG8gN6e', '侧边栏菜单设置': 'QDGUqj7H', '全局搜索': 'MKGBMunK', '通知中心': '3kaAGkiQ',
+  '邮件设置': 'SNZq48XU', 'SMTP 配置': 'GWv7saZZ', '邮件模板': 'JVKR3ysh', '手机号与短信服务设置': 'M6JLK4x3',
+  '系统权限及其配置': 'NvfZfYs2', '系统安全': 'PX9JiMzg', '安全水印': '399VcFms', '系统日志': 'AVxWChdy',
+  '风控': 'HitGfKTE', '插件管理': 'B9h7WvDb',
+  // 官网&区域运营业务及其他
+  '官网&区域运营业务': '37AL8Ske', '帮助中心和产品手册': 'Fc2PuHmF', 'CN 官网': 'QvK3GfqS', 'COM 官网': 'Ekum7upr',
+  'Onboarding 开箱流程': '6URLZ8JU', 'ONES Design组件库': 'YZ1h7hc5', '证书平台': '9eTpLRF6Q6gq859i',
+  'Assistant 智能助手': 'Xf7pz4dJ', '应用中心': 'WctkVxhJ',
+  '订单和支付管理': 'QzN71EYT', '授权管理': 'SLtn3xqd', 'CRM数据对接': '3LNkkswD',
+  'Jira&Confluence 导入': '2CNMpCdz', 'Jira 导入': 'E5bUGbZT', 'Confluence 导入': 'LS6fMU7Y',
+  '运维工具箱': 'HAPHSmiE', '基础设施': 'JAMejAyD', '信创': '8abEJ7oo', '混合云': '91SbJpue',
+  'Task 任务协作': 'WSt62tVC',
+  // Approval 审批
+  '审批业务场景': '4PZG5h2H', '审批配置': 'EUDLYiHj',
+  '插件（标品插件不要选此项）': '9wUeS6tR',
 };
 
 // 所属产品（工单）候选。
@@ -114,12 +177,21 @@ export function resolveDeploymentType(usageVersion: string | null | undefined): 
  */
 export const ONES_DESK_CLASSIFICATION_HINTS: Record<'module' | 'product', string[]> = {
   module: [
-    'Project 类：父子工作项（层级关系）、甘特图属性/配置/列表和操作/性能问题、瀑布组件（甘特图、里程碑...)、前后置和排期规则、里程碑和交付物、模块组件、表单详情、表单组件、基线、燃尽图、规划与跟踪、计算属性、项目集管理',
-    'Wiki 类：页面操作、页面属性、页面组分类、页面导入、页面导出、页面复制移动等操作、页面标签、页面通知、附件管理、审批业务场景、审批配置、模版管理、搜索+筛选、移动端、Wiki+Project',
-    '工时资源类：工时管理（登记工时&预估工时）、工时审批、工时报表、工作台-工时日历、资源管理配置（工时表单&登记规则&工时提醒）',
-    '自动化类：管理自动化规则、新建自动化规则、条件判断、条件分支',
-    '开放集成类：OpenAPI、功能扩展、事件、平台开放能力（OpenAPI、功能扩展、事件）、插件（标品插件不要选此项）、多数据中心、外部门户',
-    '其他：导入导出、运行历史日志、事件',
+    '效能管理类（效能度量、报表图表、看板统计、指标分析）：仪表盘、数据卡片、仪表盘模板&卡片模板、效能管理权限。客户谈效能报表/质量看板/累计趋势/度量指标→数据卡片或仪表盘，不是工时或项目报表',
+    'Project 工作项类：工作项属性、计算属性、工作项列表视图&筛选器&分组排序、工作流、工作项操作、表单配置、通知提醒、评论动态、关联关系、其他工作项相关、父子工作项（层级关系）',
+    'Project 敏捷类：规划组件、迭代管理、迭代概览、敏捷看板、迭代计划、燃尽图、史诗管理、发布管理、路线图、看板组件、其他敏捷组件',
+    'Project 瀑布类：甘特图配置/属性/列表和操作/性能问题、里程碑和交付物、前后置和排期规则、项目集管理、项目计划/里程碑/交付物组件（旧）、基线、导入导出',
+    'Project 项目报表：项目内报表、仪表盘、统计图 → Dashboard 仪表盘（注意与效能管理类区分：项目内报表选此项，跨项目效能度量选效能管理类）',
+    'Project 其他：项目管理、项目属性、项目列表、创建项目/项目模板、项目配置、模块组件、项目成员、进度管理器、文档管理、附件管理、权限配置、Project配置中心、产品管理（旧）、版本管理（旧）',
+    'Wiki 类：编辑器+宏、页面树管理、思维导图、办公协同（WPS）、页面数据统计、页面组权限、页面共享+公开发布+加密、数据表格、页面操作、页面导出、页面导入、页面复制移动等操作、页面标签、页面通知、移动端、搜索+筛选、模版管理、页面属性、页面组分类、Wiki+Project',
+    '测试类：用例库、测试计划、测试报告',
+    '工时资源类：工时管理（登记工时&预估工时）、工时审批、工时报表、工作台-工时日历、资源管理配置、规划与跟踪',
+    '自动化类：触发事件、动作执行、联动数据对象、条件分支、条件判断、新建自动化规则、管理自动化规则、运行历史日志',
+    'Desk 工单类：外部门户、表单组件、表单详情、工单小程序（旧)、工单管理概览(旧）、表单配置（旧）',
+    '账号与安全类：组织架构、成员管理、账号集成（单点登录/第三方账号/用户目录同步）、成员安全、多团队、多数据中心、个人中心、Account 应用',
+    '系统配置类：企业信息设置、侧边栏导航、邮件设置、手机号与短信服务设置、系统权限及其配置、系统安全、插件管理',
+    '开放集成类：OpenAPI、功能扩展、事件、平台开放能力、开放平台基础设施、插件（标品插件不要选此项）、外部门户、Jira&Confluence 导入、Task 任务协作',
+    '其他：官网&区域运营业务、帮助中心和产品手册、证书平台、Assistant 智能助手、应用中心、订单和支付管理、授权管理、CRM数据对接、运维工具箱、基础设施、信创、混合云、审批业务场景、审批配置',
   ],
   product: [
     'ONES Project（项目管理）：Project 场景与平台、Core 基础平台能力、Dashboard 仪表盘能力、Automation 流程自动化、Mobile 手机网页与客户端',
@@ -139,7 +211,8 @@ const ONES_DESK_DESC_FIELD_ID = 'field016';
 /**
  * label → 选项 UUID 解析（逐级放宽）：精确 → 大小写无关去空格 → 选项 label 包含提案或提案以选项开头
  *（近似 label 纠偏，如「工时管理」→「工时管理（登记工时&预估工时）」）→ UUID 直填。
- * 大小写无关与包含式匹配都要求命中唯一，防止「工时」同时命中多个工时类选项。
+ * 大小写无关与包含式匹配都要求命中唯一，防止「工时」同时命中多个工时类选项、「仪表盘」
+ * 同时命中「Dashboard 仪表盘」与「仪表盘」等宽泛词误绑。
  */
 function resolveOptionLabel(label: string, spec: OnesDeskFieldSpec): string | null {
   if (!label) return null;

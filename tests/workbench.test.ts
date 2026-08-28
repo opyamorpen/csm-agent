@@ -1317,6 +1317,23 @@ test('workbench: desk required fields never miss — defaults cover module/produ
   assert.ok(ambiguous.some((value) => value.fieldID === 'field054' && value.value === 'RbrMxh1n'), '歧义 label 回退兜底=功能扩展');
 });
 
+test('workbench: module options cover full category tree incl. performance efficiency', () => {
+  // 完整类目树：效能管理类目存在且四个叶子都可精确映射（2026-08-28 search_for_modules 141/141 命中）。
+  const perf = mapOnesDeskRequiredFields('suggestion', { '所属模块': 'Performance 效能管理' });
+  assert.ok(perf.some((value) => value.fieldID === 'field054' && value.value === 'BjkWAPRj'), 'Performance 效能管理');
+  for (const [label, uuid] of [['仪表盘', '2xGRM1Dk'], ['数据卡片', 'W1kPUZWx'], ['仪表盘模板&卡片模板', 'Wx5iGww1'], ['效能管理权限', 'XHNdBqX9']] as const) {
+    const mapped = mapOnesDeskRequiredFields('suggestion', { '所属模块': label });
+    assert.ok(mapped.some((value) => value.fieldID === 'field054' && value.value === uuid), `${label} → ${uuid}`);
+  }
+  // 「仪表盘」这类宽泛提案不能唯一包含式命中（同时命中 Dashboard 仪表盘/仪表盘/仪表盘模板&卡片模板），回退兜底不猜。
+  const vague = mapOnesDeskRequiredFields('suggestion', { '所属模块': '仪表盘模板&卡片模板' });
+  assert.ok(vague.some((value) => value.fieldID === 'field054' && value.value === 'Wx5iGww1'), '仪表盘模板&卡片模板精确命中');
+  // 其他新增类目抽查：账号安全、系统配置、测试管理。
+  assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '单点登录' }).some((value) => value.fieldID === 'field054' && value.value === 'R72Lci4T'));
+  assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '系统日志' }).some((value) => value.fieldID === 'field054' && value.value === 'AVxWChdy'));
+  assert.ok(mapOnesDeskRequiredFields('suggestion', { '所属模块': '用例库' }).some((value) => value.fieldID === 'field054' && value.value === 'WKCt6kV3'));
+});
+
 test('workbench: deployment type resolves from CRM usage version deterministically', () => {
   // label 与 CRM 选项 value 两种表示都接受（CRM query 返回的是 value）。
   assert.equal(resolveDeploymentType('公有云版'), '公有云');
