@@ -102,9 +102,9 @@
       </div>
       <!-- 筛选面板：默认收起；点「筛选」才应用条件，草稿不实时生效。只按日期时间过滤；状态走「已归属」切换、客户走归属栏。 -->
       <div id="hemoryFilterPanel" class="hemory-filter-panel hidden">
-        <label><span>日期</span><input id="hemoryDate" type="date" /></label>
-        <label><span>开始时间</span><input id="hemoryTimeFrom" type="time" title="上海时区" /></label>
-        <label><span>结束时间</span><input id="hemoryTimeTo" type="time" title="上海时区" /></label>
+        <label><span>日期</span><input id="hemoryDate" type="date" required /></label>
+        <label><span>开始时间</span><input id="hemoryTimeFrom" type="time" title="上海时区" required /></label>
+        <label><span>结束时间</span><input id="hemoryTimeTo" type="time" title="上海时区" required /></label>
         <button id="hemoryFilterApply" class="primary-command" type="button">筛选</button>
         <button id="hemoryFilterReset" class="quiet-command" type="button">重置</button>
       </div>

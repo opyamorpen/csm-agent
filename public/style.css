@@ -661,6 +661,11 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .hemory-filter-panel label span { color: var(--muted); font-size: 11px; }
 .hemory-filter-panel input, .hemory-filter-panel select { min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
 .hemory-filter-panel input[type="date"], .hemory-filter-panel input[type="time"] { width: 150px; }
+/* WebKit 空置的日期/时间输入会灰字渲染“今天/当前时刻”，看似已填默认值实则不参与筛选；未聚焦且未选值（required 使空值匹配 :invalid）时透明隐藏，聚焦编辑或已选值后正常显示。 */
+.hemory-filter-panel input[type="date"]:not(:focus):invalid,
+.hemory-filter-panel input[type="time"]:not(:focus):invalid { color: transparent; }
+.hemory-filter-panel input[type="date"]:not(:focus):invalid::-webkit-date-and-time-value,
+.hemory-filter-panel input[type="time"]:not(:focus):invalid::-webkit-date-and-time-value { color: transparent; }
 .hemory-filter-panel input[list] { flex: 1 1 220px; }
 /* 客户详情片段 tab 的纯展示行：无勾选列，去掉 label 的点选手势。 */
 .hemory-fragment.readonly { grid-template-columns: minmax(0, 1fr); cursor: default; }
