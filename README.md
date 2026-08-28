@@ -93,9 +93,11 @@ csm-agent hemory sync [YYYY-MM-DD]
 csm-agent hemory resegment --all
 csm-agent hemory inbox [YYYY-MM-DD] [--days N] # 待归属片段；--from/--to 按上海时区收窄到当天时间段（需与日期同用）
 csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30
+csm-agent hemory inbox --customer <客户ID或名称> --status confirmed # 按客户查看已归属片段（--status 默认 pending）
 csm-agent hemory assign <客户ID或名称> <片段ID...> # 归属即触发后台草稿生成；--wait 轮询任务直到完成/失败
 csm-agent hemory clear <片段ID...>
 csm-agent hemory ignore <片段ID...>
+csm-agent hemory regenerate <片段ID...> [--wait] # 按天强制重生成草稿：片段决定重建的「客户+上海日」，各天全部已确认片段参与，旧批次作废
 csm-agent drafts [客户ID或名称] [--all]
 csm-agent draft review <批次ID>
 csm-agent draft retry <草稿ID>
@@ -174,7 +176,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
-- `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`
+- `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制；`customer_id` 按客户过滤，配合 `status=confirmed` 查看某客户已归属片段）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`、`POST /api/hemory/fragments/regenerate`（按天强制重生成草稿，body `{eventIds}`，返回 `{jobs, days}` 与归属端点同形）
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`、`GET /api/draft-jobs?ids=`（生成任务状态；归属/重生成响应返回 jobId，失败任务不创建批次只能在此查询）
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`

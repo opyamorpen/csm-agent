@@ -626,6 +626,30 @@ export class HemoryDraftService {
       .filter((job): job is { jobId: string; fingerprint: string } => !!job);
   }
 
+  /**
+   * 片段级强制重生成：选中片段只用于确定要重建哪些「客户 + 上海自然日」，各天重取该客户
+   * 当天全部已确认活跃片段（与 enqueue/regenerate 同一引擎，不是片段子集生成）。无效片段逐条列明原因。
+   */
+  regenerateByEventIds(eventIds: string[]): { jobs: Array<{ jobId: string; fingerprint: string }>; days: Array<{ customerId: string; dateKey: string }> } {
+    const invalid: string[] = [];
+    const days = new Map<string, { customerId: string; dateKey: string }>();
+    for (const id of [...new Set(eventIds)]) {
+      const event = this.db.getSourceEvent(id);
+      if (!event) { invalid.push(`${id}: 片段不存在`); continue; }
+      if (event.sourceSystem !== 'hemory' || event.sourceType !== 'ai_topic_segment') { invalid.push(`${id}: 不是 Hemory 片段`); continue; }
+      if (event.attributionStatus !== 'confirmed') { invalid.push(`${id}: 不是已归属状态`); continue; }
+      if (!event.customerId) { invalid.push(`${id}: 未归属客户`); continue; }
+      if (!this.db.isHemoryFragmentActive(id)) { invalid.push(`${id}: 片段已被重切取代`); continue; }
+      const dateKey = shanghaiEventDate(event);
+      days.set(`${event.customerId}:${dateKey}`, { customerId: event.customerId, dateKey });
+    }
+    if (invalid.length) throw new Error(`以下片段不能重生成：${invalid.join('；')}`);
+    const dayList = [...days.values()];
+    const jobs = dayList.map((day) => this.generateForDay(day.customerId, day.dateKey, true))
+      .filter((job): job is { jobId: string; fingerprint: string } => !!job);
+    return { jobs, days: dayList };
+  }
+
   private confirmedSegments(customerId: string, eventIds: string[]): SourceEvent[] {
     // 停用片段不得再生草稿：重切后被取代的 v1 片段即使仍是 confirmed 也已经不属于当前代际。
     return [...new Set(eventIds)].map((id) => this.db.getSourceEvent(id)).filter((event): event is SourceEvent =>

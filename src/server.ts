@@ -349,6 +349,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         if (since != null && Number.isNaN(Date.parse(since))) return json(res, 400, { error: 'since 必须是合法的 ISO 日期时间，例如 2026-08-27T14:00:00+08:00' });
         if (until != null && Number.isNaN(Date.parse(until))) return json(res, 400, { error: 'until 必须是合法的 ISO 日期时间，例如 2026-08-27T15:30:00+08:00' });
         const fragments = workbench.db.listHemoryFragments({ status: url.searchParams.get('status') ?? 'pending',
+          customerId: url.searchParams.get('customer_id')?.trim() || undefined,
           date: url.searchParams.get('date') ?? undefined, since, until,
           recordingId: url.searchParams.get('recording_id') ?? undefined,
           cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100),
@@ -395,6 +396,17 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           return json(res, 200, { events, jobs });
         } catch (error) {
           return json(res, 409, { error: (error as Error).message });
+        }
+      }
+      // 片段级强制重生成：选中片段确定要重建的「客户+上海日」，各天全量已确认片段参与；jobs 与归属端点同形，前端复用同一轮询。
+      if (req.method === 'POST' && path === '/api/hemory/fragments/regenerate') {
+        const body = await readBody(req);
+        const eventIds = Array.isArray(body.eventIds) ? body.eventIds.map(String) : [];
+        if (!eventIds.length) return json(res, 400, { error: 'eventIds 不能为空' });
+        try {
+          return json(res, 200, workbench.drafts.regenerateByEventIds(eventIds));
+        } catch (error) {
+          return json(res, 400, { error: (error as Error).message });
         }
       }
       const syncMatch = path.match(/^\/api\/sync-runs\/([0-9a-f-]+)$/);

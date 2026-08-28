@@ -1927,3 +1927,59 @@ test('workbench: adjacent segments of same object but distinct requests stay sep
     assert.equal(fragments[1].payload?.topicGroupId, 'rec-b3:perm-redesign');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('workbench: fragment list filters by customer for the attributed view', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-fa', name: '客户甲' });
+  db.upsertCustomer({ id: 'crm-fb', name: '客户乙' });
+  const raw = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'r-cfilter', title: '原始转写',
+    occurredAt: '2026-08-25T05:00:00Z', payload: { recordingId: 'r-cfilter' }, attributionStatus: 'unattributed' });
+  const a1 = segment(db, 'crm-fa', 'r-cfilter:t1', 'r-cfilter', '甲话题', '2026-08-25T05:00:00Z', '甲的沟通');
+  const b1 = segment(db, 'crm-fb', 'r-cfilter:t2', 'r-cfilter', '乙话题', '2026-08-25T06:00:00Z', '乙的沟通');
+  const pending = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r-cfilter:t3',
+    title: '待归属', occurredAt: '2026-08-25T07:00:00Z', payload: { recordingId: 'r-cfilter', transcript: '待归属内容' }, attributionStatus: 'unattributed' });
+  db.activateHemoryFragments(raw.id, 'fingerprint-cfilter', [a1.id, b1.id, pending.id]);
+  const fa = db.listHemoryFragments({ status: 'confirmed', customerId: 'crm-fa' }).map((item) => item.id);
+  assert.deepEqual(fa, [a1.id]);
+  const fb = db.listHemoryFragments({ status: 'confirmed', customerId: 'crm-fb' }).map((item) => item.id);
+  assert.deepEqual(fb, [b1.id]);
+  // 不带客户过滤仍返回两个客户的全部已归属片段。
+  assert.deepEqual(db.listHemoryFragments({ status: 'confirmed' }).map((item) => item.id).sort(), [a1.id, b1.id].sort());
+  // 客户过滤与待归属状态组合只影响归属维度，不把 pending 误收进来。
+  assert.deepEqual(db.listHemoryFragments({ status: 'pending', customerId: 'crm-fa' }).map((item) => item.id), []);
+}));
+
+test('workbench: regenerateByEventIds rebuilds per customer-day and rejects invalid fragments', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-regen-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-ra', name: '客户甲' });
+    db.upsertCustomer({ id: 'crm-rb', name: '客户乙' });
+    // 客户甲 8-25 与 8-26 各一片段 + 客户乙 8-25 一片段；另备一个待归属与一个未知 ID 用于校验路径。
+    const a1 = segment(db, 'crm-ra', 'r-a:t1', 'r-a', '甲话题一', '2026-08-25T05:00:00Z', '甲的沟通一');
+    const a2 = segment(db, 'crm-ra', 'r-a:t2', 'r-a', '甲话题二', '2026-08-26T05:00:00Z', '甲的沟通二');
+    const b1 = segment(db, 'crm-rb', 'r-b:t1', 'r-b', '乙话题', '2026-08-25T05:00:00Z', '乙的沟通');
+    const pending = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r-c:t1',
+      title: '待归属', occurredAt: '2026-08-25T08:00:00Z', payload: { recordingId: 'r-c', transcript: '待归属内容' }, attributionStatus: 'unattributed' });
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    // 非法输入逐条列明原因：未知 ID / 待归属片段。
+    assert.throws(() => service.regenerateByEventIds(['evt-missing']), /evt-missing: 片段不存在/);
+    assert.throws(() => service.regenerateByEventIds([pending.id]), /不是已归属状态/);
+    // 混合客户跨天：选中的三个片段对应 3 个「客户+上海日」。
+    const { jobs, days } = service.regenerateByEventIds([a1.id, a2.id, b1.id]);
+    assert.deepEqual(days.sort((x, y) => `${x.customerId}:${x.dateKey}`.localeCompare(`${y.customerId}:${y.dateKey}`)),
+      [{ customerId: 'crm-ra', dateKey: '2026-08-25' }, { customerId: 'crm-ra', dateKey: '2026-08-26' }, { customerId: 'crm-rb', dateKey: '2026-08-25' }].sort((x, y) => `${x.customerId}:${x.dateKey}`.localeCompare(`${y.customerId}:${y.dateKey}`)));
+    assert.equal(jobs.length, 3);
+    for (const job of jobs) await waitForJob(db, job.jobId);
+    // 每个客户各得到一个非 stale 批次，且批次来源覆盖该客户当天全部片段。
+    assert.equal(db.listDraftBatches('crm-ra').filter((batch) => batch.status !== 'stale').length, 2);
+    assert.equal(db.listDraftBatches('crm-rb').filter((batch) => batch.status !== 'stale').length, 1);
+    // 强制重生成语义：再次触发同片段会换盐指纹重建，旧非 stale 批次被置 stale。
+    const again = service.regenerateByEventIds([a1.id]);
+    assert.equal(again.days.length, 1);
+    await waitForJob(db, again.jobs[0]!.jobId);
+    const raBatches = db.listDraftBatches('crm-ra');
+    // 8-25 产生新旧两代批次，8-26 保持一代。
+    assert.equal(raBatches.filter((batch) => batch.status !== 'stale').length, 2);
+    assert.equal(raBatches.filter((batch) => batch.status === 'stale').length, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});

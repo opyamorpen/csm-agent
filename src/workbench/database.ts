@@ -703,9 +703,10 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow);
   }
 
-  listHemoryFragments(filters: { status?: string; date?: string; since?: string; until?: string; recordingId?: string; limit?: number; cursor?: string; days?: number } = {}): SourceEvent[] {
+  listHemoryFragments(filters: { status?: string; customerId?: string; date?: string; since?: string; until?: string; recordingId?: string; limit?: number; cursor?: string; days?: number } = {}): SourceEvent[] {
     const clauses = ["source_system='hemory'", "source_type='ai_topic_segment'", 'g.active=1'];
     const args: Array<string | number | null> = [];
+    if (filters.customerId) { clauses.push('customer_id=?'); args.push(filters.customerId); }
     if (filters.status && filters.status !== 'all') {
       if (filters.status === 'pending') clauses.push("attribution_status NOT IN ('confirmed','ignored')");
       else { clauses.push('attribution_status=?'); args.push(filters.status); }

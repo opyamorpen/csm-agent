@@ -144,11 +144,11 @@ test('app dialogs replace native confirm/alert/prompt for WKWebView compatibilit
 test('hemory inbox exposes ignore and restore actions with incremental sync', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  const renderer = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const ignorer = source.match(/async function ignoreHemoryFragments[\s\S]*?\n  }\n\n  async function updateHemoryAttribution/)?.[0];
+  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
+  const ignorer = source.match(/async function ignoreHemoryFragments[\s\S]*?\n  }\n\n  \/\*\* 归属\/清除归属期间冻结归属栏操作/)?.[0];
 
-  // 显示契约：忽略/恢复按钮、已忽略徽章、忽略走专用接口。
-  assert.ok(renderer, 'loadHemoryInbox source was not found');
+  // 显示契约：忽略/恢复按钮、已忽略徽章、忽略走专用接口（行渲染器由收件箱与客户详情 tab 共用）。
+  assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
   assert.match(renderer, /'已忽略', 'muted'/);
   assert.match(renderer, /attributionStatus === 'ignored' \? badge\('已忽略', 'muted'\)/);
   assert.match(renderer, /const ignore = el\('button', 'quiet-command small', '忽略'\)/);
@@ -171,10 +171,10 @@ test('hemory inbox exposes ignore and restore actions with incremental sync', ()
 test('hemory inbox shows topic-part badges for recurring events', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
-  const renderer = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
+  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
 
   // v2 事件级切片：同一事件被打断后再次出现的片段共享话题组，收件箱显示「同话题 m/n」。
-  assert.ok(renderer, 'loadHemoryInbox source was not found');
+  assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
   assert.match(renderer, /if \(fragment\.payload\?\.topicGroupId\)/);
   assert.match(renderer, /同话题 \$\{fragment\.payload\.topicPartIndex \?\? '\?'\}\/\$\{fragment\.payload\.topicPartCount \?\? '\?'\}/);
   assert.match(renderer, /fragment-topic-part/);
@@ -186,7 +186,7 @@ test('hemory inbox filters via an explicit panel: drafts apply on submit only', 
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const apply = source.match(/async function applyHemoryFilter[\s\S]*?\n  }\n\n  async function resetHemoryFilter/)?.[0];
+  const apply = source.match(/async function applyHemoryFilter[\s\S]*?\n  \}\n\n  async function resetHemoryFilter/)?.[0] ?? source.match(/async function applyHemoryFilter[\s\S]*?\n  \}\n\n  async function resetHemoryFilter/)?.[0] ?? source.match(/async function applyHemoryFilter[\s\S]*?\}\n\n  async function resetHemoryFilter/)?.[0];
   const state = source.match(/let hemoryFilter = \{[\s\S]*?\};/)?.[0];
 
   // 显示契约：默认无筛选（pending 全量）；头部是「筛选」按钮，条件在面板里编辑为草稿，点「筛选」才应用。
@@ -195,16 +195,20 @@ test('hemory inbox filters via an explicit panel: drafts apply on submit only', 
   assert.match(html, /id="hemoryFilterApply"[^>]*>筛选</);
   assert.match(html, /id="hemoryFilterReset"[^>]*>重置</);
   assert.ok(state, 'hemoryFilter state was not found');
-  assert.match(state, /status: 'pending', date: '', from: '', to: ''/);
+  assert.match(state, /status: 'pending', date: '', from: '', to: '', customer: null/);
   assert.ok(apply, 'applyHemoryFilter source was not found');
   assert.match(apply, /时间段筛选需先选择日期/);
   assert.match(apply, /开始时间不能晚于结束时间/);
+  // 客户筛选条件：复用归属 datalist，必须唯一解析才应用。
+  assert.match(html, /id="hemoryFilterCustomer" list="hemoryCustomerOptions"/);
+  assert.match(apply, /请从列表中选择一个唯一的 CRM 客户/);
   // 应用 = 校验草稿 → 拷入已应用状态 → 收起面板 → 重载；重置回默认。
   assert.match(apply, /hemoryFilter = draft/);
   assert.match(apply, /hemoryFilterPanel\.classList\.add\('hidden'\)/);
   assert.ok(loader, 'loadHemoryInbox source was not found');
   // 列表只读已应用状态（hemoryFilter），面板草稿不实时生效；控件 onchange 自动重载必须移除。
   assert.match(loader, /status: hemoryFilter\.status/);
+  assert.match(loader, /customer_id', hemoryFilter\.customer\.id/);
   assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.from \|\| '00:00'\}:00\+08:00`/);
   assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.to \|\| '23:59'\}:59\+08:00`/);
   assert.doesNotMatch(source, /hemoryStatus\.onchange/);
@@ -224,7 +228,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const loader = source.match(/async function loadHemoryInbox[\s\S]*?\n  }\n\n  async function ignoreHemoryFragments/)?.[0];
-  const updater = source.match(/function updateHemorySelection[\s\S]*?\n  }\n\n  \/\*\* 已应用的筛选条件/)?.[0];
+  const updater = source.match(/function bindFragmentSelection[\s\S]*?\n  }\n\n  \/\*\* 单条片段行/)?.[0];
 
   // 显示契约：归属栏是单行 flex 垂直居中的操作条（统一 34px 控件高、13px 辅助文字），sticky 冻结在 tab 条下。
   assert.match(styles, /\.hemory-assign-bar \{[^}]*display: flex/);
@@ -238,7 +242,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.match(styles, /\.hemory-select-all input \{[^}]*height: 16px/);
   assert.match(styles, /\.hemory-select-all \{[^}]*font-size: 13px/);
   assert.match(styles, /\.hemory-selected-count \{[^}]*font-size: 13px/);
-  // 状态筛选已移入面板；归属栏只剩归属操作（客户输入 + 全选 + 计数 + 三个按钮）。
+  // 状态筛选已移入面板；归属栏只剩归属操作（客户输入 + 全选 + 计数 + 四个按钮，含重新生成草稿）。
   const assignBar = html.match(/<div class="hemory-assign-bar">[\s\S]*?<\/div>/)?.[0];
   assert.ok(assignBar, 'hemory-assign-bar markup was not found');
   assert.doesNotMatch(assignBar, /hemoryStatus/);
@@ -246,13 +250,39 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.match(html, /placeholder="归属客户：搜索 CRM 客户"/);
   assert.match(html, /id="hemorySelectAll"/);
   assert.match(html, /id="hemorySelectedCount"/);
+  assert.match(html, /id="hemoryRegenerate"[^>]*>重新生成草稿</);
   // 全选当前筛选结果的全部片段 + 已选计数（m/n），列表 change 委托更新，重渲染后由 loadHemoryInbox 收尾刷新。
-  assert.ok(updater, 'updateHemorySelection source was not found');
+  assert.ok(updater, 'bindFragmentSelection source was not found');
   assert.match(updater, /已选 \$\{selected\}\/\$\{checks\.length\}/);
-  assert.match(updater, /hemorySelectAll\.checked = checks\.length > 0 && selected === checks\.length/);
-  assert.match(source, /hemoryFragmentList\.addEventListener\('change'/);
+  assert.match(updater, /selectAllEl\.checked = checks\.length > 0 && selected === checks\.length/);
+  assert.match(updater, /listEl\.addEventListener\('change'/);
   assert.match(loader, /updateHemorySelection\(\)/);
-  assert.match(source, /hemorySelectAll\.onchange/);
+  assert.match(updater, /selectAllEl\.onchange/);
+});
+
+test('hemory regenerate action is fragment-scoped and per-day, visible from inbox and customer tab', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const regenerator = source.match(/async function regenerateHemoryDrafts[\s\S]*?\n  }\n\n  async function updateHemoryAttribution/)?.[0];
+
+  // 显示契约：重新生成走片段级端点，jobs 复用生成轮询（横幅在草稿箱）；选中必须是已归属片段。
+  assert.ok(regenerator, 'regenerateHemoryDrafts source was not found');
+  assert.match(regenerator, /\/api\/hemory\/fragments\/regenerate/);
+  assert.match(regenerator, /trackDraftGeneration\(jobs \|\| \[\]\)/);
+  assert.match(source, /dataset\.attribution !== 'confirmed'/);
+  assert.match(source, /重生成草稿需要已归属片段/);
+  // 客户详情 Hemory 片段 tab：按客户过滤已归属片段 + 顶部操作条（计数 + 全选 + 重新生成）。
+  const panel = source.match(/async function buildCustomerHemoryPanel[\s\S]*?\n  }\n\n  async function openCustomer/)?.[0];
+  assert.ok(panel, 'buildCustomerHemoryPanel source was not found');
+  assert.match(panel, /customer_id=\$\{encodeURIComponent\(customer\.id\)\}&status=confirmed/);
+  assert.match(panel, /'重新生成草稿'/);
+  assert.match(panel, /bindFragmentSelection\(list, count, selectAll\)/);
+  assert.match(source, /addTab\('hemory_fragments', 'Hemory 片段'/);
+  // 行尾客户显示用名称解析（customersCache），失败回退 CRM id。
+  const row = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  }\n\n  \/\*\* 片段列表整列表渲染/)?.[0];
+  assert.match(row, /customersCache\.find\(\(item\) => item\.id === fragment\.customerId\)\?\.name \?\? `CRM \$\{fragment\.customerId\}`/);
+  // 客户 tab 操作条样式：复用归属栏组件但静态布局（tab 面板无 sticky 展开场景）。
+  assert.match(styles, /\.customer-hemory-bar \{[^}]*position: static/);
 });
 
 test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {

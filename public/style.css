@@ -659,6 +659,9 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .hemory-filter-panel label span { color: var(--muted); font-size: 11px; }
 .hemory-filter-panel input, .hemory-filter-panel select { min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
 .hemory-filter-panel input[type="date"], .hemory-filter-panel input[type="time"] { width: 150px; }
+.hemory-filter-panel input[list] { flex: 1 1 220px; }
+/* 客户详情 tab 内的操作条：沿用收件箱组件，但 tab 面板无负 margin 展开场景，改为静态单行。 */
+.customer-hemory-bar { position: static; margin: 0 0 12px; padding: 0; border-top: none; border-bottom: none; background: transparent; }
 .hemory-fragment-list, .draft-batch-list { display: grid; gap: 8px; }
 .fragment-group-title { margin-top: 6px; padding: 6px 0 2px; color: #5d6875; font-size: 11px; font-weight: 700; }
 .hemory-fragment { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 11px 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
@@ -736,5 +739,6 @@ footer { background: #fff; }
   .agent-work-head .row-actions { flex-wrap: wrap; }
   .hemory-assign-bar { top: 49px; flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
   .hemory-assign-bar input[list] { flex: 1 1 100%; }
+  .customer-hemory-bar { margin: 0 0 12px; padding: 0; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
 }

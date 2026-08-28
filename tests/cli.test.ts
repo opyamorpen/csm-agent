@@ -84,7 +84,22 @@ test('hemory CLI covers ignore restore and incremental sync semantics', () => {
   assert.match(handler, /hemory\/fragments\/ignore/);
   assert.match(handler, /\/api\/hemory\/sync/);
   assert.match(handler, /--days=/);
-  assert.match(handler, /sync\/resegment\/inbox\/assign\/clear\/ignore/);
+  assert.match(handler, /sync\/resegment\/inbox\/assign\/clear\/ignore\/regenerate/);
+});
+
+test('hemory inbox filters by customer and status; regenerate rebuilds per customer-day', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const handler = source.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
+  assert.ok(handler, 'hemoryCommand source was not found');
+  // inbox：--customer 经 resolveCustomer 解析为 customer_id 过滤；--status 白名单校验；表格含客户名列。
+  assert.match(handler, /--customer=.*resolveCustomer\(customerOption\)/s);
+  assert.match(handler, /--status 只允许 pending\/all\/confirmed\/ignored/);
+  assert.match(handler, /customer_id=\$\{encodeURIComponent\(customer\.id\)\}/);
+  assert.match(handler, /customers\?\.find\(\(c: any\) => c\.id === item\.customerId\)\?\.name/);
+  // regenerate：片段级强制重生成端点，--wait 复用草稿任务轮询。
+  assert.match(handler, /\/api\/hemory\/fragments\/regenerate/);
+  assert.match(handler, /按天强制重生成：选中片段决定要重建的「客户\+上海日」，各天全量已确认片段参与/);
+  assert.match(handler, /hemory regenerate 缺少片段 ID/);
 });
 
 test('hemory inbox supports Shanghai time-of-day range filters with since/until', () => {

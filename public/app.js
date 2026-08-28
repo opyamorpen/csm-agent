@@ -57,6 +57,7 @@
   const hemoryTimeFrom = document.getElementById('hemoryTimeFrom');
   const hemoryTimeTo = document.getElementById('hemoryTimeTo');
   const hemoryStatus = document.getElementById('hemoryStatus');
+  const hemoryFilterCustomerInput = document.getElementById('hemoryFilterCustomer');
   const hemoryFilterPanel = document.getElementById('hemoryFilterPanel');
   const hemoryFilterToggle = document.getElementById('hemoryFilterToggle');
   const hemoryFilterChip = document.getElementById('hemoryFilterChip');
@@ -880,20 +881,103 @@
     }
   }
 
-  function selectedHemoryFragments() {
-    return [...hemoryFragmentList.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.eventId);
+  /** 某个片段列表容器内已勾选的片段 ID；收件箱与客户详情 Hemory 片段 tab 共用。 */
+  function selectedFragmentIds(listEl) {
+    return [...listEl.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.eventId);
   }
 
-  /** 已选计数与全选勾选态跟随列表勾选变化（change 冒泡到列表容器，一次委托即可，重渲染无需重挂）。 */
-  function updateHemorySelection() {
-    const checks = [...hemoryFragmentList.querySelectorAll('input[type="checkbox"]')];
-    const selected = checks.filter((input) => input.checked).length;
-    hemorySelectedCount.textContent = checks.length ? `已选 ${selected}/${checks.length}` : '';
-    hemorySelectAll.checked = checks.length > 0 && selected === checks.length;
+  /**
+   * 绑定一个片段列表的勾选联动：「已选 n/m」计数 + 全选态跟随列表勾选变化。
+   * 列表重渲染后调用返回的 update 重新同步；listEl 每次重建后需重新调用绑定。
+   */
+  function bindFragmentSelection(listEl, countEl, selectAllEl) {
+    const update = () => {
+      const checks = [...listEl.querySelectorAll('input[type="checkbox"]')];
+      const selected = checks.filter((input) => input.checked).length;
+      countEl.textContent = checks.length ? `已选 ${selected}/${checks.length}` : '';
+      selectAllEl.checked = checks.length > 0 && selected === checks.length;
+    };
+    listEl.addEventListener('change', (event) => {
+      if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') update();
+    });
+    selectAllEl.onchange = () => {
+      for (const input of listEl.querySelectorAll('input[type="checkbox"]')) input.checked = selectAllEl.checked;
+      update();
+    };
+    return update;
   }
 
-  /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；面板控件只是草稿，点「筛选」才生效。 */
-  let hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
+  /** 单条片段行：checkbox + 话题 + 状态徽标 + 行内忽略/恢复；整卡 label 点选契约，卡内按钮 type=button + 防冒泡。 */
+  function renderHemoryFragmentRow(fragment, opts = {}) {
+    const row = el('label', 'hemory-fragment');
+    const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.eventId = fragment.id; check.dataset.payloadHash = fragment.payloadHash;
+    check.dataset.attribution = fragment.attributionStatus || '';
+    const body = el('div', 'fragment-body');
+    const head = el('div', 'fragment-head');
+    const statusBadge = fragment.attributionStatus === 'confirmed' ? badge('已归属', 'success')
+      : fragment.attributionStatus === 'ignored' ? badge('已忽略', 'muted')
+      : badge('待归属', 'warning');
+    head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
+    // 同一事件被打断后再次出现时共享话题组，徽标提示分段序号，方便合并归属。
+    if (fragment.payload?.topicGroupId) {
+      head.append(el('span', 'fragment-topic-part', `同话题 ${fragment.payload.topicPartIndex ?? '?'}/${fragment.payload.topicPartCount ?? '?'}`));
+    }
+    const rowActions = el('div', 'row-actions');
+    if (fragment.attributionStatus === 'ignored') {
+      const restore = el('button', 'quiet-command small', '恢复');
+      restore.type = 'button';
+      restore.onclick = async (event) => {
+        event.preventDefault(); event.stopPropagation();
+        try { await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventIds: [fragment.id], customerId: null, expectedHashes: { [fragment.id]: fragment.payloadHash } }) }); await (opts.reload || loadHemoryInbox)(); }
+        catch (error) { await alertDialog(error.message); }
+      };
+      rowActions.append(restore);
+    } else {
+      const ignore = el('button', 'quiet-command small', '忽略');
+      ignore.type = 'button';
+      ignore.onclick = async (event) => {
+        event.preventDefault(); event.stopPropagation();
+        try { await api('/api/hemory/fragments/ignore', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventIds: [fragment.id], expectedHashes: { [fragment.id]: fragment.payloadHash } }) }); await (opts.reload || loadHemoryInbox)(); }
+        catch (error) { await alertDialog(error.message); }
+      };
+      rowActions.append(ignore);
+    }
+    head.append(rowActions);
+    const evidence = document.createElement('details');
+    evidence.className = 'fragment-evidence';
+    evidence.append(el('summary', null, '查看原文证据'), el('pre', null, fragment.payload?.transcript || '无原文'));
+    const speakers = Array.isArray(fragment.payload?.speakers) && fragment.payload.speakers.length ? fragment.payload.speakers.join('、') : '发言人未知';
+    const customerLabel = fragment.customerId
+      ? (customersCache.find((item) => item.id === fragment.customerId)?.name ?? `CRM ${fragment.customerId}`)
+      : '未绑定客户';
+    body.append(head, el('p', null, fragment.payload?.summary || fragment.title), evidence,
+      el('div', 'cell-sub', `${formatDateTime(fragment.payload?.startAt || fragment.occurredAt)} - ${formatDateTime(fragment.payload?.endAt || fragment.occurredAt)} · ${speakers} · ${customerLabel} · ${fragment.id}`));
+    row.append(check, body);
+    return row;
+  }
+
+  /** 片段列表整列表渲染：按录音分组 + 逐行共享渲染器；收件箱与客户详情 tab 共用。 */
+  function renderHemoryFragmentList(listEl, fragments, opts = {}) {
+    listEl.innerHTML = '';
+    if (!fragments.length) {
+      listEl.append(el('div', 'workspace-empty', opts.emptyText || '没有符合条件的 Hemory 片段'));
+      return;
+    }
+    let recording = '';
+    for (const fragment of fragments) {
+      const recordingId = fragment.payload?.recordingId || 'unknown';
+      if (recordingId !== recording) {
+        recording = recordingId;
+        listEl.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
+      }
+      listEl.append(renderHemoryFragmentRow(fragment, opts));
+    }
+  }
+
+  /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；customer 为解析后的 {id,name}；面板控件只是草稿，点「筛选」才生效。 */
+  let hemoryFilter = { status: 'pending', date: '', from: '', to: '', customer: null };
 
   /** 把已应用筛选同步到面板控件（打开面板时预填当前生效值）。 */
   function syncHemoryFilterDrafts() {
@@ -901,17 +985,18 @@
     hemoryDate.value = hemoryFilter.date;
     hemoryTimeFrom.value = hemoryFilter.from;
     hemoryTimeTo.value = hemoryFilter.to;
+    hemoryFilterCustomerInput.value = hemoryFilter.customer?.name || '';
   }
 
   const HEMORY_STATUS_LABELS = { pending: '待归属', all: '全部片段', confirmed: '已归属', ignored: '已忽略' };
 
   /** 激活非默认筛选时在归属栏展示 chip（点击清除回到默认）。 */
   function updateHemoryFilterChip() {
-    const { status, date, from, to } = hemoryFilter;
-    const active = status !== 'pending' || date || from || to;
+    const { status, date, from, to, customer } = hemoryFilter;
+    const active = status !== 'pending' || date || from || to || customer;
     hemoryFilterChip.classList.toggle('hidden', !active);
     if (!active) return;
-    const parts = [HEMORY_STATUS_LABELS[status] ?? status];
+    const parts = [customer?.name, HEMORY_STATUS_LABELS[status] ?? status].filter(Boolean);
     if (date) parts.push(date);
     if (from || to) parts.push(`${from || '00:00'}–${to || '23:59'}`);
     hemoryFilterChip.textContent = `✕ ${parts.join(' · ')}`;
@@ -922,13 +1007,19 @@
     const draft = { status: hemoryStatus.value, date: hemoryDate.value, from: hemoryTimeFrom.value, to: hemoryTimeTo.value };
     if ((draft.from || draft.to) && !draft.date) return alertDialog('时间段筛选需先选择日期');
     if (draft.from && draft.to && draft.from > draft.to) return alertDialog('开始时间不能晚于结束时间');
+    const customerInput = hemoryFilterCustomerInput.value.trim();
+    if (customerInput) {
+      const customer = customersCache.find((item) => customerInput === `${item.name} (${item.id})` || customerInput === item.id || customerInput === item.name);
+      if (!customer) return alertDialog('请从列表中选择一个唯一的 CRM 客户');
+      draft.customer = { id: customer.id, name: customer.name };
+    }
     hemoryFilter = draft;
     hemoryFilterPanel.classList.add('hidden');
     await loadHemoryInbox();
   }
 
   async function resetHemoryFilter() {
-    hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
+    hemoryFilter = { status: 'pending', date: '', from: '', to: '', customer: null };
     syncHemoryFilterDrafts();
     hemoryFilterPanel.classList.add('hidden');
     await loadHemoryInbox();
@@ -938,6 +1029,7 @@
     await ensureCustomerOptions();
     updateHemoryFilterChip();
     const params = new URLSearchParams({ status: hemoryFilter.status, limit: '500' });
+    if (hemoryFilter.customer) params.set('customer_id', hemoryFilter.customer.id);
     // 只选日期走整天 date 参数；填了时刻则按上海时区组装 since/until 闭区间（只填一边为开区间）。
     if (hemoryFilter.date && !hemoryFilter.from && !hemoryFilter.to) params.set('date', hemoryFilter.date);
     if (hemoryFilter.date && (hemoryFilter.from || hemoryFilter.to)) {
@@ -948,59 +1040,8 @@
     const fragments = data.fragments || [];
     if (hemoryFilter.status === 'pending') hemoryPendingCount.textContent = fragments.length || '';
     updateAgentNavCount();
-    hemoryFragmentList.innerHTML = '';
-    if (!fragments.length) {
-      hemoryFragmentList.append(el('div', 'workspace-empty', hemoryFilter.status === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段'));
-      return;
-    }
-    let recording = '';
-    for (const fragment of fragments) {
-      const recordingId = fragment.payload?.recordingId || 'unknown';
-      if (recordingId !== recording) {
-        recording = recordingId;
-        hemoryFragmentList.append(el('div', 'fragment-group-title', `录音 ${recordingId}`));
-      }
-      const row = el('label', 'hemory-fragment');
-      const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.eventId = fragment.id; check.dataset.payloadHash = fragment.payloadHash;
-      const body = el('div', 'fragment-body');
-      const head = el('div', 'fragment-head');
-      const statusBadge = fragment.attributionStatus === 'confirmed' ? badge('已归属', 'success')
-        : fragment.attributionStatus === 'ignored' ? badge('已忽略', 'muted')
-        : badge('待归属', 'warning');
-      head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
-      // 同一事件被打断后再次出现时共享话题组，徽标提示分段序号，方便合并归属。
-      if (fragment.payload?.topicGroupId) {
-        head.append(el('span', 'fragment-topic-part', `同话题 ${fragment.payload.topicPartIndex ?? '?'}/${fragment.payload.topicPartCount ?? '?'}`));
-      }
-      const rowActions = el('div', 'row-actions');
-      if (fragment.attributionStatus === 'ignored') {
-        const restore = el('button', 'quiet-command small', '恢复');
-        restore.type = 'button';
-        restore.onclick = async (event) => {
-          event.preventDefault(); event.stopPropagation();
-          try { await api('/api/hemory/fragments/attribution', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ eventIds: [fragment.id], customerId: null, expectedHashes: { [fragment.id]: fragment.payloadHash } }) }); await loadHemoryInbox(); }
-          catch (error) { await alertDialog(error.message); }
-        };
-        rowActions.append(restore);
-      } else {
-        const ignore = el('button', 'quiet-command small', '忽略');
-        ignore.type = 'button';
-        ignore.onclick = async (event) => {
-          event.preventDefault(); event.stopPropagation();
-          try { await ignoreHemoryFragments([fragment.id]); } catch (error) { await alertDialog(error.message); }
-        };
-        rowActions.append(ignore);
-      }
-      head.append(rowActions);
-      const evidence = document.createElement('details');
-      evidence.className = 'fragment-evidence';
-      evidence.append(el('summary', null, '查看原文证据'), el('pre', null, fragment.payload?.transcript || '无原文'));
-      const speakers = Array.isArray(fragment.payload?.speakers) && fragment.payload.speakers.length ? fragment.payload.speakers.join('、') : '发言人未知';
-      body.append(head, el('p', null, fragment.payload?.summary || fragment.title), evidence,
-        el('div', 'cell-sub', `${formatDateTime(fragment.payload?.startAt || fragment.occurredAt)} - ${formatDateTime(fragment.payload?.endAt || fragment.occurredAt)} · ${speakers} · ${fragment.customerId ? `CRM ${fragment.customerId}` : '未绑定客户'} · ${fragment.id}`));
-      row.append(check, body); hemoryFragmentList.append(row);
-    }
+    renderHemoryFragmentList(hemoryFragmentList, fragments,
+      { emptyText: hemoryFilter.status === 'pending' ? '当前没有待归属片段' : '没有符合条件的 Hemory 片段' });
     updateHemorySelection();
   }
 
@@ -1015,11 +1056,22 @@
 
   /** 归属/清除归属期间冻结归属栏操作，防止重复提交。 */
   function setAssignBarBusy(busy) {
-    for (const id of ['hemoryAssign', 'hemoryClear', 'hemoryIgnore']) document.getElementById(id).disabled = busy;
+    for (const id of ['hemoryAssign', 'hemoryClear', 'hemoryIgnore', 'hemoryRegenerate']) document.getElementById(id).disabled = busy;
+  }
+
+  /** 片段级草稿重生成：按天重建（选中片段只决定重建哪些「客户+日」），jobs 交给生成轮询跟踪。 */
+  async function regenerateHemoryDrafts(eventIds) {
+    const { jobs, days } = await api('/api/hemory/fragments/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventIds }) });
+    const dayList = days || [];
+    setStatus('', dayList.length
+      ? `已提交 ${dayList.length} 个生成日的草稿重生成（${dayList.map((day) => day.dateKey).join('、')}），完成后自动刷新草稿箱`
+      : '没有需要重建的生成日');
+    trackDraftGeneration(jobs || []);
   }
 
   async function updateHemoryAttribution(clear) {
-    const eventIds = selectedHemoryFragments();
+    const eventIds = selectedFragmentIds(hemoryFragmentList);
     if (!eventIds.length) return alertDialog('请先选择片段');
     let customerId = null;
     if (!clear) {
@@ -1229,19 +1281,24 @@
   document.getElementById('hemoryFilterApply').onclick = () => void applyHemoryFilter();
   document.getElementById('hemoryFilterReset').onclick = () => void resetHemoryFilter();
   hemoryFilterChip.onclick = () => void resetHemoryFilter();
-  hemoryFragmentList.addEventListener('change', (event) => {
-    if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') updateHemorySelection();
-  });
-  hemorySelectAll.onchange = () => {
-    for (const input of hemoryFragmentList.querySelectorAll('input[type="checkbox"]')) input.checked = hemorySelectAll.checked;
-    updateHemorySelection();
-  };
+  // 勾选联动：收件箱 DOM 静态存在，模块加载时绑定一次；重渲染后调用 update 同步计数。
+  const updateHemorySelection = bindFragmentSelection(hemoryFragmentList, hemorySelectedCount, hemorySelectAll);
   document.getElementById('hemoryAssign').onclick = () => void updateHemoryAttribution(false);
   document.getElementById('hemoryClear').onclick = () => void updateHemoryAttribution(true);
   document.getElementById('hemoryIgnore').onclick = async () => {
-    const eventIds = selectedHemoryFragments();
+    const eventIds = selectedFragmentIds(hemoryFragmentList);
     if (!eventIds.length) return alertDialog('请先选择片段');
     try { await ignoreHemoryFragments(eventIds); } catch (error) { await alertDialog(error.message); }
+  };
+  document.getElementById('hemoryRegenerate').onclick = async () => {
+    const selected = [...hemoryFragmentList.querySelectorAll('input[type="checkbox"]:checked')];
+    if (!selected.length) return alertDialog('请先选择片段');
+    const notConfirmed = selected.filter((input) => input.dataset.attribution !== 'confirmed');
+    if (notConfirmed.length) return alertDialog(`重生成草稿需要已归属片段，所选中有 ${notConfirmed.length} 条不是已归属状态`);
+    setAssignBarBusy(true);
+    try { await regenerateHemoryDrafts(selected.map((input) => input.dataset.eventId)); }
+    catch (error) { await alertDialog(error.message); }
+    finally { setAssignBarBusy(false); }
   };
   document.getElementById('refreshDrafts').onclick = () => void loadDraftBatches();
   document.getElementById('hemorySync').onclick = async () => {
@@ -1632,15 +1689,51 @@
     workbenchModalBody.append(title.field, why.field, owner.field, wecom.field, due.field, outcome.field, save);
   }
 
+  /**
+   * 客户详情的 Hemory 片段 tab：该客户全部已归属片段 + 选中重建草稿。
+   * 列表 DOM 每次 openCustomer 重建，勾选联动须重新绑定；重生成按天重建，轮询横幅在草稿箱。
+   */
+  async function buildCustomerHemoryPanel(customer, fragments) {
+    const panel = el('div');
+    const bar = el('div', 'hemory-assign-bar customer-hemory-bar');
+    const count = el('span', 'hemory-selected-count');
+    const selectAll = document.createElement('input'); selectAll.type = 'checkbox';
+    const selectAllLabel = el('label', 'hemory-select-all'); selectAllLabel.append(selectAll, el('span', null, '全选'));
+    const regenerate = el('button', 'primary-command small', '重新生成草稿');
+    regenerate.type = 'button';
+    const list = el('div', 'hemory-fragment-list');
+    const reload = async () => {
+      const data = await api(`/api/hemory/fragments?customer_id=${encodeURIComponent(customer.id)}&status=confirmed&limit=500`);
+      renderHemoryFragmentList(list, data.fragments || [],
+        { emptyText: '该客户当前没有已归属的 Hemory 片段', reload: () => void reload() });
+      update();
+    };
+    renderHemoryFragmentList(list, fragments, { emptyText: '该客户当前没有已归属的 Hemory 片段', reload: () => void reload() });
+    const update = bindFragmentSelection(list, count, selectAll);
+    update();
+    regenerate.onclick = async () => {
+      const eventIds = selectedFragmentIds(list);
+      if (!eventIds.length) return alertDialog('请先选择片段');
+      regenerate.disabled = true;
+      try { await regenerateHemoryDrafts(eventIds); }
+      catch (error) { await alertDialog(error.message); }
+      finally { regenerate.disabled = false; }
+    };
+    bar.append(count, selectAllLabel, regenerate);
+    panel.append(bar, list);
+    return panel;
+  }
+
   async function openCustomer(customerId) {
     activeCustomerId = customerId;
     activeView = 'customer';
     workbench.classList.remove('hidden'); chatView.classList.add('hidden'); document.getElementById('records').classList.add('hidden'); footerEl.classList.add('hidden'); agentSessions.classList.add('hidden');
     for (const [name, section] of Object.entries(viewSections)) section.classList.toggle('hidden', name !== 'customer');
-    const [data, timelineData, workhoursData] = await Promise.all([
+    const [data, timelineData, workhoursData, hemoryFragmentsData] = await Promise.all([
       api(`/api/customers/${encodeURIComponent(customerId)}/overview`),
       api(`/api/customers/${encodeURIComponent(customerId)}/timeline?limit=500`),
       api(`/api/customers/${encodeURIComponent(customerId)}/workhours`),
+      api(`/api/hemory/fragments?customer_id=${encodeURIComponent(customerId)}&status=confirmed&limit=500`),
     ]);
     const c = data.customer;
     const timeline = timelineData.events || [];
@@ -1717,6 +1810,7 @@
     addTab('customer_manhour', '工时', renderWorkhours(timeline, workhoursData), draftCommand(c, 'customer_manhour', timeline, data.identities));
     addTab('private_cloud_instance', '私有云实例', renderBusinessRecords(timeline, 'private_cloud_instance'), draftCommand(c, 'private_cloud_instance', timeline, data.identities));
     addTab('followup', '跟进记录', renderFollowups(timeline), draftCommand(c, 'followup', timeline, data.identities));
+    addTab('hemory_fragments', 'Hemory 片段', await buildCustomerHemoryPanel(c, hemoryFragmentsData.fragments || []));
     const casePanel = el('div');
     const caseCommands = el('div', 'row-actions');
     caseCommands.append(draftCommand(c, 'case', timeline, data.identities));

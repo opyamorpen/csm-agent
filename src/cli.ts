@@ -57,7 +57,7 @@ const CLI_CAPABILITIES = [
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
-  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore'] },
+  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-items/:id/retry'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
@@ -128,12 +128,17 @@ function help(): void {
   csm-agent sync [客户ID或名称]
   csm-agent hemory sync [YYYY-MM-DD]
   csm-agent hemory resegment --all
-  csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--from HH:MM] [--to HH:MM] [--json]
-    （--from/--to 按上海时区收窄到当天时间段，需与日期同用）
+  csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--from HH:MM] [--to HH:MM]
+                        [--customer 客户ID或名称] [--status pending|all|confirmed|ignored] [--json]
+    （--from/--to 按上海时区收窄到当天时间段，需与日期同用；--customer 按客户过滤，
+     --status 默认 pending，confirmed 查看某客户已归属片段）
   csm-agent hemory assign <客户ID或名称> <片段ID...> [--wait]
     （--wait 轮询触发的草稿生成任务直到完成/失败，默认立即返回任务句柄）
   csm-agent hemory clear <片段ID...>
   csm-agent hemory ignore <片段ID...>
+  csm-agent hemory regenerate <片段ID...> [--wait]
+    （按天强制重生成：片段决定要重建的「客户+上海日」，各天全部已确认片段参与，
+     当天旧草稿作废；--wait 轮询生成任务到终态）
   csm-agent drafts [客户ID或名称] [--all] [--json]
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
@@ -478,20 +483,54 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     const to = values.find((value) => /^--to=\d{2}:\d{2}$/.test(value));
     const badTime = values.find((value) => /^--(from|to)=/.test(value) && !/^--(from|to)=\d{2}:\d{2}$/.test(value));
     if (badTime) throw new Error(`时间参数格式应为 HH:MM，例如 --from=14:00（收到: ${badTime}）`);
+    // --status/--customer 与 --sort 同一惯例：支持 `--customer 值` 与 `--customer=值` 两种写法。
+    const inlineOption = (flag: string): string | undefined => {
+      const index = values.findIndex((value) => value === flag || value.startsWith(`${flag}=`));
+      if (index < 0) return undefined;
+      const inline = values[index].startsWith(`${flag}=`);
+      const raw = inline ? values[index].slice(flag.length + 1) : values[index + 1];
+      return raw && !raw.startsWith('--') ? raw : undefined;
+    };
+    const status = inlineOption('--status');
+    if (status && !['pending', 'all', 'confirmed', 'ignored'].includes(status)) throw new Error(`--status 只允许 pending/all/confirmed/ignored（收到: ${status}）`);
+    const customerOption = inlineOption('--customer');
     const date = values.find((value) => !value.startsWith('--') && /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? '';
     if ((from || to) && !date) throw new Error('--from/--to 时间段过滤需要同时指定日期，例如 csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30');
+    const customer = customerOption ? await resolveCustomer(customerOption) : null;
     // 闭区间：只填一边时另一边取全天边界；与 Web 界面一致按上海时区组装 since/until。
     const since = from ? `${date}T${from.slice(7)}:00+08:00` : undefined;
     const until = to ? `${date}T${to.slice(5)}:59+08:00` : undefined;
-    const query = `/api/hemory/fragments?status=pending&limit=500${date ? `&date=${encodeURIComponent(date)}` : ''}${days ? `&days=${days.slice(7)}` : ''}`
+    const query = `/api/hemory/fragments?status=${status ?? 'pending'}&limit=500${customer ? `&customer_id=${encodeURIComponent(customer.id)}` : ''}${date ? `&date=${encodeURIComponent(date)}` : ''}${days ? `&days=${days.slice(7)}` : ''}`
       + `${since ? `&since=${encodeURIComponent(since)}` : ''}${until ? `&until=${encodeURIComponent(until)}` : ''}`;
     const body = await request<any>(query);
     if (jsonOutput) return print(body.fragments);
+    const customers = customer ? null : (await request<any>('/api/customers')).customers ?? [];
     console.table((body.fragments ?? []).map((item: any) => ({ id: item.id, start: item.payload?.startAt ?? item.occurredAt,
       end: item.payload?.endAt ?? item.occurredAt, recording: item.payload?.recordingId, topic: item.payload?.topic ?? item.title,
       part: item.payload?.topicGroupId ? `${item.payload?.topicPartIndex}/${item.payload?.topicPartCount}` : '',
-      summary: String(item.payload?.summary ?? '').slice(0, 80), speakers: (item.payload?.speakers ?? []).join(','), status: item.attributionStatus })));
+      summary: String(item.payload?.summary ?? '').slice(0, 80), speakers: (item.payload?.speakers ?? []).join(','), status: item.attributionStatus,
+      customer: customer ? customer.name : customers?.find((c: any) => c.id === item.customerId)?.name ?? '' })));
     return;
+  }
+  if (subcommand === 'regenerate') {
+    const wait = values.includes('--wait');
+    const eventIds = values.filter((value) => !value.startsWith('--'));
+    if (!eventIds.length) throw new Error('hemory regenerate 缺少片段 ID');
+    // 按天强制重生成：选中片段决定要重建的「客户+上海日」，各天全量已确认片段参与；旧批次作废、已写入 CRM 的不受影响。
+    const result = await request<any>('/api/hemory/fragments/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventIds }) });
+    if (!jsonOutput) {
+      for (const day of result.days ?? []) console.log(`重建 ${day.dateKey}（客户 ${day.customerId}）的当日合并草稿。`);
+      if (!(result.jobs ?? []).length) console.log('没有需要重建的生成日（选中片段所在天没有已确认活跃片段）。');
+    }
+    if (wait) {
+      const jobIds = (result.jobs ?? []).map((job: any) => job.jobId).filter(Boolean);
+      if (jsonOutput) print(result);
+      if (jobIds.length) printDraftJobSummary(await waitDraftJobs(jobIds));
+      else if (!jsonOutput) console.log('没有新触发的草稿生成任务。');
+      return;
+    }
+    return print(result);
   }
   if (subcommand === 'assign' || subcommand === 'clear' || subcommand === 'ignore') {
     const wait = values.includes('--wait');
@@ -518,7 +557,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     }
     return print(result);
   }
-  throw new Error('hemory 子命令只允许 sync/resegment/inbox/assign/clear/ignore');
+  throw new Error('hemory 子命令只允许 sync/resegment/inbox/assign/clear/ignore/regenerate');
 }
 
 // 草稿确认视图：与 Web 卡片共用服务端 displayFields，按最小必填项逐行结构化输出。
