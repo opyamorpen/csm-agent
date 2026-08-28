@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Runtime } from '../bootstrap.js';
 import { extractText } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
-import type { Customer, HemorySegmentationJob, SourceEvent } from './types.js';
+import type { HemorySegmentationJob, SourceEvent } from './types.js';
 
 // v3.2：v3.1 的 40 行上限对长会仍过切（2 小时会议 898 行被切成 19 片，最小 376 字）；
 // 上限提到 100 行并全面转向合并优先——同一对象/同一诉求的连续讨论（含原因、方案、细节、结论、追问）
@@ -230,17 +230,16 @@ export class HemorySegmentationService {
       if (!lines.length) throw new Error('Hemory 录音没有可分段的转写行');
       const recordingId = String(recording.payload?.recordingId ?? recording.externalId);
       const proposed = mergeAdjacentSameTopicSegments(await proposeSegments(this.runtime, recordingId, lines));
+      // 片段不按客户名称自动归属：转写里提到客户名更多是在引用其他客户的案例（如「像 X 客户一样」），
+      // 并不代表在与该客户沟通；全部片段一律进入待归属收件箱，由 CSM 人工标记。
       interface Surviving { segment: ModelSegment; evidence: TranscriptLine[]; transcript: string;
-        customer?: Customer; matchCount: number; start: TranscriptLine; end: TranscriptLine }
+        start: TranscriptLine; end: TranscriptLine }
       const surviving: Surviving[] = [];
       for (const segment of proposed) {
         const evidence = lines.slice(segment.startIndex, segment.endIndex + 1);
         if (!segment.include || !isMeaningfulHemoryFragment(evidence)) continue;
         const transcript = evidence.map((line) => `${line.speaker}: ${line.text}`).join('\n');
-        const matches = this.db.listCustomers().filter((customer) => [customer.name, customer.shortName].filter(Boolean)
-          .some((name) => `${segment.topic}\n${segment.summary}\n${transcript}`.includes(name!)));
-        surviving.push({ segment, evidence, transcript, customer: matches.length === 1 ? matches[0] : undefined,
-          matchCount: matches.length, start: evidence[0], end: evidence.at(-1)! });
+        surviving.push({ segment, evidence, transcript, start: evidence[0], end: evidence.at(-1)! });
       }
       // 同 key 的片段按出现顺序编号并共享 topicGroupId（录音内唯一）；不跨录音关联。
       const partsByKey = new Map<string, number>();
@@ -251,12 +250,11 @@ export class HemorySegmentationService {
         const segment = item.segment;
         const part = (seenKeys.get(segment.topicKey) ?? 0) + 1;
         seenKeys.set(segment.topicKey, part);
-        const attributionStatus = item.matchCount === 1 ? 'confirmed' : item.matchCount > 1 ? 'ambiguous' : 'unattributed';
         const externalId = `${HEMORY_SEGMENTATION_VERSION_PREFIX}:${recordingId}:${item.start.spokenAt}:${segment.startIndex}:${item.end.spokenAt}:${segment.endIndex}`;
         const previous = this.db.findSourceEvent('hemory', 'ai_topic_segment', externalId);
-        const event = this.db.upsertSourceEvent({ customerId: item.customer?.id ?? null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
-          externalId, title: segment.topic.slice(0, 160), occurredAt: item.start.spokenAt, confidence: item.customer ? 0.85 : 0.2,
-          attributionStatus, payload: { recordingId, rawRecordingEventId: recording.id, recordingHash: recording.payloadHash,
+        const event = this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+          externalId, title: segment.topic.slice(0, 160), occurredAt: item.start.spokenAt, confidence: 0.2,
+          attributionStatus: 'unattributed', payload: { recordingId, rawRecordingEventId: recording.id, recordingHash: recording.payloadHash,
             generationVersion: HEMORY_SEGMENTATION_VERSION, topic: segment.topic, summary: segment.summary,
             subject: segment.subject, focus: segment.focus, topicKey: segment.topicKey,
             topicGroupId: `${recordingId}:${segment.topicKey}`, topicPartIndex: part, topicPartCount: partsByKey.get(segment.topicKey) ?? 1,

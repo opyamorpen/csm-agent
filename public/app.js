@@ -966,7 +966,7 @@
       const head = el('div', 'fragment-head');
       const statusBadge = fragment.attributionStatus === 'confirmed' ? badge('已归属', 'success')
         : fragment.attributionStatus === 'ignored' ? badge('已忽略', 'muted')
-        : badge(fragment.attributionStatus === 'ambiguous' ? '有歧义' : '待归属', 'warning');
+        : badge('待归属', 'warning');
       head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
       // 同一事件被打断后再次出现时共享话题组，徽标提示分段序号，方便合并归属。
       if (fragment.payload?.topicGroupId) {

@@ -380,6 +380,34 @@ test('workbench: Hemory AI segmentation persists topics and suppresses one or tw
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: fragments mentioning a customer name stay unattributed (no auto attribution)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-no-autoattr-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 转写里明确提到客户名，但提及名称通常是在引用其他客户案例，不代表在与该客户沟通——不得自动归属。
+    db.upsertCustomer({ id: 'crm-name', name: '北京华大九天科技股份有限公司', shortName: '华大九天' });
+    const lines = [
+      { spokenAt: '2026-08-27T02:00:00Z', speaker: '我', text: '来，像华大九天一样，我们现在想卖人家二十万，但是估计太难了。' },
+      { spokenAt: '2026-08-27T02:00:20Z', speaker: '同事', text: '就华大没聊错，现在卡在内部审批上。' },
+      { spokenAt: '2026-08-27T02:00:40Z', speaker: '我', text: '内部讨论一下报价策略和后续推进节奏。' },
+    ];
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'recording-name',
+      title: '原始转写', occurredAt: lines[0].spokenAt, payload: { recordingId: 'recording-name', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([{ segments: [
+      { start_index: 0, end_index: 2, topic: '内部报价讨论', summary: '内部讨论华大九天案例的报价策略。', subject: '报价策略', focus: '内部讨论', topic_key: 'pricing', include: true },
+    ] }]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const fragments = await service.segmentRecording(recording);
+    assert.equal(fragments.length, 1);
+    assert.equal(fragments[0].attributionStatus, 'unattributed');
+    assert.equal(fragments[0].customerId, null);
+    // 提及客户名的片段与其他片段一样进入待归属列表，等 CSM 人工标记。
+    const pending = db.listHemoryFragments({ status: 'pending' });
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].id, fragments[0].id);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: a newer Hemory recording generation supersedes old active segments', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-regeneration-'));
   const db = new WorkbenchDatabase(dir);
