@@ -394,6 +394,15 @@ export class PortfolioSyncService {
     return run;
   }
 
+  /** 定向刷新单客户的 ONES 工作项（含客户工时管理/售后客户）：不建 SyncRun、不动 CRM/Hemory。
+   * 供草稿生成路径在本地缺「售后客户」匹配时即时补数据，失败由调用方降级处理。 */
+  async syncOnesForCustomer(customerId: string): Promise<number> {
+    const customer = this.db.getCustomer(customerId);
+    if (!customer) throw new Error('customer not found');
+    const count = await this.syncOnesCustomer(customer);
+    return count;
+  }
+
   /** Read the current customer's ONES work-hour registrations for the UI/CLI. */
   async listCustomerWorkhours(customerId: string): Promise<{
     issueId: string | null;
@@ -401,7 +410,7 @@ export class PortfolioSyncService {
     remainingHours: number | null;
     records: WorkhourRecord[];
   }> {
-    const issue = this.db.listTimeline(customerId, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+    const issue = this.db.findCustomerManhourIssue(customerId);
     if (!issue) return { issueId: null, totalHours: null, remainingHours: null, records: [] };
     const payload = issue.payload ?? {};
     const totalHours = Number(payload.field019) / 100000;

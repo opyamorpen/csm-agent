@@ -306,6 +306,8 @@ interface DraftProposal {
 interface WorkhourToolBinding {
   mode: OnesWorkhourMode | null;
   error: string | null;
+  /** 本地缺「售后客户」匹配时的定向 ONES 刷新结果：refreshed=已刷新重查仍无；refreshError=刷新本身失败。 */
+  refresh?: { refreshed: boolean; refreshError: string | null };
 }
 
 export interface OnesIssueField {
@@ -637,8 +639,12 @@ export function fitFollowupSections(sections: Array<{ title: string; body: strin
 
 export class HemoryDraftService {
   private processing = new Set<string>();
+  /** 进行中的定向 ONES 刷新：同客户并发生成（跨天多任务）共享一次，完成即出队。 */
+  private readonly onesRefreshes = new Map<string, Promise<number>>();
 
-  constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpHub, private readonly runtime?: Runtime) {}
+  constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpHub, private readonly runtime?: Runtime,
+    /** 本地缺「售后客户」匹配时的定向 ONES 同步入口（PortfolioSyncService.syncOnesForCustomer）。 */
+    private readonly refreshOnes?: (customerId: string) => Promise<number>) {}
 
   /** 按客户 + 上海自然日入队：跨天归属每天一个批次；返回当天（各天）的生成任务。 */
   enqueue(customerId: string, eventIds: string[]): Array<{ jobId: string; fingerprint: string }> {
@@ -766,11 +772,22 @@ export class HemoryDraftService {
       // 工时草稿的写工具按 ONES 实例工时模式绑定；模式获取失败只降级为该草稿的校验错误，不拖垮整个生成任务。
       let workhourBinding: WorkhourToolBinding = { mode: null, error: null };
       if (proposals.some((proposal) => proposal.type === 'workhour')) {
-        const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+        // 本地缺「售后客户」匹配时先定向刷新该客户的 ONES 同步再重查：ONES 端新建的售后客户工作项
+        // 最长要等到次日 02:00 定时同步才入表，期间重新生成也会一直缺匹配（同步数据不新鲜，非匹配本身有缓存）。
+        let issue = this.db.findCustomerManhourIssue(customer.id);
+        if (!issue && this.refreshOnes) {
+          try {
+            await this.refreshOnesOnce(customer.id);
+            issue = this.db.findCustomerManhourIssue(customer.id);
+            workhourBinding.refresh = { refreshed: true, refreshError: null };
+          } catch (error) {
+            workhourBinding.refresh = { refreshed: false, refreshError: `自动刷新 ONES 同步失败: ${(error as Error).message.slice(0, 160)}` };
+          }
+        }
         if (issue) {
-          try { workhourBinding = { mode: await this.fetchWorkhourMode(issue.externalId), error: null }; }
+          try { workhourBinding.mode = await this.fetchWorkhourMode(issue.externalId); }
           catch (error) {
-            workhourBinding = { mode: null, error: `无法获取 ONES 工时模式: ${(error as Error).message.slice(0, 160)}` };
+            workhourBinding.error = `无法获取 ONES 工时模式: ${(error as Error).message.slice(0, 160)}`;
           }
         }
       }
@@ -783,7 +800,7 @@ export class HemoryDraftService {
       }
       this.db.refreshDraftBatchStatus(batch.id);
       this.db.updateDraftJob(jobId, 'succeeded');
-      this.db.audit('agent', 'generate_hemory_drafts', 'draft_batch', batch.id, { customerId: customer.id, sourceEventIds: batch.sourceEventIds, generator, dateKey, followupEventIds: followupEvents.map((event) => event.id) });
+      this.db.audit('agent', 'generate_hemory_drafts', 'draft_batch', batch.id, { customerId: customer.id, sourceEventIds: batch.sourceEventIds, generator, dateKey, followupEventIds: followupEvents.map((event) => event.id), onesRefreshAttempted: !!workhourBinding.refresh });
     } catch (error) {
       this.db.updateDraftJob(jobId, 'failed', (error as Error).message);
     } finally {
@@ -914,6 +931,15 @@ export class HemoryDraftService {
     return mode;
   }
 
+  /** 同客户进行中的定向 ONES 刷新只发一次；完成即出队，之后再次缺匹配仍会重试刷新。 */
+  private refreshOnesOnce(customerId: string): Promise<number> {
+    const pending = this.onesRefreshes.get(customerId);
+    if (pending) return pending;
+    const task = this.refreshOnes!(customerId).finally(() => this.onesRefreshes.delete(customerId));
+    this.onesRefreshes.set(customerId, task);
+    return task;
+  }
+
   private buildTarget(type: DraftItemType, customer: Customer, events: SourceEvent[], proposal: DraftProposal, fields: Record<string, unknown>, workhourBinding?: WorkhourToolBinding) {
     const validationErrors: string[] = [];
     if (type === 'internal_todo') return { system: 'local' as const, object: 'CSM Agent / 待办', tool: 'local__create_action_item',
@@ -953,10 +979,16 @@ export class HemoryDraftService {
         arguments: { apiName: 'CreateRecordsByData', object_api_name: 'ActiveRecordObj', object_data: objectData }, validationErrors };
     }
     if (type === 'workhour') {
-      const manhour = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+      const manhour = this.db.findCustomerManhourIssue(customer.id);
       // 工具按实例模式 rawName 精确绑定：宽松正则曾把描述里带 manhour 字样的 create_new_issue 误当工时工具。
       const tool = workhourBinding?.mode ? this.exactTool('ones', ONES_WORKHOUR_TOOLS[workhourBinding.mode]) : null;
-      if (!manhour) validationErrors.push('客户未绑定“客户工时管理 / 售后客户”工作项');
+      if (!manhour) {
+        // 生成前已自动刷新过 ONES 同步仍无匹配（refreshed）或刷新失败（refreshError），提示要落到可操作修正上。
+        if (workhourBinding?.refresh?.refreshError) validationErrors.push(workhourBinding.refresh.refreshError);
+        validationErrors.push(workhourBinding?.refresh?.refreshed
+          ? '客户未绑定“客户工时管理 / 售后客户”工作项（已自动刷新 ONES 同步仍无匹配，请确认 ONES 端已创建该客户的售后客户工作项且客户信息字段选择正确，创建后重新生成）'
+          : '客户未绑定“客户工时管理 / 售后客户”工作项（请刷新客户同步或重新生成）');
+      }
       else {
         if (workhourBinding?.error) validationErrors.push(workhourBinding.error);
         if (!tool) validationErrors.push('未找到 ONES 工时登记写工具');
@@ -1017,8 +1049,9 @@ export class HemoryDraftService {
       }
     }
     if (item.type === 'workhour') {
-      const issue = this.db.listTimeline(customer.id, 500).find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
-      if (!issue || item.targetArguments.issueID !== issue.externalId) errors.push('工时参数未绑定当前客户售后工时工作项');
+      const issue = this.db.findCustomerManhourIssue(customer.id);
+      // 同步入表晚于草稿生成时（草稿 issueID 为空或旧值），重新生成即可绑定，提示必须指向该动作。
+      if (!issue || item.targetArguments.issueID !== issue.externalId) errors.push('工时参数未绑定当前客户售后工时工作项（请刷新客户同步后重新生成草稿）');
       if (item.targetArguments.hours === 'unknown' || item.targetArguments.hours == null) errors.push('请补充工时时长');
       // 历史草稿曾误绑 create_new_issue：只有两个模式化工时工具是合法写目标。
       const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;

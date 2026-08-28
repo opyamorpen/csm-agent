@@ -855,7 +855,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const identities = boundCustomer ? workbench.db.listIdentities(boundCustomer.id) : [];
         const option = identities.find((item) => item.system === 'ones_customer_option' && item.status === 'confirmed');
         const manhour = boundCustomer
-          ? workbench.db.listTimeline(boundCustomer.id, 500).find((item) => item.sourceSystem === 'ones' && item.sourceType === 'customer_manhour')
+          ? workbench.db.findCustomerManhourIssue(boundCustomer.id)
           : undefined;
         const customerContext: CustomerContext | null = boundCustomer ? {
           customer_name: boundCustomer.name,
@@ -1103,7 +1103,8 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     const name = typeof fields.customer_name === 'string' && fields.customer_name ? fields.customer_name : record.customer;
     if (id && name) db.upsertCustomer({ id, name, source: { legacyRecordId: record.id } });
   }
-  const drafts = new HemoryDraftService(db, runtime.mcp, runtime);
+  // 闭包延迟引用 sync（下方才声明）：resumePending 在启动 5s 后才运行，届时 sync 必已赋值。
+  const drafts = new HemoryDraftService(db, runtime.mcp, runtime, (customerId: string) => sync.syncOnesForCustomer(customerId));
   let sync: PortfolioSyncService;
   const hemorySegments = new HemorySegmentationService(db, runtime, (events) => {
     const byCustomer = new Map<string, string[]>();

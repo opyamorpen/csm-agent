@@ -718,6 +718,13 @@ export class WorkbenchDatabase {
     return row ? sourceEventFromRow(row) : undefined;
   }
 
+  /** 客户绑定的「客户工时管理 / 售后客户」工作项：精确查询而非 listTimeline 截断窗口内查找。 */
+  findCustomerManhourIssue(customerId: string): SourceEvent | undefined {
+    const row = this.db.prepare("SELECT * FROM source_events WHERE customer_id=? AND source_system='ones' AND source_type='customer_manhour' AND attribution_status='confirmed' ORDER BY occurred_at DESC, external_id DESC LIMIT 1")
+      .get(customerId) as Row | undefined;
+    return row ? sourceEventFromRow(row) : undefined;
+  }
+
   listTimeline(customerId: string, limit = 100): SourceEvent[] {
     // 停用的 Hemory 片段（被新代际取代）不再进入客户时间线，避免重切后新旧并存；未登记代际的历史行不受影响。
     const rows = this.db.prepare(`SELECT * FROM source_events WHERE customer_id=?

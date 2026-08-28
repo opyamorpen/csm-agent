@@ -1400,6 +1400,119 @@ test('workbench: workhour mode fetch failure only degrades that draft, not the b
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// 「生成时缺售后客户匹配 → 定向刷新 ONES 同步 → 重查自愈」的注入回调：模拟同步期间入表新售后客户工作项。
+// verifyReal=false 时复现 ONES 端确实没有该工作项（刷新后重查仍无）。
+function manhourRefreshCallback(db: WorkbenchDatabase, options: { issueId?: string; fail?: boolean; delayMs?: number; calls?: string[] } = {}) {
+  return async (customerId: string): Promise<number> => {
+    options.calls?.push(customerId);
+    if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    if (options.fail) throw new Error('ONES MCP 未连接');
+    if (options.issueId) {
+      db.upsertSourceEvent({ customerId, sourceSystem: 'ones', sourceType: 'customer_manhour', externalId: options.issueId,
+        title: '售后客户', occurredAt: '2026-08-26T00:00:00Z', attributionStatus: 'confirmed', payload: {} });
+    }
+    return 1;
+  };
+}
+
+test('workbench: missing manhour issue triggers ONES refresh and the regenerated draft binds the new issue', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-heal-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-heal', name: '客户和', sourceObject: 'object_Umwnn__c' });
+    const fragment = segment(db, 'crm-heal', 'rh:a', 'rh', '上线沟通', '2026-08-25T05:00:00Z', '与客户沟通上线排期，投入一小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T05:00:00Z','$.endAt','2026-08-25T06:00:00Z') WHERE id=?").run(fragment.id);
+    const refreshCalls: string[] = [];
+    const mcp = fakeOnesWorkhourMcp({ mode: 'simple' });
+    // 本地无匹配 + 刷新回调模拟 ONES 同步拉到新建的售后客户工作项 KHGS-9100。
+    const service = new HemoryDraftService(db, mcp, fakeModelRuntime([]), manhourRefreshCallback(db, { issueId: 'KHGS-9100', calls: refreshCalls }));
+    const queued = service.enqueue('crm-heal', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    assert.deepEqual(refreshCalls, ['crm-heal']);
+    const batch = db.listDraftBatches('crm-heal')[0];
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    // 刷新入表后重查命中：issueID 绑定新工作项，无「客户未绑定」校验错误。
+    assert.equal(workhour.targetArguments.issueID, 'KHGS-9100');
+    assert.ok(!workhour.validationErrors.some((message) => message.includes('客户未绑定')), JSON.stringify(workhour.validationErrors));
+    const preview = await service.preview(batch.id, [workhour.id]);
+    assert.equal(preview.items[0].validationErrors.length, 0);
+    // 刷新后仍无匹配（ONES 端确实没建）：清掉 part1 刷新入库的工作项再重建，模拟重新生成时依旧缺匹配。
+    db.db.prepare("DELETE FROM source_events WHERE source_system='ones' AND source_type='customer_manhour'").run();
+    const refreshCalls2: string[] = [];
+    const service2 = new HemoryDraftService(db, mcp, fakeModelRuntime([]), manhourRefreshCallback(db, { calls: refreshCalls2 }));
+    const forced = service2.regenerate(batch.id);
+    await waitDraftJob(db, forced[0].jobId);
+    assert.deepEqual(refreshCalls2, ['crm-heal']);
+    const healed = db.listDraftBatches('crm-heal').find((item) => item.id !== batch.id)!;
+    const stillMissing = healed.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(stillMissing.targetArguments.issueID, '');
+    assert.ok(stillMissing.validationErrors.some((message) => message.includes('已自动刷新 ONES 同步仍无匹配')), JSON.stringify(stillMissing.validationErrors));
+    assert.ok(stillMissing.validationErrors.some((message) => message.includes('重新生成')));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: ONES refresh failure degrades to a validation error without failing the job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-refresh-fail-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-rf', name: '客户任弗', sourceObject: 'object_Umwnn__c' });
+    const fragment = segment(db, 'crm-rf', 'rrf:a', 'rrf', '故障复盘', '2026-08-25T06:00:00Z', '与客户复盘故障处理，投入两小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T06:00:00Z','$.endAt','2026-08-25T07:00:00Z') WHERE id=?").run(fragment.id);
+    const service = new HemoryDraftService(db, fakeOnesWorkhourMcp({ mode: 'simple' }), fakeModelRuntime([]), manhourRefreshCallback(db, { fail: true }));
+    const queued = service.enqueue('crm-rf', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-rf')[0];
+    // 生成任务整体成功；工时草稿带刷新失败与未绑定两条校验错误（降级不失败，与工时模式失败同哲学）。
+    const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour.status, 'draft');
+    assert.ok(workhour.validationErrors.some((message) => message.includes('自动刷新 ONES 同步失败')));
+    assert.ok(workhour.validationErrors.some((message) => message.includes('客户未绑定')));
+    const followup = batch.items!.find((item) => item.type === 'followup')!;
+    assert.ok(!followup.validationErrors.some((message) => message.includes('ONES 同步失败')));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: existing manhour match skips the ONES refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-skip-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-skip', name: '客户司', sourceObject: 'object_Umwnn__c' });
+    manhourIssue(db, 'crm-skip');
+    const fragment = segment(db, 'crm-skip', 'rs:a', 'rs', '续约谈判', '2026-08-25T07:00:00Z', '与客户谈判续约条款，投入三小时');
+    db.db.prepare("UPDATE source_events SET payload_json=json_set(payload_json,'$.startAt','2026-08-25T07:00:00Z','$.endAt','2026-08-25T08:00:00Z') WHERE id=?").run(fragment.id);
+    const refreshCalls: string[] = [];
+    const service = new HemoryDraftService(db, fakeOnesWorkhourMcp({ mode: 'simple' }), fakeModelRuntime([]), manhourRefreshCallback(db, { calls: refreshCalls }));
+    const queued = service.enqueue('crm-skip', [fragment.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    // 本地已有匹配：绝不发起定向刷新。
+    assert.deepEqual(refreshCalls, []);
+    const workhour = db.listDraftBatches('crm-skip')[0].items!.find((item) => item.type === 'workhour')!;
+    assert.equal(workhour.targetArguments.issueID, 'KHGS-9001');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: concurrent same-customer jobs share one ONES refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-workhour-dedupe-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-dp', name: '客户迪', sourceObject: 'object_Umwnn__c' });
+    const day1 = segment(db, 'crm-dp', 'rdp:a', 'rdp', '部署方案', '2026-08-24T05:00:00Z', '与客户对齐部署方案，投入一小时');
+    const day2 = segment(db, 'crm-dp', 'rdp:b', 'rdp', '验收准备', '2026-08-25T06:00:00Z', '与客户准备验收材料，投入两小时');
+    // 跨天两个任务并发处理：刷新回调延迟 80ms 确保重叠窗口，两任务应共享同一次刷新。
+    const refreshCalls: string[] = [];
+    const service = new HemoryDraftService(db, fakeOnesWorkhourMcp({ mode: 'simple' }), fakeModelRuntime([]),
+      manhourRefreshCallback(db, { issueId: 'KHGS-9200', delayMs: 80, calls: refreshCalls }));
+    const queued = service.enqueue('crm-dp', [day1.id, day2.id]);
+    assert.equal(queued.length, 2);
+    await Promise.all(queued.map((job) => waitDraftJob(db, job.jobId)));
+    assert.equal(refreshCalls.length, 1);
+    for (const batch of db.listDraftBatches('crm-dp')) {
+      const workhour = batch.items!.find((item) => item.type === 'workhour')!;
+      assert.equal(workhour.targetArguments.issueID, 'KHGS-9200');
+    }
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: reopening the database repairs fake-written drafts with failure payloads', () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-draft-repair-'));
   const db = new WorkbenchDatabase(dir);
