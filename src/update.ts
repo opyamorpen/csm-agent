@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appRoot, isManagedInstall, readInstallLayout, readPackageVersion } from './managed-install.js';
-import { restartService, servicePaths, serviceStatus } from './service.js';
+import { LAUNCH_AGENT_LABEL, renderLaunchAgent, restartService, servicePaths, serviceStatus } from './service.js';
 
 export interface UpdatePlan {
   action: 'up-to-date' | 'update';
@@ -88,9 +88,22 @@ export function serviceBelongsToRoot(root: string, plistPath = servicePaths().pl
   }
 }
 
-function restartServiceIfInstalled(root: string): boolean {
+function restartServiceIfInstalled(root: string, port = 3210): boolean {
   if (!serviceBelongsToRoot(root)) return false;
   try {
+    // plist 模板可能随版本演进（如新增 CSM_SUPERVISED 环境变量）：内容有变时重写再 bootstrap，
+    // 存量安装也能升级出新的监管标记；无变化则保持 kickstart -k 原语义。
+    const paths = servicePaths();
+    if (existsSync(paths.plist) && readFileSync(paths.plist, 'utf8') !== renderLaunchAgent(port)) {
+      writeFileSync(paths.plist, renderLaunchAgent(port), { encoding: 'utf8', mode: 0o600 });
+      const domain = `gui/${process.getuid?.() ?? 0}`;
+      spawnSync('/bin/launchctl', ['bootout', domain, paths.plist]);
+      const boot = spawnSync('/bin/launchctl', ['bootstrap', domain, paths.plist], { encoding: 'utf8' });
+      if (boot.status !== 0) throw new Error((boot.stderr || boot.stdout).trim());
+      const kick = spawnSync('/bin/launchctl', ['kickstart', '-k', `${domain}/${LAUNCH_AGENT_LABEL}`], { encoding: 'utf8' });
+      if (kick.status !== 0) throw new Error((kick.stderr || kick.stdout).trim());
+      return true;
+    }
     if (serviceStatus().running === false) return false;
     restartService();
     return true;

@@ -37,6 +37,10 @@ export function renderLaunchAgent(port = 3210): string {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CSM_SUPERVISED</key><string>1</string>
+  </dict>
   <key>StandardOutPath</key><string>${escapeXml(paths.stdout)}</string>
   <key>StandardErrorPath</key><string>${escapeXml(paths.stderr)}</string>
 </dict>

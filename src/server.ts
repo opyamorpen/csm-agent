@@ -25,9 +25,14 @@ import type { DraftBatch, DraftItem, DraftGenerationJob } from './workbench/type
 import { HemorySegmentationService } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
 import { WikiService } from './workbench/wiki.js';
+import { readBuildInfo, serviceVersionInfo, startStalenessWatch, type BuildInfo } from './version.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, '..', 'public');
+
+// startServer 填充：进程启动时加载的构建信息（旧进程检测的内存锚点）与服务启动时刻。
+let loadedBuildInfo: BuildInfo | null = null;
+let serverStartedAt = new Date().toISOString();
 
 interface PendingConfirm {
   draft: ConfirmDraft;
@@ -334,12 +339,20 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(await readFile(join(publicDir, 'index.html'), 'utf8'));
       }
-      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/wecom-todo.html', '/wecom-todo.js'].includes(path)) {
+      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/wecom-todo.html', '/wecom-todo.js', '/build-info.js'].includes(path)) {
         const file = path.slice(1);
         const type = path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
           : path.endsWith('.svg') ? 'image/svg+xml; charset=utf-8' : 'text/html; charset=utf-8';
-        res.writeHead(200, { 'Content-Type': type });
+        // 构建戳必须每次取最新且不被中间层缓存：前端靠它发现「页面新、进程旧」的分裂。
+        const headers: Record<string, string> = { 'Content-Type': type };
+        if (path === '/build-info.js') headers['Cache-Control'] = 'no-store';
+        res.writeHead(200, headers);
         return res.end(await readFile(join(publicDir, file), 'utf8'));
+      }
+
+      // ── build version（旧进程检测的权威端点；404 = 进程早于该机制） ──
+      if (req.method === 'GET' && path === '/api/version') {
+        return json(res, 200, serviceVersionInfo(loadedBuildInfo, serverStartedAt));
       }
 
       // ── customer-centered workbench ──
@@ -1112,12 +1125,38 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   }, 5_000);
   resumeTimer.unref();
   const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, wecom, drafts, weekly, wiki }));
+  // 旧进程检测的锚点：进程启动时加载的构建 + 受监管时的磁盘变化自检。
+  loadedBuildInfo = readBuildInfo();
+  serverStartedAt = new Date().toISOString();
+  const staleTimer = startStalenessWatch(loadedBuildInfo, {
+    onReload: () => {
+      // 受监管（launchd KeepAlive / Mac App terminationHandler）时退位让新构建上线；
+      // 未受监管的手动进程不自动退出（可用性优先），只把 stale 标记暴露给 /api/version 与前端横幅。
+      if (process.env.CSM_SUPERVISED === '1') {
+        console.log(`[build] 检测到新构建（当前 ${loadedBuildInfo?.buildId}），受监管进程自动退出换新`);
+        server.close(() => process.exit(0));
+        // server.close 只等既有连接排空；残留 keep-alive 连接不该拖住换新，兜底强制退出。
+        setTimeout(() => process.exit(0), 3_000).unref();
+      } else {
+        console.warn(`[build] 磁盘构建已更新而进程未受监管（当前 ${loadedBuildInfo?.buildId}），等待人工重启；/api/version 将报告 stale`);
+      }
+    },
+  });
   server.on('close', () => {
     stopPortfolio();
     stopHemory();
     stopWecom();
     clearTimeout(resumeTimer);
+    if (staleTimer) clearInterval(staleTimer);
     db.close();
+  });
+  // 端口被占时给出可读指引而不是裸崩：最常见的情形就是旧进程还在跑旧构建。
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`端口 ${port} 已被占用（通常是旧的服务进程仍在运行）。请执行 csm-agent service restart，或结束占用该端口的进程后重试。`);
+      process.exit(1);
+    }
+    throw error;
   });
   await new Promise<void>((resolve) => server.listen(port, resolve));
   return server;

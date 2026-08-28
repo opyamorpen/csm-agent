@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow?
     var webView: WKWebView?
     var server: Process?
+    // Subprocess supervision: restart with backoff when the node server exits
+    // (crash, or self-exit after detecting a fresh build via CSM_SUPERVISED).
+    var serverRestartDelay: TimeInterval = 1.0
+    var serverStartedAt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startServer()
@@ -58,12 +62,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             NSLog("Port \(csmPort) already served (launchd); reusing existing service")
             return
         }
+        spawnServer()
+    }
+
+    func spawnServer() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: nodeBin)
         p.arguments = [repoDir + "/dist/index.js"]
         p.currentDirectoryURL = URL(fileURLWithPath: repoDir)
         var env = ProcessInfo.processInfo.environment
         env["CSM_PORT"] = csmPort
+        // Mark the child as supervised: it self-exits (exit 0) when it detects a
+        // fresh build on disk, expecting the supervisor here to restart it.
+        env["CSM_SUPERVISED"] = "1"
         // GUI apps launched from Finder lack the shell PATH (nvm's npx etc.),
         // so prepend the npx directory so ONES's `npx mcp-remote` can spawn.
         if !npxDir.isEmpty {
@@ -74,9 +85,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         }
         p.environment = env
+        // Supervise the child: auto-restart on any exit (crash or build swap).
+        // Backoff doubles per short-lived restart (1s..60s cap) and resets after
+        // 60s of stable uptime, so a crash loop stays gentle while normal build
+        // swaps restart immediately.
+        p.terminationHandler = { [weak self] process in
+            guard let self = self, process === self.server else { return }
+            let uptime = self.serverStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+            self.server = nil
+            if uptime >= 60 {
+                self.serverRestartDelay = 1.0
+            } else {
+                self.serverRestartDelay = min(self.serverRestartDelay * 2, 60.0)
+            }
+            NSLog("Server exited (status \(process.terminationStatus)); restarting in \(Int(self.serverRestartDelay))s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.serverRestartDelay) { [weak self] in
+                guard let self = self, self.server == nil, !portHasListener(csmPort) else { return }
+                self.spawnServer()
+            }
+        }
         do {
             try p.run()
             server = p
+            serverStartedAt = Date()
         } catch {
             NSLog("Failed to start server: \(error)")
         }
@@ -195,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func applicationWillTerminate(_ notification: Notification) {
         server?.terminate() // nil when we reused the launchd service
+        server = nil // prevent the terminationHandler from restarting during quit
     }
 }
 

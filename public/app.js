@@ -2481,6 +2481,37 @@
     loadRecords();
     await Promise.all([loadPortfolio(), loadActions(), loadCases(), loadHemoryInbox(), loadDraftBatches()]);
     showView('portfolio');
+    startBuildVersionCheck();
+  }
+
+  /**
+   * 旧进程检测：public/ 静态文件每次请求读磁盘（页面永远最新），而 API 路由在进程启动时
+   * 加载进内存——构建后进程不重启就会出现「新 UI + 旧 API」分裂（新端点 404、新按钮失效）。
+   * 每 30s 比对自己脚本的 buildId（/build-info.js，随构建更新）与 /api/version 的 buildId
+   * （进程启动时定格）：不一致、或 /api/version 不存在（进程早于该机制）就挂红色横幅，
+   * 恢复一致自动消隐。受监管实例（launchd/Mac App）会在检测到新构建后自动换新进程，横幅只闪现。
+   */
+  function startBuildVersionCheck() {
+    const banner = document.getElementById('buildStaleBanner');
+    if (!banner) return;
+    const check = async () => {
+      try {
+        const res = await fetch('/api/version', { cache: 'no-store' });
+        if (!res.ok) throw new Error('no-version-endpoint');
+        const version = await res.json();
+        const mine = (typeof window !== 'undefined' && window.__CSM_BUILD__) ? window.__CSM_BUILD__.buildId : null;
+        if (version.stale || (mine && version.buildId && mine !== version.buildId)) {
+          banner.textContent = `服务进程仍在运行旧构建（${version.buildId || '未知版本'}，启动于 ${formatDateTime(version.startedAt)}），新界面调用的功能可能不可用——请重启服务（csm-agent service restart）或等受监管实例自动换新`;
+          banner.classList.remove('hidden');
+        } else banner.classList.add('hidden');
+      } catch (error) {
+        // /api/version 404 = 进程版本早于构建戳机制，同样按旧进程警示（首次构建后老进程还活着的典型形态）。
+        banner.textContent = '服务进程版本过旧（无 /api/version 端点），请重启服务后再使用新功能';
+        banner.classList.remove('hidden');
+      }
+    };
+    void check();
+    setInterval(() => void check(), 30_000);
   }
 
   init().catch((err) => setStatus('warn', '启动失败: ' + err.message));

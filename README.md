@@ -58,6 +58,16 @@ npm run dev
 
 默认地址为 [http://127.0.0.1:3210](http://127.0.0.1:3210)。首次进入后在“设置”中配置 CRM、ONES、Hemory MCP；点击“同步数据”执行首次导入。服务每天 02:00 刷新 CRM/ONES，并在中国时间 13:00、20:00 拉取 Hemory 当天 `00:00` 至执行时刻的完整转写，再等待 Agent 大模型完成话题分段。客户详情支持单客户刷新。
 
+### 构建版本与旧进程检测
+
+`public/` 静态文件每次请求从磁盘实时读取（页面永远最新），而 API 路由在进程启动时加载进内存——**构建后若进程不重启，就会出现「新 UI + 旧 API」分裂**（新端点 404、新按钮失效）。防护体系：
+
+- `npm run build` 先执行 `scripts/stamp-build.mjs`：git SHA + dirty 标记 + 构建时刻写入 `dist/build-info.json` 与 `public/build-info.js`（`window.__CSM_BUILD__`，gitignore），同一次构建的服务端与前端共享同一 buildId；`npm run dev` 为 `tsx watch`（源码改动自动重载）。
+- 服务暴露 `GET /api/version`（buildId/startedAt/pid/supervised/stale）；前端每 30s 比对自己脚本的 buildId 与进程的 buildId，不一致或端点缺失（进程早于该机制）时页面顶部常亮红色横幅提示重启，恢复一致自动消隐。
+- **自愈（推荐 launchd 托管）**：`csm-agent service install` 安装的 launchd 服务注入 `CSM_SUPERVISED=1` + KeepAlive——服务每 10s 自检 dist 变化，检测到新构建后自动退出（exit 0），launchd 拉起新构建，全程无人工介入；Mac App 自带子进程监管（terminationHandler 自动重启，短命退避 1s→60s 封顶）。
+- 无监管的手动进程（如终端 `nohup node dist/index.js`）不自动退出（可用性优先），只在 `/api/version` 报告 stale 并触发前端横幅；`csm-agent doctor` 与 `csm-agent service status` 均会比对服务端与本地构建并提示重启。
+- 端口被旧进程占用时启动不再裸崩：输出「端口已被占用，请 csm-agent service restart 或结束旧进程」后退出。
+
 ## CLI 调试与运维
 
 CLI 是项目基础能力，与页面共用同一 HTTP API、SQLite、客户绑定和批准机制。构建并注册全局命令：
@@ -112,7 +122,8 @@ csm-agent draft regenerate <批次ID>
 csm-agent draft dismiss <批次ID> # 忽略批次：未写入草稿软删除为已忽略，已写入项不受影响
 csm-agent draft jobs [任务ID...] # 无参列出最近失败的生成任务（客户/日期/片段明细/错误）；带 ID 查询任务状态
 csm-agent service install 3210
-csm-agent service status
+csm-agent service status # 含运行中服务的构建版本（buildId/stale/supervised）
+csm-agent service restart
 csm-agent service logs
 csm-agent ones fields [--verify] # ONES Desk 必填字段契约：选项 UUID 表、兜底值、实例部署类型规则
 csm-agent agent <CRM客户ID> "基于会议生成工单草稿"

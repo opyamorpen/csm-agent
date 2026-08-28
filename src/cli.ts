@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
+import { readBuildInfo } from './version.js';
 import { runUpdate } from './update.js';
 import { runUninstall } from './uninstall.js';
 
@@ -48,7 +49,7 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
-  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/wecom/status'] },
+  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/wecom/status', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
@@ -110,6 +111,7 @@ function help(): void {
 用法:
   csm-agent serve [端口]
   csm-agent doctor
+    （健康自检，含旧进程探测：服务端构建 vs 本地 dist 构建，stale 会提示重启）
   csm-agent config llm [--json]
   csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>]
     （查看/切换大模型；provider=custom 需 --base-url（OpenAI 兼容端点），
@@ -862,9 +864,17 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
   throw new Error('draft 子命令只允许 review/retry/regenerate/dismiss/jobs');
 }
 
-function serviceCommand(subcommand: string, values: string[]): void {
+async function serviceCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'install') return print(installService(Number(values.shift() ?? process.env.CSM_PORT ?? 3210)));
-  if (subcommand === 'status') return print(serviceStatus());
+  if (subcommand === 'status') {
+    // 附运行中服务的构建版本：stale（磁盘构建已更新而进程未换新）一眼可见。
+    const status = serviceStatus();
+    try {
+      const version = await request<any>('/api/version');
+      return print({ ...status, version: { buildId: version.buildId, startedAt: version.startedAt,
+        supervised: version.supervised === true, stale: version.stale === true } });
+    } catch (error) { return print({ ...status, version: { error: '服务未运行或无 /api/version 端点' } }); }
+  }
   if (subcommand === 'restart') return print(restartService());
   if (subcommand === 'uninstall') return print(uninstallService());
   if (subcommand === 'logs') return print(readServiceLogs(Number(values.shift() ?? 100)));
@@ -1031,7 +1041,21 @@ async function doctor(): Promise<void> {
   const [list, wecom, llm, search] = await Promise.all([customers(), request('/api/wecom/status'), request('/api/config/llm'), request('/api/config/search')]);
   const sample = list[0];
   const overview = sample ? await request<any>(`/api/customers/${encodeURIComponent(sample.id)}/overview`) : null;
-  print({ baseUrl, api: 'ok', customers: list.length, sampleCustomer: sample?.id ?? null,
+  // 旧进程探测：服务端 buildId 与本地 dist 构建比对——分裂（新 UI + 旧 API）在 doctor 层可见。
+  let build: Record<string, unknown> | string;
+  try {
+    const version = await request<any>('/api/version');
+    const local = readBuildInfo();
+    build = { serviceBuildId: version.buildId, localBuildId: local?.buildId ?? null,
+      stale: version.stale === true || (local != null && version.buildId !== local?.buildId),
+      supervised: version.supervised === true, startedAt: version.startedAt,
+      hint: version.stale === true || (local != null && version.buildId !== local?.buildId)
+        ? '服务进程仍在运行旧构建，请执行 csm-agent service restart（或结束旧进程）后重试'
+        : 'ok' };
+  } catch (error) {
+    build = { error: (error as Error).message, hint: '服务进程无 /api/version 端点（版本过旧），请重启服务' };
+  }
+  print({ baseUrl, api: 'ok', build, customers: list.length, sampleCustomer: sample?.id ?? null,
     sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search, wecom });
 }
 

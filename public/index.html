@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <div id="buildStaleBanner" class="build-stale-banner hidden"></div>
   <header>
     <div class="brand">客户成功工作台 <span class="sub">CSM Agent</span></div>
     <div class="right">
@@ -243,6 +244,8 @@
     </div>
   </div>
 
+  <!-- 构建戳先于 app.js 加载：前端 buildId 与 /api/version 的比对锚点（旧进程横幅依赖）。 -->
+  <script src="/build-info.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

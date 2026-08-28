@@ -24,6 +24,9 @@ body {
   font: 15px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
 }
 
+/* 旧进程横幅：页面（磁盘实时）比服务进程（内存定格）新时置顶常亮，恢复一致自动消隐。 */
+.build-stale-banner { padding: 9px 18px; background: #fff0f0; border-bottom: 1px solid #e1aaaa; color: #952e2a; font-size: 13px; overflow-wrap: anywhere; }
+
 header {
   display: flex;
   align-items: center;

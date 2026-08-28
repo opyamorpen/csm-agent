@@ -46,6 +46,8 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/weekly-reports/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'ones-wiki-browse' && item.api.includes('/api/ones-wiki/spaces')));
   assert.ok(capabilities.some((item) => item.workflow === 'ones-wiki-browse' && item.api.includes('/api/ones-wiki/pages')));
+  // 旧进程检测：doctor 挂 /api/version 比对服务端与本地构建。
+  assert.ok(capabilities.some((item) => item.workflow === 'diagnostics' && item.api.includes('/api/version')));
 });
 
 test('CLI provides standard global help and version commands', () => {

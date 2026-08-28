@@ -96,6 +96,31 @@ test('draft cards render structured minimal required fields instead of a summary
   assert.match(styles, /\.draft-field-row \{/);
 });
 
+test('stale service process surfaces a persistent banner via build id comparison', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  // 构建戳先于 app.js 加载（前端 buildId 锚点），横幅容器在 body 顶部。
+  const stampIndex = html.indexOf('/build-info.js');
+  const appIndex = html.indexOf('/app.js');
+  assert.ok(stampIndex > 0, 'index.html 必须引入 /build-info.js');
+  assert.ok(appIndex > stampIndex, '/build-info.js 必须先于 /app.js 加载');
+  assert.match(html, /id="buildStaleBanner"/);
+
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const checker = source.match(/function startBuildVersionCheck[\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(checker, 'startBuildVersionCheck source was not found');
+  // 每 30s 比对前端 buildId 与 /api/version；stale 或端点缺失都要挂横幅，恢复一致消隐。
+  assert.match(checker, /\/api\/version/);
+  assert.match(checker, /window\.__CSM_BUILD__/);
+  assert.match(checker, /setInterval\(\(\) => void check\(\), 30_000\)/);
+  assert.match(checker, /服务进程仍在运行旧构建/);
+  assert.match(checker, /banner\.classList\.remove\('hidden'\)/);
+  assert.match(checker, /banner\.classList\.add\('hidden'\)/);
+  assert.ok(source.includes('startBuildVersionCheck();'), 'init 必须启动版本比对');
+
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.build-stale-banner \{/);
+});
+
 test('draft cards toggle selection from the whole card and enlarge the checkbox', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
