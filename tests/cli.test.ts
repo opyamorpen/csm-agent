@@ -41,6 +41,11 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'runtime-config' && item.api.includes('PUT /api/config/llm')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/export')));
+  assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/customers/:id/weekly-reports')));
+  assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/weekly-reports/:id/publish-preview')));
+  assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/weekly-reports/:id/publish')));
+  assert.ok(capabilities.some((item) => item.workflow === 'ones-wiki-browse' && item.api.includes('/api/ones-wiki/spaces')));
+  assert.ok(capabilities.some((item) => item.workflow === 'ones-wiki-browse' && item.api.includes('/api/ones-wiki/pages')));
 });
 
 test('CLI provides standard global help and version commands', () => {
@@ -51,6 +56,10 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent capabilities/);
   assert.match(help.stdout, /csm-agent action complete/);
   assert.match(help.stdout, /csm-agent case publish/);
+  assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
+  assert.match(help.stdout, /csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <批准哈希>/);
+  assert.match(help.stdout, /csm-agent wiki spaces \[--json\]/);
+  assert.match(help.stdout, /csm-agent wiki pages --space <页面组ID>/);
   assert.match(help.stdout, /csm-agent hemory assign/);
   assert.match(help.stdout, /csm-agent hemory ignore/);
   assert.match(help.stdout, /csm-agent hemory resegment --all/);

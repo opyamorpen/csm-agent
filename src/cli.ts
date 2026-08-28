@@ -56,6 +56,8 @@ const CLI_CAPABILITIES = [
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
+  { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
+  { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs'] },
@@ -125,6 +127,19 @@ function help(): void {
   csm-agent case update <草稿ID> <版本> <JSON>
   csm-agent case preview <草稿ID> [ONES父页面ID]
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
+  csm-agent weekly-report list <客户ID或名称> [--json]
+  csm-agent weekly-report show <周报ID> [--json]
+    （四章节内容 + 确定性统计一览；--json 输出完整对象）
+  csm-agent weekly-report generate <客户ID或名称> [YYYY-MM-DD] [--force] [--wait]
+    （日期为周内任意一天，自动对齐周一；基于该客户本周全部信息生成四章节周报；
+     --force 强制重建已存在的周报；--wait 轮询生成任务到终态）
+  csm-agent weekly-report update <周报ID> <版本> <JSON>
+    （JSON 为四章节 content 对象：summary/accomplishments/next_week_plan/risks）
+  csm-agent weekly-report preview <周报ID> [ONES父页面ID]
+  csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <批准哈希>
+  csm-agent wiki spaces [--json]
+  csm-agent wiki pages --space <页面组ID> [--parent <页面ID>] [--json]
+    （ONES Wiki 只读浏览：页面组列表与页面树，发布位置可用 csm-agent wiki pages 查 ID）
   csm-agent sync [客户ID或名称]
   csm-agent hemory sync [YYYY-MM-DD]
   csm-agent hemory resegment --all
@@ -356,6 +371,121 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
     }));
   }
   throw new Error('case 子命令只允许 list/generate/update/preview/publish');
+}
+
+function printWeeklyReport(report: any, customerName = ''): void {
+  const stats = report.stats ?? {};
+  console.log(`${customerName ? `${customerName} · ` : ''}${report.weekStart} ~ ${report.weekEnd} · ${report.status === 'published' ? `已发布(${report.publishedPageId ?? ''})` : `草稿 v${report.version}`} · ${report.generator ?? 'unknown'}`);
+  console.log(`统计: 沟通 ${stats.communications ?? 0} · 新增建议 ${stats.newSuggestions ?? 0} · 新增工单 ${stats.newTickets ?? 0}(解决约 ${stats.resolvedTickets ?? 'unknown'}) · 新增运维 ${stats.newOperations ?? 0} · 工时 ${stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`}`);
+  const content = report.content ?? {};
+  console.log(`\n一、本周执行摘要\n${content.summary ?? '(空)'}`);
+  console.log(`\n二、本周完成情况`);
+  for (const item of content.accomplishments ?? []) console.log(`  [${item.category}]${item.date ? ` ${item.date}` : ''} ${item.text}${item.source ? `（${item.source}）` : ''}`);
+  console.log(`\n三、下周工作计划`);
+  for (const [index, item] of (content.next_week_plan ?? []).entries()) console.log(`  ${index + 1}. ${item.text}${item.source ? `（${item.source}）` : ''}`);
+  console.log(`\n四、问题风险与阻塞`);
+  for (const item of content.risks ?? []) console.log(`  - ${item.text}${item.source ? `（${item.source}）` : ''}`);
+  if ((report.stats?.notes ?? []).length) console.log(`\n口径说明: ${(report.stats.notes).join('；')}`);
+}
+
+async function weeklyReportCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'list') {
+    const customer = await resolveCustomer(values.join(' '));
+    const body = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`);
+    if (jsonOutput) return print(body.reports);
+    if (!(body.reports ?? []).length) return console.log('该客户尚未生成任何周报');
+    console.table((body.reports ?? []).map((report: any) => ({ id: report.id, week: `${report.weekStart} ~ ${report.weekEnd}`,
+      status: report.status, version: report.version, generator: report.generator ?? 'unknown' })));
+    return;
+  }
+  if (subcommand === 'generate') {
+    const positional = values.filter((value) => !value.startsWith('--'));
+    const customer = await resolveCustomer(positional[0] ?? '');
+    const weekStart = positional[1] ?? '';
+    const result = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekStart: weekStart || undefined, force: values.includes('--force') }),
+    });
+    if (!jsonOutput) console.log(`周报任务已提交（周 ${result.weekStart}，任务 ${result.jobId ?? '幂等复用已有周报'}）。`);
+    if (values.includes('--wait') && result.jobId) {
+      const jobs = await waitDraftJobs([result.jobId]);
+      printDraftJobSummary(jobs);
+      if (jobs.every((job) => job.status === 'succeeded')) {
+        const body = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`);
+        const report = (body.reports ?? []).find((item: any) => item.weekStart === result.weekStart);
+        if (report) printWeeklyReport(report, customer.name);
+      }
+      return;
+    }
+    return print(result);
+  }
+  const reportId = values.shift() ?? '';
+  if (!reportId) throw new Error(`weekly-report ${subcommand || '(空)'} 缺少周报 ID`);
+  if (subcommand === 'show') {
+    const body = await request<any>(`/api/weekly-reports/${encodeURIComponent(reportId)}`);
+    if (jsonOutput) return print(body.report);
+    return printWeeklyReport(body.report);
+  }
+  if (subcommand === 'update') {
+    const version = Number(values.shift());
+    if (!Number.isInteger(version) || version < 1) throw new Error('weekly-report update 版本必须是正整数');
+    const body = parseObject(values.join(' '), 'weekly-report update');
+    if (typeof body.summary !== 'string') throw new Error('weekly-report update JSON 必须包含 summary 字段');
+    return print(await request(`/api/weekly-reports/${encodeURIComponent(reportId)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, content: body }),
+    }));
+  }
+  if (subcommand === 'regenerate') {
+    const result = await request<any>(`/api/weekly-reports/${encodeURIComponent(reportId)}/regenerate`, { method: 'POST' });
+    if (!jsonOutput) console.log(`周报任务已提交（周 ${result.weekStart}，任务 ${result.jobId ?? '无'}）。`);
+    return print(result);
+  }
+  if (subcommand === 'preview') {
+    return print(await request(`/api/weekly-reports/${encodeURIComponent(reportId)}/publish-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID: values.join(' ') }),
+    }));
+  }
+  if (subcommand === 'publish') {
+    const version = Number(values.shift());
+    const parentPageID = values.shift() ?? '';
+    const approvalHash = values.shift() ?? '';
+    if (!Number.isInteger(version) || version < 1) throw new Error('weekly-report publish 版本必须是正整数');
+    if (!approvalHash) throw new Error('weekly-report publish 缺少 publish-preview 返回的批准哈希');
+    return print(await request(`/api/weekly-reports/${encodeURIComponent(reportId)}/publish`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, parentPageID, approvalHash }),
+    }));
+  }
+  throw new Error('weekly-report 子命令只允许 list/show/generate/update/regenerate/preview/publish');
+}
+
+async function wikiCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'spaces') {
+    const body = await request<any>('/api/ones-wiki/spaces');
+    if (jsonOutput) return print(body.spaces);
+    console.table((body.spaces ?? []).map((space: any) => ({ id: space.id, name: space.name })));
+    return;
+  }
+  if (subcommand === 'pages') {
+    // 与 hemory inbox 的 --customer 同一惯例：支持 `--space 值` 与 `--space=值` 两种写法。
+    const inlineOption = (flag: string): string | undefined => {
+      const index = values.findIndex((value) => value === flag || value.startsWith(`${flag}=`));
+      if (index < 0) return undefined;
+      const inline = values[index].startsWith(`${flag}=`);
+      const raw = inline ? values[index].slice(flag.length + 1) : values[index + 1];
+      return raw && !raw.startsWith('--') ? raw : undefined;
+    };
+    const space = inlineOption('--space');
+    const parent = inlineOption('--parent');
+    if (!space) throw new Error('wiki pages 需要 --space=<页面组ID>（可用 csm-agent wiki spaces 查询）');
+    const body = await request<any>(`/api/ones-wiki/pages?space_id=${encodeURIComponent(space)}`);
+    let pages = body.pages ?? [];
+    if (parent) pages = pages.filter((page: any) => page.parentID === parent);
+    if (jsonOutput) return print(pages);
+    if (!pages.length) return console.log(parent ? '该父页面下没有子页面' : '该页面组没有可见页面');
+    console.table(pages.map((page: any) => ({ id: page.id, title: page.title, parentID: page.parentID || '(根)', archived: page.isArchived ? '是' : '' })));
+    return;
+  }
+  throw new Error('wiki 子命令只允许 spaces/pages');
 }
 
 async function rawApi(methodInput: string, path: string, json?: string): Promise<void> {
@@ -903,6 +1033,8 @@ async function main(): Promise<void> {
   if (command === 'action') return actionCommand(args.shift() ?? '', args);
   if (command === 'cases') return showCases(args.join(' ') || undefined);
   if (command === 'case') return caseCommand(args.shift() ?? '', args);
+  if (command === 'weekly-report') return weeklyReportCommand(args.shift() ?? '', args);
+  if (command === 'wiki') return wikiCommand(args.shift() ?? '', args);
   if (command === 'sync') return sync(args.join(' ') || undefined);
   if (command === 'hemory') return hemoryCommand(args.shift() ?? '', args);
   if (command === 'drafts') return showDrafts(args);

@@ -285,7 +285,7 @@ test('hemory regenerate action is fragment-scoped and per-day in the inbox; cust
   assert.match(source, /dataset\.attribution !== 'confirmed'/);
   assert.match(source, /重生成草稿需要已归属片段/);
   // 客户详情 Hemory 片段 tab：纯展示——按客户过滤已归属片段（取数在 openCustomer 的并行请求里），readonly 渲染，无勾选/操作条/重生成。
-  const panel = source.match(/function buildCustomerHemoryPanel[\s\S]*?\n  }\n\n  async function openCustomer/)?.[0];
+  const panel = source.match(/function buildCustomerHemoryPanel[\s\S]*?\n  }\n+  async function openCustomer/)?.[0];
   assert.ok(panel, 'buildCustomerHemoryPanel source was not found');
   assert.match(source, /customer_id=\$\{encodeURIComponent\(customerId\)\}&status=confirmed&limit=500/);
   assert.match(panel, /readonly: true/);
@@ -511,4 +511,88 @@ test('draft generation shows a loading banner and polls job status after attribu
   assert.match(styles, /\.draft-generation-notice \{[^}]*display: flex/);
   assert.match(styles, /\.draft-generation-notice \.spinner \{[^}]*animation: draft-spin/);
   assert.match(styles, /@keyframes draft-spin/);
+});
+
+test('customer detail exposes the weekly report tab with generation, failure retry and wiki publish', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // Tab 注册：客户案例之后新增「实施周报」。
+  assert.match(source, /addTab\('weekly_report', '实施周报', buildWeeklyPanel\(c\)\)/);
+
+  // 周选择对齐周一 + 生成入口。
+  const panel = source.match(/function buildWeeklyPanel[\s\S]*?\n  \}\n+\n?  async function openCustomer/)?.[0]
+    ?? source.match(/function buildWeeklyPanel[\s\S]*?async function openCustomer/)?.[0];
+  assert.ok(panel, 'buildWeeklyPanel source was not found');
+  assert.match(panel, /weekInput\.type = 'date'/);
+  assert.match(panel, /weekMondayOf/);
+  assert.match(panel, /'生成周报'/);
+  assert.match(panel, /\/weekly-reports`/);
+
+  // 生成轮询：draft-jobs 复用 + 进行中提示条；失败 → 错误卡片 + 弹窗 + 再次生成（force）。
+  const poller = source.match(/async function pollWeeklyJob[\s\S]*?\n  \}\n\n  function renderWeeklyFailure/)?.[0];
+  assert.ok(poller, 'pollWeeklyJob source was not found');
+  assert.match(poller, /\/api\/draft-jobs\?ids=/);
+  assert.match(poller, /周报生成中/);
+  assert.match(poller, /job\.status === 'failed'/);
+  assert.match(poller, /周报生成失败/);
+  const failure = source.match(/function renderWeeklyFailure[\s\S]*?\n  \}\n\n  async function refreshWeeklyPanel/)?.[0];
+  assert.ok(failure, 'renderWeeklyFailure source was not found');
+  assert.match(failure, /'再次生成'/);
+  assert.match(failure, /force: true/);
+
+  // 展示四章节 + 统计条 + 操作（编辑/复制 Markdown/发布到 Wiki/重新生成）。
+  const renderer = source.match(/async function renderWeeklyReport[\s\S]*?\n  \}\n\n  function renderWeeklyBody/)?.[0];
+  assert.ok(renderer, 'renderWeeklyReport source was not found');
+  for (const section of ['本周执行摘要', '本周完成情况', '下周工作计划', '问题风险与阻塞']) {
+    assert.match(renderer, new RegExp(section));
+  }
+  assert.match(renderer, /weeklyStatsLine/);
+  assert.match(renderer, /'编辑'/);
+  assert.match(renderer, /'复制 Markdown'/);
+  assert.match(renderer, /'发布到 Wiki'/);
+  assert.match(renderer, /'重新生成'/);
+  assert.match(renderer, /navigator\.clipboard\.writeText/);
+  assert.match(renderer, /publish-preview/);
+
+  // 全部异步按钮走 withLoading loading 契约（禁用 + 进行中文案）。
+  assert.match(source, /function withLoading\(button, busyText, fn\)/);
+  assert.match(source, /button\.disabled = true;\n      button\.textContent = busyText;/);
+
+  // 周报样式：统计条、错误卡片、周选择工具条。
+  assert.match(styles, /\.weekly-report-card \{/);
+  assert.match(styles, /\.weekly-stats \{/);
+  assert.match(styles, /\.weekly-failure \{/);
+  assert.match(styles, /\.weekly-toolbar \{/);
+});
+
+test('wiki page picker replaces manual page id input for case and weekly publishing', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 共享选择器：空间下拉 + 懒加载页面树 + 「选此页」，返回 Promise<pageID|null>。
+  const picker = source.match(/function pickWikiPage[\s\S]*?\n  \}\n\n  \/\*\* 实施周报 tab/)?.[0]
+    ?? source.match(/function pickWikiPage\(\)[\s\S]*?\n  \}\n\n/)?.[0];
+  assert.ok(picker, 'pickWikiPage source was not found');
+  assert.match(picker, /\/api\/ones-wiki\/spaces/);
+  assert.match(picker, /\/api\/ones-wiki\/pages\?space_id=/);
+  assert.match(picker, /buildWikiTree/);
+  // 手填 ID 保留为兜底（「直接输入页面 ID」），不再是唯一入口。
+  assert.match(picker, /'直接输入页面 ID'/);
+  const tree = source.match(/function buildWikiTree[\s\S]*?\n  \}\n\n  \/\*\*\n   \* ONES Wiki 发布位置选择器/)?.[0];
+  assert.ok(tree, 'buildWikiTree source was not found');
+  assert.match(tree, /details/);
+  assert.match(tree, /addEventListener\('toggle'/);
+  assert.match(tree, /'选此页'/);
+
+  // 案例发布与周报发布都改用 pickWikiPage；旧的「ONES 案例库父页面 ID」promptDialog 手填入口移除。
+  const casePublish = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
+  assert.ok(casePublish, 'editCase source was not found');
+  assert.match(casePublish, /pickWikiPage\(\)/);
+  assert.doesNotMatch(casePublish, /ONES 案例库父页面 ID/);
+  assert.doesNotMatch(source, /promptDialog\('ONES 案例库父页面 ID/);
+  // 选择器样式。
+  assert.match(styles, /\.wiki-picker \{/);
+  assert.match(styles, /\.wiki-tree-host \{/);
+  assert.match(styles, /\.wiki-tree-node \{/);
 });

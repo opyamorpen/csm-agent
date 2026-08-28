@@ -701,6 +701,33 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .draft-generation-notice .spinner { flex: none; width: 14px; height: 14px; border: 2px solid #8ba8de; border-top-color: transparent; border-radius: 50%; animation: draft-spin 0.8s linear infinite; }
 @keyframes draft-spin { to { transform: rotate(360deg); } }
 
+/* ── 实施周报 tab ── */
+.weekly-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.weekly-week-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #36414e; }
+.weekly-week-label input[type="date"] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.weekly-notice { margin-bottom: 10px; padding: 8px 12px; border: 1px solid #8ba8de; border-radius: 6px; background: #eaf0fa; color: #174a9d; font-size: 13px; }
+.weekly-report-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.weekly-report-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.weekly-stats { margin: 6px 0 12px; padding: 8px 12px; border-radius: 6px; background: #f5f7fa; color: #36414e; font-size: 13px; }
+.weekly-section { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.weekly-list { margin: 4px 0 4px 20px; display: grid; gap: 5px; font-size: 13.5px; }
+.weekly-failure { background: #fff7f6; border: 1px solid #e5b5b0; border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+.weekly-failure p { margin: 0; color: #952e2a; font-size: 13px; overflow-wrap: anywhere; }
+
+/* ── ONES Wiki 发布位置选择器（案例/周报发布共用） ── */
+.wiki-picker { display: grid; gap: 10px; }
+.wiki-space-select { padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; font-size: 13.5px; background: #fff; }
+.wiki-tree-host { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.wiki-tree { display: grid; gap: 3px; }
+.wiki-tree-node { padding-left: 0; }
+.wiki-tree-node .wiki-tree-node { margin-left: 16px; }
+/* summary 必须是 details 直接子元素（HTML 规范）；按钮放 summary 内同行右对齐。 */
+.wiki-tree-node > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; font-size: 13.5px; padding: 3px 2px; overflow-wrap: anywhere; }
+.wiki-tree-node > summary .quiet-command { flex: none; }
+.wiki-tree-leaf > .wiki-tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wiki-tree-leaf > .wiki-tree-head .wiki-tree-title { flex: 1; font-size: 13.5px; padding: 3px 2px; overflow-wrap: anywhere; }
+.wiki-tree-children { margin-left: 16px; display: grid; gap: 3px; }
+
 /* Existing Agent surface follows the same quiet operational system. */
 #chat { background: var(--bg); }
 #records { background: #f7f8fa; }

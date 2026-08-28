@@ -223,6 +223,52 @@ export interface DraftGenerationJob {
   status: DraftGenerationStatus;
   attempts: number;
   error?: string | null;
+  /** 生成任务种类：hemory 日草稿（默认）或 weekly_report 实施周报；resume 与轮询按 kind 认领。 */
+  kind?: 'hemory' | 'weekly_report';
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 实施周报四章节内容（LLM 叙述部分）。 */
+export interface WeeklyReportContent {
+  /** ① 本周执行摘要（总括叙述 3~6 句） */
+  summary: string;
+  /** ② 本周完成情况：分小类逐条列出，每条带日期与来源引用 */
+  accomplishments: Array<{ category: string; date: string; text: string; source: string }>;
+  /** ③ 下周工作计划：主要来自 Hemory 片段中的约定与承诺，逐条标注来源 */
+  next_week_plan: Array<{ text: string; source: string }>;
+  /** ④ 问题风险与阻塞：主要来自 Hemory 片段中的问题信号 + 阻塞工单/风险评级 */
+  risks: Array<{ text: string; source: string }>;
+}
+
+/** 实施周报代码确定性统计（叙述之外的一眼指标）。 */
+export interface WeeklyReportStats {
+  communications: number;
+  newSuggestions: number;
+  newTickets: number;
+  newOperations: number;
+  resolvedTickets: number | null;
+  blockedTickets: number | null;
+  openTickets: number | null;
+  workhours: number | null;
+  actionsCompleted: number | null;
+  /** 统计口径附注（如「本周解决」为快照近似口径） */
+  notes: string[];
+}
+
+export interface WeeklyReport {
+  id: string;
+  customerId: string;
+  weekStart: string;
+  weekEnd: string;
+  version: number;
+  status: 'draft' | 'published';
+  content: WeeklyReportContent;
+  stats: WeeklyReportStats;
+  generator: string | null;
+  fingerprint: string;
+  publishedPageId?: string | null;
+  publishedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

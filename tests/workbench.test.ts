@@ -1983,3 +1983,203 @@ test('workbench: regenerateByEventIds rebuilds per customer-day and rejects inva
     assert.equal(raBatches.filter((batch) => batch.status === 'stale').length, 1);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── 实施周报（weekly reports） ──
+
+import { WeeklyReportService, weekMonday, weekRange, weeklyFingerprint, renderWeeklyMarkdown } from '../src/workbench/weekly.js';
+
+function fakeWeeklyModel(content: unknown): any {
+  return {
+    llm: { provider: 'fake', model: 'fake-model' },
+    models: { complete: async () => ({ content: [{ type: 'text', text: JSON.stringify(content) }], stopReason: 'stop' }) },
+  };
+}
+
+const WEEKLY_CONTENT = {
+  summary: '本周与客户完成两次关键沟通，围绕报表性能与培训计划达成一致，整体交付平稳。',
+  accomplishments: [
+    { category: '沟通与会议', date: '2026-08-25', text: '电话沟通报表导出性能问题，定位索引缺失', source: 'Hemory 片段 08-25' },
+    { category: '工单处理', date: '2026-08-26', text: '导出超时工单已解决（近似口径）', source: '工单 T-2001' },
+  ],
+  next_week_plan: [{ text: '跟进导出性能复测结果', source: '08-25 电话约定' }],
+  risks: [{ text: '客户对导出性能表达不满，需重点关注', source: '08-25 电话' }],
+};
+
+test('workbench: week helpers align to Monday and compute Shanghai week bounds', () => {
+  assert.equal(weekMonday('2026-08-28'), '2026-08-24');
+  assert.equal(weekMonday('2026-08-24'), '2026-08-24');
+  assert.equal(weekMonday('2026-08-23'), '2026-08-17');
+  assert.equal(weekMonday('2026-08-30'), '2026-08-24');
+  assert.equal(weekMonday(new Date('2026-08-28T01:30:00Z')), '2026-08-24');
+  const range = weekRange('2026-08-24');
+  assert.equal(range.weekEnd, '2026-08-30');
+  assert.equal(range.start, '2026-08-23T16:00:00.000Z');
+  assert.equal(range.end, '2026-08-30T15:59:59.999Z');
+});
+
+test('workbench: listSourceEventsInRange filters by time window and excludes snapshots and inactive fragments', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-w1', name: '周报客户一' });
+  const inWeek = db.upsertSourceEvent({ customerId: 'crm-w1', sourceSystem: 'ones', sourceType: 'support_ticket',
+    externalId: 'ticket-1', title: '导出超时', occurredAt: '2026-08-25T03:00:00Z',
+    payload: { field005: { name: '已完成' }, field009: '2026-08-25T03:00:00Z', field010: '2026-08-26T03:00:00Z' } });
+  // 周界之外（8-22 周六属于上一周）。
+  db.upsertSourceEvent({ customerId: 'crm-w1', sourceSystem: 'ones', sourceType: 'support_ticket',
+    externalId: 'ticket-0', title: '上周工单', occurredAt: '2026-08-22T03:00:00Z' });
+  // 元数据快照不算业务事件。
+  db.upsertSourceEvent({ customerId: 'crm-w1', sourceSystem: 'crm', sourceType: 'customer_snapshot',
+    externalId: 'snap-1', title: '客户资料', occurredAt: '2026-08-25T03:00:00Z' });
+  // naive 时间格式的 ONES 历史行（无时区后缀，实为上海时间 8-25 12:00）。
+  const naive = db.upsertSourceEvent({ customerId: 'crm-w1', sourceSystem: 'ones', sourceType: 'suggestion_feedback',
+    externalId: 'sug-1', title: '希望支持 CSV 导出', occurredAt: '2026-08-25 12:00:00' });
+  // 无客户归属的事件不出现。
+  db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType: 'support_ticket',
+    externalId: 'ticket-2', title: '别人的工单', occurredAt: '2026-08-25T03:00:00Z' });
+  const range = weekRange('2026-08-24');
+  const events = db.listSourceEventsInRange('crm-w1', { since: range.start, until: range.end });
+  assert.deepEqual(events.map((event) => event.externalId).sort(), ['sug-1', 'ticket-1']);
+  assert.ok(events.find((event) => event.id === naive.id), 'naive 上海时间必须落入周窗');
+  const filtered = db.listSourceEventsInRange('crm-w1', { since: range.start, until: range.end, sourceTypes: ['support_ticket'] });
+  assert.deepEqual(filtered.map((event) => event.externalId), ['ticket-1']);
+}));
+
+test('workbench: weekly report generation uses full-context model call and persists stats/content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w2', name: '周报客户二' });
+    db.upsertSourceEvent({ customerId: 'crm-w2', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'w2-ticket-1', title: '导出超时', occurredAt: '2026-08-25T03:00:00Z',
+      payload: { field005: { name: '已完成' }, field009: '2026-08-25T03:00:00Z', field010: '2026-08-26T03:00:00Z' } });
+    db.upsertSourceEvent({ customerId: 'crm-w2', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'w2-ticket-2', title: '登录偶发失败', occurredAt: '2026-08-26T03:00:00Z',
+      payload: { field005: { name: '阻塞中' }, field009: '2026-08-26T03:00:00Z' } });
+    segment(db, 'crm-w2', 'w2-r1:t1', 'w2-r1', '性能沟通', '2026-08-25T05:00:00Z', '客户反馈导出超时，约定周四复测');
+    // listHemoryFragments 走 INNER JOIN 代际登记表（真实链路由分段服务登记），测试手动登记录音事件。
+    const w2Recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
+      externalId: 'w2-r1', title: '录音 w2-r1', occurredAt: '2026-08-25T05:00:00Z', payload: {} });
+    db.activateHemoryFragments(w2Recording.id, 'fp-w2', [db.findSourceEvent('hemory', 'ai_topic_segment', 'w2-r1:t1')!.id]);
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(WEEKLY_CONTENT) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any, runtime,
+      async () => ({ records: [{ startTime: '2026-08-25T10:00:00+08:00', hours: 2, description: '问题排查' }] }));
+    const result = service.generate('crm-w2', '2026-08-28');
+    assert.equal(result.weekStart, '2026-08-24');
+    assert.ok(result.jobId);
+    await waitForJob(db, result.jobId!);
+    const report = db.getWeeklyReportByWeek('crm-w2', '2026-08-24')!;
+    assert.ok(report, '周报必须落库');
+    assert.equal(report.content.summary, WEEKLY_CONTENT.summary);
+    assert.equal(report.stats.communications, 1);
+    assert.equal(report.stats.newTickets, 2);
+    assert.equal(report.stats.resolvedTickets, 1);
+    assert.equal(report.stats.blockedTickets, 1);
+    assert.equal(report.stats.openTickets, 1);
+    assert.equal(report.stats.workhours, 2);
+    // 全量上下文注入：工单、片段转写、工时记录都在 prompt 里。
+    assert.match(capturedPrompt, /导出超时/);
+    assert.match(capturedPrompt, /阻塞中/);
+    assert.match(capturedPrompt, /约定周四复测/);
+    assert.match(capturedPrompt, /问题排查/);
+    assert.match(capturedPrompt, /next_week_plan/);
+    // 幂等：同指纹再次生成复用任务，不新建。
+    const again = service.generate('crm-w2', '2026-08-26');
+    assert.equal(again.jobId, result.jobId);
+    // Markdown 渲染四章节齐全。
+    const markdown = renderWeeklyMarkdown(report, '周报客户二');
+    assert.match(markdown, /# 周报客户二 实施周报（2026-08-24 ~ 2026-08-30）/);
+    assert.match(markdown, /## 一、本周执行摘要|本周执行摘要/);
+    assert.match(markdown, /## 下周工作计划/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: weekly report failure marks job failed and manual regenerate is not short-circuited', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w3', name: '周报客户三' });
+    segment(db, 'crm-w3', 'w3-r1:t1', 'w3-r1', '风险沟通', '2026-08-25T05:00:00Z', '客户表达担忧');
+    const badModel = {
+      llm: { provider: 'fake', model: 'broken' },
+      models: { complete: async () => ({ content: [{ type: 'text', text: '服务暂时不可用' }], stopReason: 'stop' }) },
+    } as any;
+    const mcp = { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any;
+    const service = new WeeklyReportService(db, mcp, badModel);
+    const first = service.generate('crm-w3', '2026-08-25');
+    for (let i = 0; i < 40 && db.getDraftJob(first.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getDraftJob(first.jobId!)?.status, 'failed');
+    assert.match(db.getDraftJob(first.jobId!)?.error ?? '', /模型未生成周报/);
+    assert.ok(!db.getWeeklyReportByWeek('crm-w3', '2026-08-24'), '失败任务不得落周报');
+    // 手动「再次生成」= force：换盐指纹，不被失败指纹短路。等待其到终态再关库，避免异步任务跨越测试边界。
+    const retry = service.generate('crm-w3', '2026-08-25', true);
+    assert.notEqual(retry.jobId, first.jobId);
+    assert.equal(db.getDraftJob(retry.jobId!)?.kind, 'weekly_report');
+    for (let i = 0; i < 40 && ['pending', 'running'].includes(db.getDraftJob(retry.jobId!)?.status ?? ''); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(db.getDraftJob(retry.jobId!)?.status, 'failed');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: weekly report edit uses optimistic lock and publish goes through hash gate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w4', name: '周报客户四' });
+    segment(db, 'crm-w4', 'w4-r1:t1', 'w4-r1', '交付沟通', '2026-08-25T05:00:00Z', '交付顺利');
+    const service = new WeeklyReportService(db,
+      { listTools: () => [], call: async () => ({ text: '{"result":"SUCCESS","data":{"pageID":"page-77"}}', isError: false }) } as any,
+      fakeWeeklyModel(WEEKLY_CONTENT));
+    const queued = service.generate('crm-w4', '2026-08-25');
+    await waitForJob(db, queued.jobId!);
+    let report = db.getWeeklyReportByWeek('crm-w4', '2026-08-24')!;
+    // 乐观锁：错误版本拒绝。
+    assert.equal(service.update(report.id, report.version + 5, WEEKLY_CONTENT), null);
+    const edited = { ...WEEKLY_CONTENT, summary: '编辑后的摘要' };
+    report = service.update(report.id, report.version, edited)!;
+    assert.equal(report.version, 2);
+    assert.equal(report.content.summary, '编辑后的摘要');
+    // 发布哈希门：preview → 篡改内容后 hash 不匹配 → publish 拒绝。
+    const preview = service.publishPreview(report.id, 'parent-1');
+    assert.equal(preview.args.parentPageID, 'parent-1');
+    assert.match(String(preview.args.title), /周报客户四 实施周报/);
+    const stale = db.updateWeeklyReport(report.id, report.version, { ...edited, summary: '偷改后的摘要' })!;
+    assert.equal(stale.version, 3);
+    await assert.rejects(() => service.publish(report.id, preview.report.version, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
+    // 正确路径：以最新版本重新 preview → publish 成功 → 状态与页面 ID 落库。
+    const fresh = service.publishPreview(stale.id, 'parent-1');
+    const published = await service.publish(stale.id, fresh.report.version, 'parent-1', fresh.approvalHash);
+    assert.equal(published.status, 'published');
+    assert.equal(published.publishedPageId, 'page-77');
+    // 已发布的周报不可再 preview。
+    assert.throws(() => service.publishPreview(published.id, 'parent-1'), /不可发布/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: weekly fingerprint is deterministic per customer-week-eventset', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-w5', name: '周报客户五' });
+  const a = segment(db, 'crm-w5', 'w5:t1', 'w5-r1', '话题', '2026-08-25T05:00:00Z', '内容');
+  const b = segment(db, 'crm-w5', 'w5:t2', 'w5-r1', '话题二', '2026-08-26T05:00:00Z', '内容二');
+  const same = db.getSourceEvent(a.id)!;
+  assert.equal(weeklyFingerprint('crm-w5', '2026-08-24', [a], []), weeklyFingerprint('crm-w5', '2026-08-24', [same], []));
+  assert.notEqual(weeklyFingerprint('crm-w5', '2026-08-24', [a], []), weeklyFingerprint('crm-w5', '2026-08-24', [a, b], []));
+  assert.notEqual(weeklyFingerprint('crm-w5', '2026-08-24', [a], []), weeklyFingerprint('crm-w6', '2026-08-24', [a], []));
+}));
+
+test('workbench: weekly jobs are isolated from hermory draft jobs by kind', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-w6', name: '周报客户六' });
+  segment(db, 'crm-w6', 'w6:t1', 'w6-r1', '话题', '2026-08-25T05:00:00Z', '内容');
+  const hermoryJob = db.createDraftJob('crm-w6', 'fp-h-1', ['evt-1']);
+  const weeklyJob = db.createDraftJob('crm-w6', 'fp-w-1', ['evt-2'], 'weekly_report');
+  assert.equal(hermoryJob.kind, 'hemory');
+  assert.equal(weeklyJob.kind, 'weekly_report');
+  assert.ok(db.listPendingDraftJobs().every((job) => job.kind === 'hemory'), 'hemory resume 不得认领周报任务');
+  assert.ok(db.listPendingDraftJobs('weekly_report').every((job) => job.kind === 'weekly_report'));
+  assert.ok(!db.listPendingDraftJobs('weekly_report').some((job) => job.id === hermoryJob.id));
+  assert.ok(!db.listPendingDraftJobs().some((job) => job.id === weeklyJob.id));
+}));

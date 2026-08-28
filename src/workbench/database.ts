@@ -21,6 +21,9 @@ import type {
   SourceEvent,
   SourceEventInput,
   SyncRun,
+  WeeklyReport,
+  WeeklyReportContent,
+  WeeklyReportStats,
 } from './types.js';
 import { normalizeAfterSalesStage } from './types.js';
 import { renewalWithin } from './risk.js';
@@ -474,10 +477,30 @@ export class WorkbenchDatabase {
         status TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT,
+        kind TEXT NOT NULL DEFAULT 'hemory',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_draft_job_status ON draft_generation_jobs(status, updated_at);
+
+      CREATE TABLE IF NOT EXISTS weekly_reports (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        week_start TEXT NOT NULL,
+        week_end TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        stats_json TEXT NOT NULL,
+        generator TEXT,
+        fingerprint TEXT NOT NULL,
+        published_page_id TEXT,
+        published_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(customer_id, week_start)
+      );
+      CREATE INDEX IF NOT EXISTS idx_weekly_report_customer ON weekly_reports(customer_id, week_start DESC);
 
       CREATE TABLE IF NOT EXISTS audit_log (
         id TEXT PRIMARY KEY,
@@ -492,6 +515,10 @@ export class WorkbenchDatabase {
     const sourceEventColumns = this.db.prepare('PRAGMA table_info(source_events)').all() as Row[];
     if (!sourceEventColumns.some((column) => String(column.name) === 'display_id')) {
       this.db.exec('ALTER TABLE source_events ADD COLUMN display_id TEXT;');
+    }
+    const draftJobColumns = this.db.prepare('PRAGMA table_info(draft_generation_jobs)').all() as Row[];
+    if (!draftJobColumns.some((column) => String(column.name) === 'kind')) {
+      this.db.exec("ALTER TABLE draft_generation_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'hemory';");
     }
     const customerColumns = this.db.prepare('PRAGMA table_info(customers)').all() as Row[];
     if (!customerColumns.some((column) => String(column.name) === 'after_sales_stage')) {
@@ -1138,20 +1165,22 @@ export class WorkbenchDatabase {
     if (status === 0) this.updateAction(actionItemId, { status: 'completed', outcome: '已在企业微信待办中完成' });
   }
 
-  createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[]): DraftGenerationJob {
+  createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob {
     const existing = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     if (existing) return this.draftJobFromRow(existing);
     const now = nowIso();
     const id = randomUUID();
-    this.db.prepare(`INSERT INTO draft_generation_jobs(id,customer_id,fingerprint,source_event_ids_json,status,attempts,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?)`).run(id, customerId, fingerprint, json(sourceEventIds), 'pending', 0, now, now);
+    this.db.prepare(`INSERT INTO draft_generation_jobs(id,customer_id,fingerprint,source_event_ids_json,status,attempts,kind,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(id, customerId, fingerprint, json(sourceEventIds), 'pending', 0, kind, now, now);
     return this.getDraftJob(id)!;
   }
 
   private draftJobFromRow(row: Row): DraftGenerationJob {
     return { id: String(row.id), customerId: String(row.customer_id), fingerprint: String(row.fingerprint),
       sourceEventIds: parseJson(row.source_event_ids_json, []), status: String(row.status) as DraftGenerationJob['status'],
-      attempts: Number(row.attempts), error: row.error as string | null, createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+      attempts: Number(row.attempts), error: row.error as string | null,
+      kind: (String(row.kind ?? 'hemory') === 'weekly_report' ? 'weekly_report' : 'hemory'),
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
   }
 
   getDraftJob(id: string): DraftGenerationJob | undefined {
@@ -1164,8 +1193,8 @@ export class WorkbenchDatabase {
     return row ? this.draftJobFromRow(row) : undefined;
   }
 
-  listPendingDraftJobs(): DraftGenerationJob[] {
-    const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE status IN ('pending','running','failed') ORDER BY updated_at").all() as Row[];
+  listPendingDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob[] {
+    const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status IN ('pending','running','failed') ORDER BY updated_at").all(kind) as Row[];
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
@@ -1173,6 +1202,83 @@ export class WorkbenchDatabase {
     this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,updated_at=? WHERE id=?`)
       .run(status, status, error ?? null, nowIso(), id);
     return this.getDraftJob(id);
+  }
+
+  /**
+   * 客户在 [since, until] 闭区间（ISO 时刻）内的全部业务事件，覆盖所有 source_type。
+   * 口径与时间线一致：排除 crm/customer_snapshot 元数据与被重切停用（active=0）的 Hemory 片段；
+   * occurred_at 混有 Z/+08:00/naive 三种历史格式，比较必须经 datetime() 归一化。
+   */
+  listSourceEventsInRange(customerId: string, filters: { since: string; until: string; sourceTypes?: string[] }): SourceEvent[] {
+    const clauses = [
+      'customer_id=?',
+      "NOT (source_system='crm' AND source_type='customer_snapshot')",
+      'NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)',
+      'datetime(occurred_at)>=datetime(?)',
+      'datetime(occurred_at)<=datetime(?)',
+    ];
+    const args: Array<string | number> = [customerId, filters.since, filters.until];
+    if (filters.sourceTypes?.length) {
+      clauses.push(`source_type IN (${filters.sourceTypes.map(() => '?').join(',')})`);
+      args.push(...filters.sourceTypes);
+    }
+    const rows = this.db.prepare(`SELECT * FROM source_events WHERE ${clauses.join(' AND ')} ORDER BY datetime(occurred_at)`)
+      .all(...args) as Row[];
+    return rows.map(sourceEventFromRow);
+  }
+
+  private weeklyReportFromRow(row: Row): WeeklyReport {
+    return {
+      id: String(row.id), customerId: String(row.customer_id), weekStart: String(row.week_start), weekEnd: String(row.week_end),
+      version: Number(row.version), status: String(row.status) as WeeklyReport['status'],
+      content: parseJson<WeeklyReportContent>(row.content_json, { summary: '', accomplishments: [], next_week_plan: [], risks: [] }),
+      stats: parseJson<WeeklyReportStats>(row.stats_json, { communications: 0, newSuggestions: 0, newTickets: 0, newOperations: 0,
+        resolvedTickets: null, blockedTickets: null, openTickets: null, workhours: null, actionsCompleted: null, notes: [] }),
+      generator: row.generator as string | null, fingerprint: String(row.fingerprint),
+      publishedPageId: row.published_page_id as string | null, publishedAt: row.published_at as string | null,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    };
+  }
+
+  /** 同客户同周唯一：生成/重建走 UPSERT（version 递进，已发布状态被重建重置为 draft）。 */
+  upsertWeeklyReport(input: { customerId: string; weekStart: string; weekEnd: string; content: WeeklyReportContent; stats: WeeklyReportStats; generator: string | null; fingerprint: string }): WeeklyReport {
+    const now = nowIso();
+    this.db.prepare(`INSERT INTO weekly_reports(id,customer_id,week_start,week_end,version,status,content_json,stats_json,generator,fingerprint,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(customer_id,week_start) DO UPDATE SET week_end=excluded.week_end,version=version+1,status='draft',
+        content_json=excluded.content_json,stats_json=excluded.stats_json,generator=excluded.generator,fingerprint=excluded.fingerprint,
+        published_page_id=NULL,published_at=NULL,updated_at=excluded.updated_at`)
+      .run(randomUUID(), input.customerId, input.weekStart, input.weekEnd, 1, 'draft', json(input.content), json(input.stats),
+        input.generator, input.fingerprint, now, now);
+    return this.getWeeklyReportByWeek(input.customerId, input.weekStart)!;
+  }
+
+  getWeeklyReport(id: string): WeeklyReport | undefined {
+    const row = this.db.prepare('SELECT * FROM weekly_reports WHERE id=?').get(id) as Row | undefined;
+    return row ? this.weeklyReportFromRow(row) : undefined;
+  }
+
+  getWeeklyReportByWeek(customerId: string, weekStart: string): WeeklyReport | undefined {
+    const row = this.db.prepare('SELECT * FROM weekly_reports WHERE customer_id=? AND week_start=?').get(customerId, weekStart) as Row | undefined;
+    return row ? this.weeklyReportFromRow(row) : undefined;
+  }
+
+  listWeeklyReports(customerId: string): WeeklyReport[] {
+    return (this.db.prepare('SELECT * FROM weekly_reports WHERE customer_id=? ORDER BY week_start DESC').all(customerId) as Row[])
+      .map((row) => this.weeklyReportFromRow(row));
+  }
+
+  updateWeeklyReport(id: string, expectedVersion: number, content: WeeklyReportContent): WeeklyReport | null {
+    const result = this.db.prepare(`UPDATE weekly_reports SET content_json=?,version=version+1,updated_at=? WHERE id=? AND version=? AND status='draft'`)
+      .run(json(content), nowIso(), id, expectedVersion);
+    return Number(result.changes) === 1 ? this.getWeeklyReport(id)! : null;
+  }
+
+  markWeeklyReportPublished(id: string, expectedVersion: number, pageId: string): WeeklyReport | null {
+    const now = nowIso();
+    const result = this.db.prepare(`UPDATE weekly_reports SET status='published',published_page_id=?,published_at=?,updated_at=? WHERE id=? AND version=? AND status='draft'`)
+      .run(pageId, now, now, id, expectedVersion);
+    return Number(result.changes) === 1 ? this.getWeeklyReport(id)! : null;
   }
 
   createDraftBatch(input: Omit<DraftBatch, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'items'> & { id?: string }): DraftBatch {

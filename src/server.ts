@@ -23,6 +23,8 @@ import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
 import { HemoryDraftService, draftDisplayFields } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
+import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
+import { WikiService } from './workbench/wiki.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, '..', 'public');
@@ -153,6 +155,8 @@ interface WorkbenchServices {
   cases: CaseService;
   wecom: WecomTodoService;
   drafts: HemoryDraftService;
+  weekly: WeeklyReportService;
+  wiki: WikiService;
 }
 
 function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices): http.RequestListener {
@@ -431,6 +435,20 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
           return json(res, 200, await workbench.sync.listCustomerWorkhours(customerId));
         }
+        if (req.method === 'GET' && sub === '/weekly-reports') {
+          if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
+          return json(res, 200, { reports: workbench.weekly.list(customerId) });
+        }
+        if (req.method === 'POST' && sub === '/weekly-reports') {
+          const body = await readBody(req);
+          if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
+          const weekStart = typeof body.weekStart === 'string' && body.weekStart.trim() ? body.weekStart.trim() : new Date().toISOString();
+          try {
+            return json(res, 202, workbench.weekly.generate(customerId, weekStart, body.force === true));
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
+        }
         if (req.method === 'POST' && sub === '/refresh') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
           return json(res, 202, workbench.sync.refreshCustomer(customerId));
@@ -594,6 +612,76 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             return json(res, 400, { error: (error as Error).message });
           }
         }
+      }
+
+      // ── weekly reports（实施周报：生成走 draft-jobs 轮询，发布走哈希审批门） ──
+      // 周界元信息：前端周选择器对齐周一用（字面路径须在 :id 正则之前）。
+      if (req.method === 'GET' && path === '/api/weekly-reports/week-meta') {
+        const anchor = url.searchParams.get('date') ?? '';
+        const monday = weekMonday(anchor || new Date().toISOString());
+        return json(res, 200, { weekStart: monday, ...weekRange(monday) });
+      }
+      const weeklyMatch = path.match(/^\/api\/weekly-reports\/([0-9a-f-]+)(\/.*)?$/);
+      if (weeklyMatch) {
+        const reportId = weeklyMatch[1];
+        const sub = weeklyMatch[2] ?? '';
+        if (req.method === 'GET' && sub === '') {
+          const report = workbench.weekly.get(reportId);
+          return report ? json(res, 200, { report }) : json(res, 404, { error: 'weekly report not found' });
+        }
+        if (req.method === 'PATCH' && sub === '') {
+          const body = await readBody(req);
+          const content = body.content;
+          if (!isRecord(content) || typeof content.summary !== 'string') return json(res, 400, { error: 'content 缺少 summary 字段' });
+          try {
+            const report = workbench.weekly.update(reportId, Number(body.version), content as never);
+            return report ? json(res, 200, { report }) : json(res, 409, { error: '周报版本已变化或已发布' });
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
+        }
+        if (req.method === 'POST' && sub === '/regenerate') {
+          const report = workbench.weekly.get(reportId);
+          if (!report) return json(res, 404, { error: 'weekly report not found' });
+          try {
+            return json(res, 202, workbench.weekly.generate(report.customerId, report.weekStart, true));
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
+        }
+        if (req.method === 'POST' && sub === '/publish-preview') {
+          const body = await readBody(req);
+          try {
+            const parentPageID = String(body.parentPageID ?? process.env.ONES_WEEKLY_PARENT_PAGE_ID ?? '');
+            return json(res, 200, workbench.weekly.publishPreview(reportId, parentPageID));
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
+        }
+        if (req.method === 'POST' && sub === '/publish') {
+          const body = await readBody(req);
+          try {
+            const parentPageID = String(body.parentPageID ?? process.env.ONES_WEEKLY_PARENT_PAGE_ID ?? '');
+            const published = await workbench.weekly.publish(reportId, Number(body.version), parentPageID, String(body.approvalHash ?? ''));
+            return json(res, 200, { report: published });
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
+        }
+      }
+
+      // ── ONES Wiki 只读浏览（发布位置层级选择器的数据源） ──
+      if (req.method === 'GET' && path === '/api/ones-wiki/spaces') {
+        try { return json(res, 200, { spaces: await workbench.wiki.listSpaces() }); }
+        catch (error) { return json(res, 400, { error: (error as Error).message }); }
+      }
+      if (req.method === 'GET' && path === '/api/ones-wiki/pages') {
+        const spaceId = url.searchParams.get('space_id') ?? '';
+        const keyword = url.searchParams.get('q') ?? '';
+        try {
+          if (keyword) return json(res, 200, { pages: await workbench.wiki.searchPages(keyword) });
+          return json(res, 200, { pages: await workbench.wiki.listPages(spaceId) });
+        } catch (error) { return json(res, 400, { error: (error as Error).message }); }
       }
 
       // ── ONES Desk 必填字段契约（只读规则可见口；verify=1 实时核对选项 UUID 漂移） ──
@@ -980,6 +1068,12 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   });
   sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording));
   const cases = new CaseService(db, runtime.mcp);
+  const wiki = new WikiService(runtime.mcp);
+  // 工时注入：读已同步的工时登记（payload 缓存优先），生成路径不打实时 MCP。
+  const weekly = new WeeklyReportService(db, runtime.mcp, runtime, async (customerId: string) => {
+    const data = await sync.listCustomerWorkhours(customerId);
+    return { records: data.records.map((record) => ({ startTime: record.startTime, hours: record.hours, description: record.description, owner: record.owner?.name ?? undefined })) };
+  });
   const wecom = new WecomTodoService(db);
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
@@ -987,9 +1081,10 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   const resumeTimer = setTimeout(() => {
     hemorySegments.resumePending();
     drafts.resumePending();
+    weekly.resumePending();
   }, 5_000);
   resumeTimer.unref();
-  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, wecom, drafts }));
+  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, wecom, drafts, weekly, wiki }));
   server.on('close', () => {
     stopPortfolio();
     stopHemory();

@@ -88,6 +88,13 @@ csm-agent case generate <CRM客户ID>
 csm-agent case update <草稿ID> <版本> '{"title":"案例标题","fields":{}}'
 csm-agent case preview <草稿ID> <ONES父页面ID>
 csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <preview返回的批准哈希>
+csm-agent weekly-report generate <CRM客户ID> [YYYY-MM-DD] [--force] [--wait] # 实施周报：日期对齐周一，基于该客户本周全部信息生成四章节
+csm-agent weekly-report list/show <CRM客户ID|周报ID>
+csm-agent weekly-report update <周报ID> <版本> '{"summary":"...","accomplishments":[],"next_week_plan":[],"risks":[]}'
+csm-agent weekly-report preview <周报ID> <ONES父页面ID>
+csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <preview返回的批准哈希>
+csm-agent wiki spaces # ONES Wiki 页面组列表（发布位置层级选择器的数据源）
+csm-agent wiki pages --space <页面组ID> [--parent <页面ID>] # 页面树，按 parentID 过滤
 csm-agent sync [CRM客户ID]
 csm-agent hemory sync [YYYY-MM-DD]
 csm-agent hemory resegment --all
@@ -198,6 +205,8 @@ ONES_TEAM_ID=RDjYMhKq
 - ONES 工作项草稿宁缺毋滥，须同时满足语义判定与证据信号门控（门控检查证据片段的标题、分段摘要与转写）：**建议和反馈**仅当客户明确表达产品能力不满足（「标品还不支持」「希望支持/增加某功能」类诉求）；**工单**仅当客户明确指认缺陷（「这是个 bug」「不符合预期」类表述）；**运维工单**最谨慎，仅当明确提出运维操作请求（环境重装/数据迁移/配置/证书/服务器等基础设施操作）。方案讨论、workaround、客户内部流程、商务付费话题、泛泛不满一律不建工作项——相关内容保留在沟通记录与待办里。
 - “需求”草稿写入 ONES Desk「建议和反馈」；工单写入 ONES Desk「工单」；二者都必须绑定客户字段 `JrvswW8P`。工时只写当前客户已绑定的售后客户工作项，写工具按 ONES 实例工时模式（`get_manhour_mode`）精确绑定为 `add_workhour_in_simple_mode` / `add_workhour_in_summary_mode`，参数带上海时区偏移的 `startTime`；沟通记录必须绑定 CRM `_id`；沟通记录的服务开始/结束时间取当天未发布沟通的首尾时刻。ONES/CRM 的业务失败（ONES `result:"FAIL"`、CRM `save_status` 未落库）都会把草稿置为 `failed` 并可单独重试。
 - ONES 案例发布需要 `ONES_CASE_PARENT_PAGE_ID`，或由 CSM 在发布预览时提供父页面 ID。
+- 实施周报（客户详情「实施周报」tab）：按周一~周日自然周（上海时区）基于该客户本周全部信息（Hemory 片段、建议/工单/运维工单、私有云实例、工时、CRM 跟进、行动事项、风险评级）生成四章节（本周执行摘要/本周完成情况/下周工作计划/问题风险与阻塞）；③④ 章以本周沟通片段中的约定/承诺与问题/风险信号为主要证据，逐条标注来源，无证据不杜撰。计数类统计由代码确定性计算（「本周解决」为状态快照近似口径，周报中标注）。生成失败任务显式报错并支持一键再次生成（不受指纹幂等短路）。发布到 ONES Wiki 走 `preview → 确认 → publish` 参数哈希审批门，父页面通过页面组→页面树层级选择器选取（案例发布同款选择器，手填页面 ID 保留为兜底）。
+- ONES Wiki 只读浏览（`csm-agent wiki` / `GET /api/ones-wiki/*`）经 ONES MCP `search_for_spaces` / `get_list_of_space_pages` 实现，结果缓存 5 分钟。
 - 企业微信状态轮询每 15 分钟执行一次，只读取和更新本应用创建的待办。
 - 当前 ONES MCP 没有 Desk 专用工具，Desk 数据通过 ONESQL 按项目、工作项类型和「客户信息」字段读取。
 - Mac `.app` 仍是本地 WKWebView 壳；企业微信 H5 必须部署到可被企业微信访问的 HTTPS 域名。页面内所有确认/提示/输入对话框（草稿确认、重新生成、忽略归属、案例发布等）使用自绘 modal，不依赖原生 `confirm()/alert()/prompt()`（WKWebView 未实现 JS 对话框面板时它们会静默失败）。

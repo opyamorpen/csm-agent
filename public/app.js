@@ -229,6 +229,133 @@
   const alertDialog = (message) => showAppDialog({ message, cancelText: '关闭' });
   const promptDialog = (message, defaultValue = '') => showAppDialog({ message, withInput: true, defaultValue });
 
+  /** 异步按钮通用 loading：点击即禁用并显示进行中文案，结束（含失败）恢复，防止重复触发。 */
+  function withLoading(button, busyText, fn) {
+    button.onclick = async () => {
+      if (button.disabled) return;
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = busyText;
+      try { return await fn(); }
+      finally { button.disabled = false; button.textContent = original; }
+    };
+  }
+
+  // ── ONES Wiki 发布位置选择器（空间 → 页面树，懒加载展开；案例发布与周报发布共用） ──
+
+  /** 把平面页面列表组装成嵌套 <details> 树；初始只渲染根层，展开时挂子层。 */
+  function buildWikiTree(pages, onPick) {
+    const byParent = new Map();
+    for (const page of pages) {
+      if (!byParent.has(page.parentID)) byParent.set(page.parentID, []);
+      byParent.get(page.parentID).push(page);
+    }
+    const knownIds = new Set(pages.map((page) => page.id));
+    // 根 = parentID 为空，或 parentID 指向不存在的页面（删掉的父页，挂根层避免选不到）。
+    const roots = [
+      ...(byParent.get('') || []),
+      ...pages.filter((page) => page.parentID && !knownIds.has(page.parentID)),
+    ];
+    const renderLevel = (list, container) => {
+      for (const page of list) {
+        const children = byParent.get(page.id) || [];
+        const pick = el('button', 'quiet-command small', '选此页');
+        pick.type = 'button';
+        withLoading(pick, '选择中', async () => onPick(page));
+        let node;
+        if (children.length || page.canAttachChildPages) {
+          // summary 必须是 details 的直接子元素（HTML 规范），按钮放在 summary 内保持同行。
+          node = document.createElement('details');
+          node.className = 'wiki-tree-node';
+          const summary = el('summary', null, `${page.isArchived ? '[已归档] ' : ''}${page.title}`);
+          summary.append(pick);
+          node.append(summary);
+          if (children.length) {
+            const childContainer = el('div', 'wiki-tree-children');
+            node.append(childContainer);
+            let loaded = false;
+            node.addEventListener('toggle', () => {
+              if (node.open && !loaded) { loaded = true; renderLevel(children, childContainer); }
+            });
+          }
+        } else {
+          node = el('div', 'wiki-tree-node wiki-tree-leaf');
+          const head = el('div', 'wiki-tree-head');
+          head.append(el('span', 'wiki-tree-title', `${page.isArchived ? '[已归档] ' : ''}${page.title}`), pick);
+          node.append(head);
+        }
+        container.append(node);
+      }
+    };
+    const root = el('div', 'wiki-tree');
+    renderLevel(roots, root);
+    return root;
+  }
+
+  /**
+   * ONES Wiki 发布位置选择器：先选空间（页面组），再在页面树中逐层展开选父页面。
+   * 返回 Promise<{pageID, title} | null>；取消/关闭返回 null。
+   */
+  function pickWikiPage() {
+    return new Promise((resolve) => {
+      openWorkbenchModal('选择 ONES Wiki 发布位置');
+      const done = (value) => { closeWorkbenchModal(); resolve(value); };
+      const body = el('div', 'wiki-picker');
+      const spaceSelect = document.createElement('select');
+      spaceSelect.className = 'wiki-space-select';
+      spaceSelect.append(el('option', null, '加载页面组中…'));
+      const treeHost = el('div', 'wiki-tree-host');
+      const hint = el('div', 'cell-sub', '选择页面组后展示页面树；展开层级并点「选此页」确定父页面。');
+      const manual = el('button', 'quiet-command small', '直接输入页面 ID');
+      manual.type = 'button';
+      manual.onclick = async () => {
+        const pageID = (await promptDialog('ONES Wiki 父页面 ID：', '')) ?? '';
+        if (pageID) done({ pageID: pageID.trim(), title: pageID.trim() });
+      };
+      const cancel = el('button', 'quiet-command small', '取消');
+      cancel.type = 'button';
+      cancel.onclick = () => done(null);
+      const actions = el('div', 'row-actions');
+      actions.append(manual, cancel);
+      const pick = (page) => done({ pageID: page.id, title: page.title });
+      spaceSelect.onchange = async () => {
+        treeHost.innerHTML = '';
+        const spaceId = spaceSelect.value;
+        if (!spaceId) return;
+        treeHost.append(el('div', 'cell-sub', '加载页面树中…'));
+        try {
+          const data = await api(`/api/ones-wiki/pages?space_id=${encodeURIComponent(spaceId)}`);
+          treeHost.innerHTML = '';
+          const pages = data.pages || [];
+          if (!pages.length) treeHost.append(el('div', 'workspace-empty', '该页面组没有可见页面'));
+          else treeHost.append(buildWikiTree(pages, pick));
+        } catch (error) {
+          treeHost.innerHTML = '';
+          treeHost.append(el('div', 'workspace-empty', error.message));
+        }
+      };
+      body.append(hint, spaceSelect, treeHost, actions);
+      workbenchModalBody.append(body);
+      void (async () => {
+        try {
+          const data = await api('/api/ones-wiki/spaces');
+          const spaces = data.spaces || [];
+          spaceSelect.innerHTML = '';
+          spaceSelect.append(el('option', null, spaces.length ? '选择页面组…' : '（无可见页面组）'));
+          for (const space of spaces) {
+            const option = el('option', null, space.name);
+            option.value = space.id;
+            spaceSelect.append(option);
+          }
+        } catch (error) {
+          spaceSelect.innerHTML = '';
+          spaceSelect.append(el('option', null, '页面组加载失败'));
+          hint.textContent = `${error.message}；可直接输入页面 ID。`;
+        }
+      })();
+    });
+  }
+
   // ── chat rendering ─────────────────────────────────────────────
 
   function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); }
@@ -1746,6 +1873,257 @@
     return panel;
   }
 
+  // ── 实施周报 tab：周选择 → 生成（轮询）→ 展示/编辑/复制/发布 ──
+
+  /** 任意日期对齐到所在周周一（上海时区）。 */
+  function weekMondayOf(date) {
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.test(date) ? [Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10))] : null;
+    const at = parts ? new Date(Date.UTC(parts[0], parts[1], parts[2], 4)) : new Date(date);
+    if (Number.isNaN(at.getTime())) return null;
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const key = formatter.format(at);
+    const noon = new Date(`${key}T12:00:00+08:00`);
+    const back = (noon.getUTCDay() + 6) % 7;
+    return formatter.format(new Date(noon.getTime() - back * 86_400_000));
+  }
+
+  function weeklyStatsLine(stats) {
+    if (!stats) return '';
+    const workhours = stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`;
+    return `沟通 ${stats.communications} 次 · 新增建议 ${stats.newSuggestions} · 新增工单 ${stats.newTickets}（解决约 ${stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${stats.newOperations} · 工时 ${workhours}`;
+  }
+
+  function editWeeklyReport(customer, report, onUpdated) {
+    openWorkbenchModal('编辑实施周报');
+    const content = report.content || {};
+    const summary = inputField('① 本周执行摘要', content.summary, 'textarea');
+    const accomplishments = inputField('② 本周完成情况（每行一项：分类|日期|内容|来源，竖线分隔，可省略后两项）', (content.accomplishments || []).map((item) => [item.category, item.date, item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const plan = inputField('③ 下周工作计划（每行一项：内容|来源，可省略来源）', (content.next_week_plan || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const risks = inputField('④ 问题风险与阻塞（每行一项：内容|来源，可省略来源）', (content.risks || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const actions = el('div', 'row-actions');
+    const save = el('button', 'primary-command', '保存周报');
+    withLoading(save, '保存中…', async () => {
+      try {
+        const parseAccomplishment = (line) => {
+          const [category, date, ...rest] = line.split('|');
+          const text = rest.length > 1 ? rest.slice(0, -1).join('|') : rest.join('|');
+          const source = rest.length > 1 ? rest[rest.length - 1] : '';
+          return { category: (category || '').trim() || '其他', date: (date || '').trim(), text: text.trim(), source: (source || '').trim() };
+        };
+        const parsePair = (line) => {
+          const parts = line.split('|');
+          const source = parts.length > 1 ? parts.pop().trim() : '';
+          return { text: parts.join('|').trim(), source };
+        };
+        const nextContent = {
+          summary: summary.input.value.trim(),
+          accomplishments: accomplishments.input.value.split('\n').map((x) => x.trim()).filter(Boolean).map(parseAccomplishment),
+          next_week_plan: plan.input.value.split('\n').map((x) => x.trim()).filter(Boolean).map(parsePair),
+          risks: risks.input.value.split('\n').map((x) => x.trim()).filter(Boolean).map(parsePair),
+        };
+        const data = await api(`/api/weekly-reports/${report.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: report.version, content: nextContent }) });
+        closeWorkbenchModal();
+        onUpdated(data.report);
+      } catch (error) { await alertDialog(error.message); }
+    });
+    actions.append(save);
+    workbenchModalBody.append(summary.field, accomplishments.field, plan.field, risks.field, actions);
+  }
+
+  /**
+   * 轮询周报生成任务到终态。成功后刷新面板；失败展示错误卡片 + alertDialog + 「再次生成」入口。
+   * 返回最终 job（超时返回 null）。
+   */
+  async function pollWeeklyJob(panel, customer, weekStart, jobId) {
+    const notice = panel.querySelector('.weekly-notice');
+    for (let attempt = 0; attempt < 90; attempt++) {
+      const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
+      const job = (data.jobs || [])[0];
+      if (!job) throw new Error('生成任务不存在');
+      if (notice) notice.textContent = `周报生成中…（${job.status === 'running' ? '模型撰写中' : '排队中'}）`;
+      if (job.status === 'succeeded') {
+        if (notice) notice.remove();
+        await refreshWeeklyPanel(panel, customer, weekStart);
+        return job;
+      }
+      if (job.status === 'failed') {
+        if (notice) notice.remove();
+        renderWeeklyFailure(panel, customer, weekStart, job);
+        await alertDialog(`周报生成失败：${job.error || '未知原因'}\n\n可点击「再次生成」重试。`);
+        return job;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    if (notice) notice.textContent = '生成超时，任务仍在后台运行；稍后切换周可查看结果。';
+    return null;
+  }
+
+  function renderWeeklyFailure(panel, customer, weekStart, job) {
+    const host = panel.querySelector('.weekly-body');
+    host.innerHTML = '';
+    const card = el('div', 'weekly-failure');
+    card.append(el('strong', null, `周报生成失败（${formatDateTime(job.updatedAt)}）`));
+    card.append(el('p', null, job.error || '未知原因'));
+    const retry = el('button', 'primary-command small', '再次生成');
+    withLoading(retry, '重新生成中…', async () => {
+      try {
+        const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart, force: true }) });
+        if (!result.jobId) { await refreshWeeklyPanel(panel, customer, weekStart); return; }
+        renderWeeklyBody(panel, customer, weekStart);
+        const notice = panel.querySelector('.weekly-notice');
+        if (notice) notice.textContent = '周报生成中…（排队中）';
+        await pollWeeklyJob(panel, customer, weekStart, result.jobId);
+      } catch (error) { await alertDialog(error.message); }
+    });
+    card.append(retry);
+    host.append(card);
+  }
+
+  async function refreshWeeklyPanel(panel, customer, weekStart) {
+    const host = panel.querySelector('.weekly-body');
+    host.innerHTML = '';
+    host.append(el('div', 'cell-sub', '加载周报中…'));
+    try { await renderWeeklyReport(panel, customer, weekStart); }
+    catch (error) { host.innerHTML = ''; host.append(el('div', 'workspace-empty', error.message)); }
+  }
+
+  async function renderWeeklyReport(panel, customer, weekStart) {
+    const data = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`);
+    const report = (data.reports || []).find((item) => item.weekStart === weekStart);
+    const host = panel.querySelector('.weekly-body');
+    host.innerHTML = '';
+    if (!report) {
+      host.append(el('div', 'workspace-empty', `${weekStart} 这一周尚未生成周报；点击「生成周报」基于该客户本周全部数据创建。`));
+      return;
+    }
+    const statsLine = weeklyStatsLine(report.stats);
+    const card = el('article', 'weekly-report-card');
+    const head = el('div', 'weekly-report-head');
+    const statusBadge = report.status === 'published' ? badge('已发布', 'success') : badge(`草稿 v${report.version}`, 'warning');
+    head.append(el('strong', null, `${report.weekStart} ~ ${report.weekEnd} 实施周报`), statusBadge);
+    card.append(head);
+    if (statsLine) card.append(el('div', 'weekly-stats', statsLine));
+    card.append(sectionBlock('① 本周执行摘要', el('p', 'weekly-section', report.content.summary || '（空）')));
+    const accomplishments = el('ul', 'weekly-list');
+    for (const item of report.content.accomplishments || []) {
+      const li = el('li', null, `${item.date ? `${item.date} ` : ''}[${item.category}] ${item.text}${item.source ? `（${item.source}）` : ''}`);
+      accomplishments.append(li);
+    }
+    if (!(report.content.accomplishments || []).length) accomplishments.append(el('li', null, '（无条目）'));
+    card.append(sectionBlock('② 本周完成情况', accomplishments));
+    const plan = el('ol', 'weekly-list');
+    for (const item of report.content.next_week_plan || []) plan.append(el('li', null, `${item.text}${item.source ? `（${item.source}）` : ''}`));
+    if (!(report.content.next_week_plan || []).length) plan.append(el('li', null, '（无条目）'));
+    card.append(sectionBlock('③ 下周工作计划', plan));
+    const risks = el('ul', 'weekly-list');
+    for (const item of report.content.risks || []) risks.append(el('li', null, `${item.text}${item.source ? `（${item.source}）` : ''}`));
+    if (!(report.content.risks || []).length) risks.append(el('li', null, '（无条目）'));
+    card.append(sectionBlock('④ 问题风险与阻塞', risks));
+    if (report.publishedPageId) card.append(el('div', 'cell-sub', `已发布到 ONES Wiki 页面 ${report.publishedPageId}`));
+    const buttons = el('div', 'row-actions');
+    if (report.status === 'draft') {
+      const edit = el('button', 'quiet-command small', '编辑');
+      edit.onclick = () => editWeeklyReport(customer, report, () => refreshWeeklyPanel(panel, customer, weekStart));
+      buttons.append(edit);
+    }
+    const copy = el('button', 'quiet-command small', '复制 Markdown');
+    copy.onclick = async () => {
+      const lines = [`# ${customer.name} 实施周报（${report.weekStart} ~ ${report.weekEnd}）`, '',
+        '## 一、本周执行摘要', '', report.content.summary || '', '',
+        statsLine ? `> ${statsLine}` : '', '',
+        '## 二、本周完成情况', '',
+        ...(report.content.accomplishments || []).map((item) => `- [${item.category}]${item.date ? ` ${item.date}` : ''} ${item.text}${item.source ? `（${item.source}）` : ''}`), '',
+        '## 三、下周工作计划', '',
+        ...(report.content.next_week_plan || []).map((item, index) => `${index + 1}. ${item.text}${item.source ? `（${item.source}）` : ''}`), '',
+        '## 四、问题风险与阻塞', '',
+        ...(report.content.risks || []).map((item) => `- ${item.text}${item.source ? `（${item.source}）` : ''}`)];
+      try { await navigator.clipboard.writeText(lines.join('\n')); copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 Markdown'; }, 1500); }
+      catch (error) { await alertDialog(`复制失败：${error.message}`); }
+    };
+    if (report.status === 'draft') {
+      const publish = el('button', 'primary-command small', '发布到 Wiki');
+      withLoading(publish, '发布中…', async () => {
+        try {
+          const target = await pickWikiPage();
+          if (!target) return;
+          const preview = await api(`/api/weekly-reports/${report.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID: target.pageID }) });
+          if (!await confirmDialog(`确认将 ${report.weekStart} 周报发布到 ONES Wiki「${target.title}」下？\n\n${preview.args.content.slice(0, 800)}`)) return;
+          await api(`/api/weekly-reports/${report.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: report.version, parentPageID: target.pageID, approvalHash: preview.approvalHash }) });
+          await refreshWeeklyPanel(panel, customer, weekStart);
+        } catch (error) { await alertDialog(error.message); }
+      });
+      buttons.append(publish);
+      const regenerate = el('button', 'quiet-command small', '重新生成');
+      withLoading(regenerate, '重新生成中…', async () => {
+        try {
+          const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart, force: true }) });
+          renderWeeklyBody(panel, customer, weekStart);
+          const notice = panel.querySelector('.weekly-notice');
+          if (notice) notice.textContent = '周报生成中…（排队中）';
+          if (result.jobId) await pollWeeklyJob(panel, customer, weekStart, result.jobId);
+        } catch (error) { await alertDialog(error.message); }
+      });
+      buttons.append(regenerate);
+    }
+    buttons.append(copy);
+    card.append(buttons);
+    host.append(card);
+  }
+
+  function renderWeeklyBody(panel, customer, weekStart) {
+    const host = panel.querySelector('.weekly-body');
+    host.innerHTML = '';
+    host.append(el('div', 'cell-sub', '加载周报中…'));
+    void renderWeeklyReport(panel, customer, weekStart).catch((error) => {
+      host.innerHTML = '';
+      host.append(el('div', 'workspace-empty', error.message));
+    });
+  }
+
+  /** 实施周报 tab 面板：周选择（对齐周一）+ 生成按钮 + 已有周报列表 + 当前周展示。 */
+  function buildWeeklyPanel(customer) {
+    const panel = el('div', 'weekly-panel');
+    const toolbar = el('div', 'weekly-toolbar');
+    const weekLabel = el('label', 'weekly-week-label');
+    weekLabel.append(el('span', null, '周（自动对齐周一）'));
+    const weekInput = document.createElement('input');
+    weekInput.type = 'date';
+    const thisMonday = weekMondayOf(new Date().toISOString());
+    weekInput.value = thisMonday;
+    const apply = el('button', 'quiet-command small', '查看该周');
+    const generate = el('button', 'primary-command small', '生成周报');
+    const notice = el('div', 'weekly-notice hidden');
+    toolbar.append(weekLabel, weekInput, apply, generate);
+    const body = el('div', 'weekly-body');
+    panel.append(toolbar, notice, body);
+    const currentWeek = () => weekMondayOf(weekInput.value || thisMonday) || thisMonday;
+    apply.onclick = () => renderWeeklyBody(panel, customer, currentWeek());
+    weekInput.onchange = () => renderWeeklyBody(panel, customer, currentWeek());
+    withLoading(generate, '生成中…', async () => {
+      const weekStart = currentWeek();
+      try {
+        notice.classList.remove('hidden');
+        notice.textContent = '周报生成中…（排队中）';
+        const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart }) });
+        if (!result.jobId) {
+          notice.classList.add('hidden');
+          await refreshWeeklyPanel(panel, customer, weekStart);
+          return;
+        }
+        renderWeeklyBody(panel, customer, weekStart);
+        notice.classList.remove('hidden');
+        notice.textContent = '周报生成中…（排队中）';
+        await pollWeeklyJob(panel, customer, weekStart, result.jobId);
+      } catch (error) {
+        notice.classList.add('hidden');
+        await alertDialog(error.message);
+      }
+    });
+    renderWeeklyBody(panel, customer, currentWeek());
+    return panel;
+  }
+
+
   async function openCustomer(customerId) {
     activeCustomerId = customerId;
     activeView = 'customer';
@@ -1841,6 +2219,7 @@
     caseCommands.append(structuredCase);
     casePanel.append(caseCommands, drafts);
     addTab('cases', '客户案例', casePanel);
+    addTab('weekly_report', '实施周报', buildWeeklyPanel(c));
     addTab('actions', '行动事项', actions);
     addTab('timeline', '统一时间线', renderTimeline(timeline));
     customerOverview.append(tabBar, tabBody);
@@ -1900,10 +2279,11 @@
     publish.onclick = async () => {
       try {
         draft = await saveDraft();
-        const parentPageID = (await promptDialog('ONES 案例库父页面 ID：', '')) ?? '';
-        if (!parentPageID) return;
+        const target = await pickWikiPage();
+        if (!target) return;
+        const parentPageID = target.pageID;
         const preview = await api(`/api/case-drafts/${draft.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID }) });
-        if (!await confirmDialog(`确认将“${draft.title}”写入 ONES Wiki？\n\n${preview.args.content.slice(0, 800)}`)) return;
+        if (!await confirmDialog(`确认将“${draft.title}”发布到 ONES Wiki「${target.title}」下？\n\n${preview.args.content.slice(0, 800)}`)) return;
         draft = await api(`/api/case-drafts/${draft.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: draft.version, parentPageID, approvalHash: preview.approvalHash }) });
         closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases();
       } catch (error) { await alertDialog(error.message); }
