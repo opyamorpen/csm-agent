@@ -56,8 +56,6 @@
   const hemoryDate = document.getElementById('hemoryDate');
   const hemoryTimeFrom = document.getElementById('hemoryTimeFrom');
   const hemoryTimeTo = document.getElementById('hemoryTimeTo');
-  const hemoryStatus = document.getElementById('hemoryStatus');
-  const hemoryFilterCustomerInput = document.getElementById('hemoryFilterCustomer');
   const hemoryFilterPanel = document.getElementById('hemoryFilterPanel');
   const hemoryFilterToggle = document.getElementById('hemoryFilterToggle');
   const hemoryConfirmedToggle = document.getElementById('hemoryConfirmedToggle');
@@ -1015,19 +1013,15 @@
     }
   }
 
-  /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；customer 为解析后的 {id,name}；面板控件只是草稿，点「筛选」才生效。 */
-  let hemoryFilter = { status: 'pending', date: '', from: '', to: '', customer: null };
+  /** 已应用的筛选条件：默认 pending 全量（最近 7 天窗口由服务端控制）；面板只筛日期时间，状态走「已归属」切换、客户走归属栏；面板控件只是草稿，点「筛选」才生效。 */
+  let hemoryFilter = { status: 'pending', date: '', from: '', to: '' };
 
   /** 把已应用筛选同步到面板控件（打开面板时预填当前生效值）。 */
   function syncHemoryFilterDrafts() {
-    hemoryStatus.value = hemoryFilter.status;
     hemoryDate.value = hemoryFilter.date;
     hemoryTimeFrom.value = hemoryFilter.from;
     hemoryTimeTo.value = hemoryFilter.to;
-    hemoryFilterCustomerInput.value = hemoryFilter.customer?.name || '';
   }
-
-  const HEMORY_STATUS_LABELS = { pending: '待归属', all: '全部片段', confirmed: '已归属', ignored: '已忽略' };
 
   /** 「已归属」一键切换按钮的激活态与文案跟随当前已应用状态：已归属视图下提示再点切回。 */
   function updateHemoryConfirmedToggle() {
@@ -1036,36 +1030,29 @@
     hemoryConfirmedToggle.textContent = active ? '看待归属' : '已归属';
   }
 
-  /** 激活非默认筛选时在归属栏展示 chip（点击清除回到默认）。 */
+  /** 应用非默认日期筛选时在归属栏展示 chip（点击清除回到默认）。 */
   function updateHemoryFilterChip() {
-    const { status, date, from, to, customer } = hemoryFilter;
-    const active = status !== 'pending' || date || from || to || customer;
+    const { date, from, to } = hemoryFilter;
+    const active = Boolean(date || from || to);
     hemoryFilterChip.classList.toggle('hidden', !active);
     if (!active) return;
-    const parts = [customer?.name, HEMORY_STATUS_LABELS[status] ?? status].filter(Boolean);
-    if (date) parts.push(date);
+    const parts = [date];
     if (from || to) parts.push(`${from || '00:00'}–${to || '23:59'}`);
-    hemoryFilterChip.textContent = `✕ ${parts.join(' · ')}`;
+    hemoryFilterChip.textContent = `✕ ${parts.filter(Boolean).join(' · ')}`;
   }
 
   /** 校验草稿并返回错误信息；通过则把草稿升级为已应用筛选。 */
   async function applyHemoryFilter() {
-    const draft = { status: hemoryStatus.value, date: hemoryDate.value, from: hemoryTimeFrom.value, to: hemoryTimeTo.value };
+    const draft = { status: hemoryFilter.status, date: hemoryDate.value, from: hemoryTimeFrom.value, to: hemoryTimeTo.value };
     if ((draft.from || draft.to) && !draft.date) return alertDialog('时间段筛选需先选择日期');
     if (draft.from && draft.to && draft.from > draft.to) return alertDialog('开始时间不能晚于结束时间');
-    const customerInput = hemoryFilterCustomerInput.value.trim();
-    if (customerInput) {
-      const customer = customersCache.find((item) => customerInput === `${item.name} (${item.id})` || customerInput === item.id || customerInput === item.name);
-      if (!customer) return alertDialog('请从列表中选择一个唯一的 CRM 客户');
-      draft.customer = { id: customer.id, name: customer.name };
-    }
     hemoryFilter = draft;
     hemoryFilterPanel.classList.add('hidden');
     await loadHemoryInbox();
   }
 
   async function resetHemoryFilter() {
-    hemoryFilter = { status: 'pending', date: '', from: '', to: '', customer: null };
+    hemoryFilter = { status: hemoryFilter.status, date: '', from: '', to: '' };
     syncHemoryFilterDrafts();
     hemoryFilterPanel.classList.add('hidden');
     await loadHemoryInbox();
@@ -1076,7 +1063,6 @@
     updateHemoryFilterChip();
     updateHemoryConfirmedToggle();
     const params = new URLSearchParams({ status: hemoryFilter.status, limit: '500' });
-    if (hemoryFilter.customer) params.set('customer_id', hemoryFilter.customer.id);
     // 只选日期走整天 date 参数；填了时刻则按上海时区组装 since/until 闭区间（只填一边为开区间）。
     if (hemoryFilter.date && !hemoryFilter.from && !hemoryFilter.to) params.set('date', hemoryFilter.date);
     if (hemoryFilter.date && (hemoryFilter.from || hemoryFilter.to)) {
@@ -1329,7 +1315,7 @@
   document.getElementById('hemoryFilterApply').onclick = () => void applyHemoryFilter();
   document.getElementById('hemoryFilterReset').onclick = () => void resetHemoryFilter();
   hemoryFilterChip.onclick = () => void resetHemoryFilter();
-  // 一键已归属：在待归属 ↔ 已归属间切换，其他已应用条件（客户/日期）保留；再点切回待归属。
+  // 一键已归属：在待归属 ↔ 已归属间切换，其他已应用条件（日期）保留；再点切回待归属。
   hemoryConfirmedToggle.onclick = async () => {
     hemoryFilter.status = hemoryFilter.status === 'confirmed' ? 'pending' : 'confirmed';
     hemoryFilterPanel.classList.add('hidden');

@@ -159,9 +159,9 @@ test('hemory inbox exposes ignore and restore actions with incremental sync', ()
   // 不再默认把日期过滤器钉死为今天，由服务端 7 天窗口控制默认可见范围。
   assert.doesNotMatch(source, /hemoryDate\.value = chinaDate\(\)/);
 
-  // 同步按钮与状态选项：增量同步 + 已忽略状态筛选。
+  // 同步按钮：增量同步；状态下拉已随筛选面板裁撤移除（忽略片段恢复走行内「恢复」按钮）。
   assert.match(html, /增量同步/);
-  assert.match(html, /<option value="ignored">已忽略<\/option>/);
+  assert.doesNotMatch(html, /<option value="ignored">已忽略<\/option>/);
   assert.match(html, /id="hemoryIgnore"/);
 
   // 恢复走既有 attribution 接口（customerId=null 回到待归属）。
@@ -195,20 +195,23 @@ test('hemory inbox filters via an explicit panel: drafts apply on submit only', 
   assert.match(html, /id="hemoryFilterApply"[^>]*>筛选</);
   assert.match(html, /id="hemoryFilterReset"[^>]*>重置</);
   assert.ok(state, 'hemoryFilter state was not found');
-  assert.match(state, /status: 'pending', date: '', from: '', to: '', customer: null/);
+  assert.match(state, /status: 'pending', date: '', from: '', to: ''/);
   assert.ok(apply, 'applyHemoryFilter source was not found');
   assert.match(apply, /时间段筛选需先选择日期/);
   assert.match(apply, /开始时间不能晚于结束时间/);
-  // 客户筛选条件：复用归属 datalist，必须唯一解析才应用。
-  assert.match(html, /id="hemoryFilterCustomer" list="hemoryCustomerOptions"/);
-  assert.match(apply, /请从列表中选择一个唯一的 CRM 客户/);
-  // 应用 = 校验草稿 → 拷入已应用状态 → 收起面板 → 重载；重置回默认。
+  // 面板只保留日期时间筛选：客户与状态下拉控件必须整体移除（客户走归属栏、状态走「已归属」切换）。
+  assert.doesNotMatch(html, /id="hemoryFilterCustomer"/);
+  assert.doesNotMatch(html, /id="hemoryStatus"/);
+  assert.match(html, /id="hemoryFilterPanel"[\s\S]*?id="hemoryDate" type="date"/);
+  assert.doesNotMatch(source, /hemoryStatus/);
+  assert.doesNotMatch(source, /hemoryFilterCustomer/);
+  // 应用 = 校验草稿 → 拷入已应用状态 → 收起面板 → 重载；重置清日期但保留当前状态视图。
   assert.match(apply, /hemoryFilter = draft/);
   assert.match(apply, /hemoryFilterPanel\.classList\.add\('hidden'\)/);
   assert.ok(loader, 'loadHemoryInbox source was not found');
   // 列表只读已应用状态（hemoryFilter），面板草稿不实时生效；控件 onchange 自动重载必须移除。
   assert.match(loader, /status: hemoryFilter\.status/);
-  assert.match(loader, /customer_id', hemoryFilter\.customer\.id/);
+  assert.doesNotMatch(loader, /customer_id/);
   assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.from \|\| '00:00'\}:00\+08:00`/);
   assert.match(loader, /`\$\{hemoryFilter\.date\}T\$\{hemoryFilter\.to \|\| '23:59'\}:59\+08:00`/);
   assert.doesNotMatch(source, /hemoryStatus\.onchange/);
@@ -246,7 +249,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   const assignBar = html.match(/<div class="hemory-assign-bar">[\s\S]*?<\/div>/)?.[0];
   assert.ok(assignBar, 'hemory-assign-bar markup was not found');
   assert.doesNotMatch(assignBar, /hemoryStatus/);
-  assert.match(html, /id="hemoryFilterPanel"[\s\S]*?<select id="hemoryStatus"/);
+  assert.doesNotMatch(html, /<select id="hemoryStatus"/);
   assert.match(html, /placeholder="归属客户：搜索 CRM 客户"/);
   assert.match(html, /id="hemorySelectAll"/);
   assert.match(html, /id="hemorySelectedCount"/);
