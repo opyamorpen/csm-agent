@@ -60,6 +60,7 @@
   const hemoryFilterToggle = document.getElementById('hemoryFilterToggle');
   const hemoryConfirmedToggle = document.getElementById('hemoryConfirmedToggle');
   const hemoryFilterChip = document.getElementById('hemoryFilterChip');
+  const hemoryCustomerClear = document.getElementById('hemoryCustomerClear');
   const hemoryCustomer = document.getElementById('hemoryCustomer');
   const hemoryCustomerOptions = document.getElementById('hemoryCustomerOptions');
   const hemorySelectAll = document.getElementById('hemorySelectAll');
@@ -1457,6 +1458,10 @@
   const updateHemorySelection = bindFragmentSelection(hemoryFragmentList, hemorySelectedCount, hemorySelectAll);
   document.getElementById('hemoryAssign').onclick = () => void updateHemoryAttribution(false);
   document.getElementById('hemoryClear').onclick = () => void updateHemoryAttribution(true);
+  // ✕ 一键清除已选客户：只清输入（该值仅在点「归属所选片段」时消费，不影响已归属片段）；程序化赋值不触发 input 事件，需显式同步显隐。
+  const syncHemoryCustomerClear = () => hemoryCustomerClear.classList.toggle('hidden', !hemoryCustomer.value);
+  hemoryCustomerClear.onclick = () => { hemoryCustomer.value = ''; syncHemoryCustomerClear(); hemoryCustomer.focus(); };
+  hemoryCustomer.addEventListener('input', syncHemoryCustomerClear);
   document.getElementById('hemoryIgnore').onclick = async () => {
     const eventIds = selectedFragmentIds(hemoryFragmentList);
     if (!eventIds.length) return alertDialog('请先选择片段');

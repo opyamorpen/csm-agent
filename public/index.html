@@ -110,7 +110,10 @@
       </div>
       <div class="hemory-assign-bar">
           <button id="hemoryFilterChip" class="hemory-filter-chip hidden" type="button" title="点击清除筛选">✕</button>
-          <input id="hemoryCustomer" list="hemoryCustomerOptions" placeholder="归属客户：搜索 CRM 客户" />
+          <div class="hemory-customer-box">
+            <input id="hemoryCustomer" list="hemoryCustomerOptions" placeholder="归属客户：搜索 CRM 客户" />
+            <button id="hemoryCustomerClear" class="hemory-customer-clear hidden" type="button" title="清除已选客户" aria-label="清除已选客户">✕</button>
+          </div>
           <datalist id="hemoryCustomerOptions"></datalist>
           <label class="hemory-select-all"><input id="hemorySelectAll" type="checkbox" /><span>全选</span></label>
           <span id="hemorySelectedCount" class="hemory-selected-count"></span>

@@ -261,6 +261,15 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.doesNotMatch(assignBar, /hemoryStatus/);
   assert.doesNotMatch(html, /<select id="hemoryStatus"/);
   assert.match(html, /placeholder="归属客户：搜索 CRM 客户"/);
+  // ✕ 一键清除已选客户：按钮在输入框容器内、有值才显示；点按清空输入并聚焦回去，input 事件同步显隐。
+  const customerBox = html.match(/<div class="hemory-customer-box">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(customerBox, 'hemory-customer-box markup was not found');
+  assert.match(customerBox, /id="hemoryCustomer"/);
+  assert.match(customerBox, /id="hemoryCustomerClear"[^>]*type="button"[^>]*title="清除已选客户"/);
+  assert.match(source, /hemoryCustomerClear\.onclick = \(\) => \{ hemoryCustomer\.value = ''; syncHemoryCustomerClear\(\); hemoryCustomer\.focus\(\); \}/);
+  assert.match(source, /hemoryCustomer\.addEventListener\('input', syncHemoryCustomerClear\)/);
+  assert.match(styles, /\.hemory-customer-box \{[^}]*position: relative/);
+  assert.match(styles, /\.hemory-customer-clear \{[^}]*position: absolute/);
   assert.match(html, /id="hemorySelectAll"/);
   assert.match(html, /id="hemorySelectedCount"/);
   assert.match(html, /id="hemoryRegenerate"[^>]*>重新生成草稿</);

@@ -649,7 +649,11 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .agent-work-head .quiet-command.active { border-color: #2457c5; color: #174a9d; background: #eaf0fa; font-weight: 650; }
 /* 归属栏：单行操作条，全部控件垂直居中、统一 34px 高度；sticky 冻结在 tab 条下（z-index 低于 tab 条）。 */
 .hemory-assign-bar { position: sticky; top: 35px; z-index: 7; display: flex; align-items: center; gap: 8px; margin: 0 -18px 12px; padding: 10px 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: #f7f8fa; }
-.hemory-assign-bar input[list] { flex: 1 1 220px; min-width: 160px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
+/* 已选客户一键清除：容器承载 flex 尺寸，✕ 浮在输入框右侧（有值才显示）。 */
+.hemory-customer-box { position: relative; flex: 1 1 220px; min-width: 160px; }
+.hemory-assign-bar input[list] { width: 100%; min-height: 34px; padding: 6px 30px 6px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; font: inherit; }
+.hemory-customer-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 50%; background: #e4e7ec; color: #5d6875; font-size: 12px; line-height: 1; cursor: pointer; }
+.hemory-customer-clear:hover { background: #d3d8e0; color: #303843; }
 .hemory-select-all { display: flex; align-items: center; gap: 5px; min-height: 34px; white-space: nowrap; font-size: 13px; cursor: pointer; }
 .hemory-select-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .hemory-selected-count { min-height: 34px; display: flex; align-items: center; color: var(--muted); font-size: 13px; white-space: nowrap; }
@@ -776,6 +780,6 @@ footer { background: #fff; }
   .agent-work-head { align-items: flex-start; flex-direction: column; }
   .agent-work-head .row-actions { flex-wrap: wrap; }
   .hemory-assign-bar { top: 49px; flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
-  .hemory-assign-bar input[list] { flex: 1 1 100%; }
+  .hemory-customer-box { flex: 1 1 100%; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
 }
