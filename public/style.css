@@ -3,6 +3,8 @@
    两套主题必须定义同名变量全集（tests/ui.test.ts 双主题契约测试守护）。
    ══════════════════════════════════════════════════════════════════ */
 :root, [data-theme="light"] {
+  /* 布局：对话内容与输入区共用同一宽度，保证左右边缘对齐。 */
+  --chat-width: 860px;
   /* 表面 */
   --bg: #f1f4f8;
   --body-bg: linear-gradient(180deg, #f3f6fa 0%, #edf0f5 100%);
@@ -103,6 +105,8 @@
 }
 
 [data-theme="dark"] {
+  /* 布局：对话内容与输入区共用同一宽度，保证左右边缘对齐。 */
+  --chat-width: 860px;
   /* 表面 */
   --bg: #0a1120;
   --body-bg: radial-gradient(1100px 620px at 88% -12%, rgba(34, 211, 238, 0.10), rgba(34, 211, 238, 0) 55%),
@@ -369,12 +373,12 @@ main { flex: 1; overflow-y: auto; padding: 14px 18px; min-width: 0; }
 .session-item.archived .t { color: var(--muted); }
 
 /* conversation toolbar (share) */
-#conversationOps { display: flex; justify-content: flex-end; gap: 8px; margin: -4px auto 10px; max-width: 860px; padding: 0 4px; }
+#conversationOps { display: flex; justify-content: flex-end; gap: 8px; margin: -4px auto 10px; max-width: var(--chat-width); padding: 0 4px; }
 #conversationOps button { font-size: 12px; }
 
 /* customer context card */
 .customer-card {
-  max-width: 860px;
+  max-width: var(--chat-width);
   margin: 0 auto 12px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -398,7 +402,7 @@ main { flex: 1; overflow-y: auto; padding: 14px 18px; min-width: 0; }
 .cc-facts b { color: var(--text); font-weight: 600; }
 .cc-summary { margin-top: 6px; font-size: 12.5px; color: var(--text); white-space: pre-wrap; border-top: 1px dashed var(--border); padding-top: 6px; }
 
-#quickActions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; max-width: 860px; margin-left: auto; margin-right: auto; }
+#quickActions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; max-width: var(--chat-width); margin-left: auto; margin-right: auto; }
 .chip {
   padding: 5px 12px;
   border-radius: 999px;
@@ -443,7 +447,7 @@ main { flex: 1; overflow-y: auto; padding: 14px 18px; min-width: 0; }
 }
 .record-meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
 
-#messages { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+#messages { max-width: var(--chat-width); margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
 
 .msg { max-width: 78%; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
@@ -493,7 +497,7 @@ main { flex: 1; overflow-y: auto; padding: 14px 18px; min-width: 0; }
 
 footer { padding: 12px 18px; border-top: 1px solid var(--border); background: var(--panel); }
 
-#composer { max-width: 860px; margin: 0 auto; display: flex; gap: 10px; }
+#composer { width: 100%; max-width: var(--chat-width); margin: 0 auto; display: flex; gap: 10px; }
 #input {
   flex: 1;
   padding: 10px 14px;
@@ -516,17 +520,10 @@ footer { padding: 12px 18px; border-top: 1px solid var(--border); background: va
 }
 #send:hover { filter: brightness(1.07); }
 #send:disabled { opacity: 0.5; cursor: not-allowed; }
-#stop {
-  padding: 10px 20px;
-  border-radius: 10px;
-  border: 1px solid var(--danger-btn-border);
-  background: var(--danger-btn);
-  color: var(--on-accent);
-  font-size: 15px;
-  cursor: pointer;
-}
-#stop:hover { background: var(--danger-btn-hover); }
-#stop:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 对话进行中发送按钮变红色停止态（与空闲态同尺寸：border 用透明占位防跳动）。 */
+#send { border: 1px solid transparent; }
+#send.stopping { background: var(--danger-btn); border-color: var(--danger-btn-border); }
+#send.stopping:hover { background: var(--danger-btn-hover); filter: none; }
 
 .thinking { align-self: flex-start; color: var(--muted); font-size: 13px; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.4; } }

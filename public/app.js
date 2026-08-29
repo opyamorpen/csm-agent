@@ -2,7 +2,6 @@
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendEl = document.getElementById('send');
-  const stopEl = document.getElementById('stop');
   const statusEl = document.getElementById('status');
   const form = document.getElementById('composer');
   const sessionListEl = document.getElementById('sessionList');
@@ -590,16 +589,18 @@
     scrollDown();
   }
 
-  function setStopVisible(on) {
-    stopEl.classList.toggle('hidden', !on);
-    stopEl.disabled = false;
+  /** 发送按钮双态：空闲=「发送」提交表单，对话进行中=红色「停止」可中断本轮。 */
+  function setSendStopping(on) {
+    sendEl.textContent = on ? '停止' : '发送';
+    sendEl.classList.toggle('stopping', on);
+    sendEl.disabled = false;
   }
 
   function handleEvent(e) {
     if (!e) return;
     switch (e.type) {
       case 'user': addMessage('user', e.text); break;
-      case 'turn_start': busy = true; setThinking(true); startStreaming(); setStopVisible(true); break;
+      case 'turn_start': busy = true; setThinking(true); startStreaming(); setSendStopping(true); break;
       case 'text_delta': appendTextDelta(e.delta); break;
       case 'thinking_delta': appendThinkingDelta(e.delta); break;
       case 'thinking': settleThinking(); break;
@@ -617,8 +618,7 @@
         busy = false;
         setThinking(false);
         endStreaming();
-        setStopVisible(false);
-        sendEl.disabled = false;
+        setSendStopping(false);
         inputEl.disabled = false;
         inputEl.focus();
         // 停止会把挂起中的草稿自动按拒绝处理，旧确认卡不允许再交互。
@@ -2980,16 +2980,36 @@
 
   // ── composer ───────────────────────────────────────────────────
 
+  /** 请求服务端停止本轮对话；失败且仍处于 busy 才提示（如恰好已 turn_end，事件流会自然复位）。 */
+  async function stopTurn() {
+    if (!busy || !sessionId) return;
+    sendEl.disabled = true;
+    try {
+      await api(`/api/sessions/${sessionId}/stop`, { method: 'POST' });
+      setStatus('', '正在停止对话…');
+    } catch (error) {
+      sendEl.disabled = false;
+      if (busy) await alertDialog(error.message);
+    }
+  }
+
+  // 对话进行中发送按钮是「停止」：click 阶段拦截默认的表单提交，转投停止。
+  sendEl.addEventListener('click', (ev) => {
+    if (busy) {
+      ev.preventDefault();
+      stopTurn();
+    }
+  });
+
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const text = inputEl.value.trim();
     if (!text || busy || !sessionId) return;
     inputEl.value = '';
     busy = true;
-    sendEl.disabled = true;
     inputEl.disabled = true;
     setThinking(true);
-    setStopVisible(true);
+    setSendStopping(true);
     try {
       await fetch(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
@@ -2998,24 +3018,10 @@
       });
     } catch (err) {
       busy = false;
-      sendEl.disabled = false;
       inputEl.disabled = false;
       setThinking(false);
-      setStopVisible(false);
+      setSendStopping(false);
       addMessage('assistant', '发送失败: ' + err.message);
-    }
-  });
-
-  stopEl.addEventListener('click', async () => {
-    if (!busy || !sessionId) return;
-    stopEl.disabled = true;
-    try {
-      await api(`/api/sessions/${sessionId}/stop`, { method: 'POST' });
-      setStatus('', '正在停止对话…');
-    } catch (error) {
-      stopEl.disabled = false;
-      // 仍处于 busy 说明停止未生效（如恰好已 turn_end），等事件流自然复位即可。
-      if (busy) await alertDialog(error.message);
     }
   });
 

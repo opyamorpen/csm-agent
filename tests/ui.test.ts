@@ -1044,25 +1044,52 @@ test('customer overview data section renders count-only stat cards with status-c
   assert.match(styles, /\.stat-bar i \{/);
 });
 
-test('agent composer exposes a stop button wired to the session stop endpoint', () => {
+test('send button doubles as stop control while a turn is running', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
-  // 停止按钮必须 type=button（form 内缺省 type=submit 会误触发表单提交）。
-  assert.match(html, /<button id="stop" type="button" class="hidden">停止<\/button>/);
-  const handler = app.match(/stopEl\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
-  assert.ok(handler, 'stop click handler was not found');
-  assert.match(handler, /\/api\/sessions\/\$\{sessionId\}\/stop/);
-  // turn_start 显示、turn_end 隐藏：SSE 回放历史事件后刷新页面也能恢复出正确状态。
-  assert.match(app, /startStreaming\(\); setStopVisible\(true\)/);
-  assert.match(app, /setStopVisible\(false\)/);
+  // 发送/停止是同一个按钮：独立停止按钮已移除，composer 只剩 input + #send。
+  assert.doesNotMatch(html, /id="stop"/);
+  assert.match(html, /<button id="send" type="submit">发送<\/button>/);
+  // busy 时点击 #send 拦截表单提交，转投停止端点。
+  const click = app.match(/sendEl\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(click, 'send click interceptor was not found');
+  assert.match(click, /if \(busy\) \{/);
+  assert.match(click, /ev\.preventDefault\(\)/);
+  assert.match(click, /stopTurn\(\)/);
+  const stopper = app.match(/async function stopTurn[\s\S]*?\n  \}\n\n  \/\/ 对话进行中发送按钮是「停止」/)?.[0];
+  assert.ok(stopper, 'stopTurn source was not found');
+  assert.match(stopper, /\/api\/sessions\/\$\{sessionId\}\/stop/);
+  // 双态切换：文案 发送↔停止 + stopping class；submit 路径不再禁用 sendEl（busy 时它就是停止入口）。
+  const toggler = app.match(/function setSendStopping[\s\S]*?\n  \}/)?.[0];
+  assert.ok(toggler, 'setSendStopping source was not found');
+  assert.match(toggler, /sendEl\.textContent = on \? '停止' : '发送'/);
+  assert.match(toggler, /sendEl\.classList\.toggle\('stopping', on\)/);
+  // turn_start 进入停止态、turn_end 复位：SSE 回放历史事件后刷新页面也能恢复出正确状态。
+  assert.match(app, /startStreaming\(\); setSendStopping\(true\)/);
+  assert.match(app, /setSendStopping\(false\)/);
   // 停止后旧确认卡按钮禁用（服务端已按拒绝处理）。
   assert.match(app, /disablePendingConfirmCards\(\)/);
-  // 停止按钮样式仅用主题 token（双主题契约）。
-  assert.match(css, /#stop \{/);
-  assert.match(css, /background: var\(--danger-btn\)/);
-  assert.match(css, /#stop:hover \{ background: var\(--danger-btn-hover\); \}/);
+  // 停止态样式仅用主题 token（双主题契约）；透明 border 占位防尺寸跳动。
+  assert.doesNotMatch(css, /#stop /);
+  assert.match(css, /#send\.stopping \{ background: var\(--danger-btn\); border-color: var\(--danger-btn-border\); \}/);
+  assert.match(css, /#send\.stopping:hover \{ background: var\(--danger-btn-hover\); filter: none; \}/);
+});
+
+test('composer width matches the conversation column via shared token', () => {
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 对话列与输入区共用 --chat-width（两块主题都定义），左右边缘严格对齐。
+  const lightTokens = css.match(/:root, \[data-theme="light"\] \{[\s\S]*?\n\}/)?.[0];
+  const darkTokens = css.match(/\[data-theme="dark"\] \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(lightTokens && darkTokens, 'theme token blocks were not found');
+  assert.match(lightTokens, /--chat-width: 860px/);
+  assert.match(darkTokens, /--chat-width: 860px/);
+  assert.match(css, /#messages \{ max-width: var\(--chat-width\)/);
+  assert.match(css, /#composer \{ width: 100%; max-width: var\(--chat-width\)/);
+  assert.doesNotMatch(css, /#messages[^\n]*860px/);
+  assert.doesNotMatch(css, /#composer[^\n]*860px/);
 });
 
 test('agent replies stream as deltas and thinking collapses into a fold', () => {
@@ -1075,7 +1102,7 @@ test('agent replies stream as deltas and thinking collapses into a fold', () => 
   assert.match(dispatch, /case 'thinking_delta': appendThinkingDelta\(e\.delta\)/);
   assert.match(dispatch, /case 'text': endStreaming\(\); addMessage\('assistant', e\.text\)/);
   assert.match(dispatch, /case 'turn_end':[\s\S]*?addTokenUsage\(e\.usage\)/);
-  const streaming = app.match(/function startStreaming[\s\S]*?\n  function setStopVisible/)?.[0];
+  const streaming = app.match(/function startStreaming[\s\S]*?\n  function setSendStopping/)?.[0];
   assert.ok(streaming, 'streaming helpers were not found');
   assert.match(streaming, /function appendTextDelta/);
   assert.match(streaming, /function appendThinkingDelta/);
