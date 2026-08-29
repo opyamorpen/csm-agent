@@ -57,16 +57,16 @@ test('draft inbox marks regenerating batches with a badge and disables all actio
   assert.match(styles, /\.draft-regenerating::before \{[^}]*animation: draft-spin/);
 });
 
-test('draft inbox separates fully stale batches into a dedicated tab without batch-level buttons', () => {
+test('draft inbox separates archived items into a dedicated tab without batch-level buttons', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
   const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
   assert.ok(renderer, 'loadDraftBatches source was not found');
-  // 双 tab：待处理与纯已作废/已忽略批次分列，选中态跨重渲染保持，只渲染当前组。
+  // 双 tab：待处理与已忽略/已作废条目分列，选中态跨重渲染保持，只渲染当前组。
   assert.match(renderer, /actionableItemCount/);
-  assert.match(renderer, /activeDraftTab === 'archived' \? archived : actionable/);
-  assert.match(renderer, /还没有已忽略\/已作废批次/);
+  assert.match(renderer, /activeDraftTab === 'archived' \? archivedSections : actionable/);
+  assert.match(renderer, /还没有已忽略\/已作废草稿/);
   assert.match(renderer, /还没有待处理草稿/);
   assert.match(source, /let activeDraftTab = 'pending';/);
   // 批次级「确认所选/忽略批次」已删除：确认/忽略由单卡按钮与底部浮动条承担，批次头部只留重新生成。
@@ -105,11 +105,27 @@ test('draft subtab counts are item-level and share the pending badge source', ()
   assert.match(renderer, /draftPendingCount\.textContent = pending \|\| '';/);
   assert.match(renderer, /draftTabPending\.textContent = pending \? `待处理（\$\{pending\}）` : '待处理';/);
   // 已忽略/已作废 tab 同一原则：数字 = 该 tab 里渲染的卡片（条目）数。
-  assert.match(renderer, /const archivedCount = archived\.reduce\(\(sum, batch\) => sum \+ \(batch\.items \|\| \[\]\)\.length, 0\)/);
+  assert.match(renderer, /const archivedCount = archivedSections\.reduce\(\(sum, batch\) => sum \+ archivedItemsOf\(batch\)\.length, 0\)/);
   assert.match(renderer, /draftTabArchived\.textContent = archivedCount \? `已忽略\/已作废（\$\{archivedCount\}）` : '已忽略\/已作废';/);
   // 旧的按批计数口径必须整体移除。
   assert.doesNotMatch(renderer, /actionable\.length \? `待处理/);
   assert.doesNotMatch(renderer, /archived\.length \? `已忽略/);
+});
+
+test('draft tabs render item-level so dismissed items leave the pending list', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // 忽略弹窗承诺「不再出现在待处理列表」：混合批次（仍有待处理兄弟条目）中被忽略/作废的条目
+  // 也必须立即离开待处理 tab——分栏与批内渲染都按条目，不按批次。
+  assert.match(renderer, /const archivedItemsOf = \(batch\) => \(batch\.items \|\| \[\]\)\.filter\(\(item\) => \['dismissed', 'stale'\]\.includes\(item\.status\)\)/);
+  assert.match(renderer, /const archivedSections = batches\.filter\(\(batch\) => archivedItemsOf\(batch\)\.length > 0\)/);
+  assert.match(renderer, /const items = activeDraftTab === 'archived' \? archivedItemsOf\(batch\)\s*\n\s*: \(batch\.items \|\| \[\]\)\.filter\(\(item\) => !\['dismissed', 'stale'\]\.includes\(item\.status\)\)/);
+  assert.match(renderer, /for \(const item of items\) \{/);
+  assert.ok(!renderer.includes('for (const item of batch.items || [])'), 'unfiltered in-batch item rendering should be gone');
+  // 重新生成入口收敛到待处理 tab：在已忽略 tab 对混合批次整批重新生成会误作废待处理的兄弟条目。
+  assert.match(renderer, /hasBlockingErrors \|\| activeDraftTab === 'pending'\)\) \{/);
 });
 
 test('draft inbox renders persistent failed generation jobs with fragment details', () => {

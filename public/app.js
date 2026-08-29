@@ -1492,7 +1492,7 @@
     } catch (error) { alertDialog(error.message); }
   }
 
-  /** 忽略单条草稿（单卡忽略与浮动条批量忽略共用）：确认后软删除，批次状态由服务端刷新。 */
+  /** 单卡忽略入口（浮动条批量忽略是独立内联循环，不经过这里）：确认后软删除，批次状态由服务端刷新。 */
   async function ignoreDraftItem(item) {
     if (!await confirmDialog(`忽略草稿「${item.title}」？忽略后不再出现在待处理列表（已写入项不受影响）。`)) return false;
     try { await api(`/api/draft-items/${item.id}/dismiss`, { method: 'POST' }); return true; }
@@ -1538,10 +1538,11 @@
     // 待处理口径统一为草稿条目数（可处理卡片数）：一个批次（客户×天）含多条草稿，
     // 按批计数会让数字和卡片对不上；顶部角标、二级 tab、侧边栏 Agent 角标同一来源。
     const actionableCount = (batch) => batch.actionableItemCount ?? (batch.items || []).filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
-    // 纯已作废/已忽略批次（actionableItemCount=0）与待处理批次分列两个 tab，互不混排：
-    // 这些卡片 checkbox 被禁用且不再需要处理，留在待处理列表只会让「选不中」像故障。
+    // 两个 tab 都按条目渲染：待处理 tab 只显示可处理卡片（忽略/作废即从列表消失，数字=卡片数）；
+    // 已忽略 tab 显示批内已忽略/已作废条目，混合批次在两个 tab 各出现一次、各渲染自己的子集。
+    const archivedItemsOf = (batch) => (batch.items || []).filter((item) => ['dismissed', 'stale'].includes(item.status));
     const actionable = batches.filter((batch) => actionableCount(batch) > 0);
-    const archived = batches.filter((batch) => !actionable.includes(batch));
+    const archivedSections = batches.filter((batch) => archivedItemsOf(batch).length > 0);
     const pending = actionable.reduce((sum, batch) => sum + actionableCount(batch), 0);
     draftPendingCount.textContent = pending || '';
     updateAgentNavCount();
@@ -1552,11 +1553,11 @@
     for (const tab of document.querySelectorAll('.draft-subtab')) tab.classList.toggle('active', tab.dataset.draftTab === activeDraftTab);
     draftTabPending.textContent = pending ? `待处理（${pending}）` : '待处理';
     // 已忽略/已作废 tab 同一原则：数字 = 该 tab 里渲染的卡片（条目）数。
-    const archivedCount = archived.reduce((sum, batch) => sum + (batch.items || []).length, 0);
+    const archivedCount = archivedSections.reduce((sum, batch) => sum + archivedItemsOf(batch).length, 0);
     draftTabArchived.textContent = archivedCount ? `已忽略/已作废（${archivedCount}）` : '已忽略/已作废';
     if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
-    const visible = activeDraftTab === 'archived' ? archived : actionable;
-    if (!visible.length) return draftBatchList.append(el('div', 'workspace-empty', activeDraftTab === 'archived' ? '还没有已忽略/已作废批次' : '还没有待处理草稿'));
+    const visible = activeDraftTab === 'archived' ? archivedSections : actionable;
+    if (!visible.length) return draftBatchList.append(el('div', 'workspace-empty', activeDraftTab === 'archived' ? '还没有已忽略/已作废草稿' : '还没有待处理草稿'));
     for (const batch of visible) {
       const section = el('section', 'draft-batch');
       const head = el('div', 'draft-batch-head');
@@ -1569,7 +1570,9 @@
       // 批次级「确认所选/忽略批次」已由单卡按钮 + 底部浮动条承担（整批忽略走 CLI draft dismiss），头部只留重新生成。
       // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
       const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
-      if (!batch.regenerating && (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch))) {
+      // 整批重新生成收敛到待处理 tab：已忽略 tab 展示的可能是混合批次的归档子集，
+      // 从那里整批重新生成会误作废仍在待处理的兄弟条目（stale/partial/failed 或阻断批次仍保留该出口）。
+      if (!batch.regenerating && (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || activeDraftTab === 'pending')) {
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.type = 'button';
         regenerate.onclick = async () => {
@@ -1585,7 +1588,11 @@
       }
       head.append(title, headActions);
       section.append(head);
-      for (const item of batch.items || []) {
+      // 条目级渲染：待处理 tab 剔除已忽略/作废卡片（忽略即从列表消失，兑现确认弹窗承诺），
+      // 已忽略 tab 只渲染已忽略/作废卡片；written 条目已被服务端剔除（include=written 才下发）。
+      const items = activeDraftTab === 'archived' ? archivedItemsOf(batch)
+        : (batch.items || []).filter((item) => !['dismissed', 'stale'].includes(item.status));
+      for (const item of items) {
         // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing 或批次重新生成中）点击无效，仅去掉手型提示。
         const row = el('label', 'draft-item');
         const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id; selector.dataset.batchId = batch.id;
