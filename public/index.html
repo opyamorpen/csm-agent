@@ -136,6 +136,11 @@
         <div class="agent-work-head"><div><h1>Hemory 草稿箱</h1><p>编辑、校验并批量确认</p></div><button id="refreshDrafts" class="quiet-command">刷新</button></div>
         <div id="draftGenerationNotice" class="draft-generation-notice hidden"><span class="spinner"></span><span id="draftGenerationText"></span></div>
         <div id="draftFailedJobs" class="draft-failed-jobs hidden"></div>
+        <!-- 二级 tab：待处理批次与纯已忽略/已作废批次分列，互不混排；计数由 JS 写进按钮文案。 -->
+        <div class="draft-subtabs" role="tablist" aria-label="草稿箱分组">
+          <button id="draftTabPending" class="draft-subtab active" data-draft-tab="pending" type="button">待处理</button>
+          <button id="draftTabArchived" class="draft-subtab" data-draft-tab="archived" type="button">已忽略/已作废</button>
+        </div>
         <div id="draftBatchList" class="draft-batch-list"></div>
       </section>
     </main>

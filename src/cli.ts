@@ -161,7 +161,9 @@ function help(): void {
     （按天强制重生成：片段决定要重建的「客户+上海日」，各天全部已确认片段参与，
      当天旧草稿作废；--wait 轮询生成任务到终态。已写入草稿消费过的片段不再被
      同类型重复提案——全部消费时任务以备注收尾，不产出新草稿）
-  csm-agent drafts [客户ID或名称] [--all] [--json]
+  csm-agent drafts [客户ID或名称] [--archived|--all] [--json]
+    （默认只列待处理批次；--archived 只看纯已忽略/已作废批次，
+     与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图）
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
   csm-agent draft regenerate <批次ID>
@@ -750,16 +752,26 @@ function draftTypeLabel(type: string): string {
 }
 
 async function showDrafts(rawArgs: string[]): Promise<void> {
-  // --all 与草稿箱 Web 端显示契约一致：默认隐藏已写入草稿，--all 恢复全量（诊断/对账用）。
+  // 显示契约与 Web 草稿箱双 tab 一致：默认只列待处理批次（剔除纯已忽略/已作废），
+  // --archived 只看纯已忽略/已作废批次；--all 恢复含已写入的全量视图（诊断/对账用）。
   const includeAll = rawArgs.includes('--all');
-  const customerInput = rawArgs.filter((arg) => arg !== '--all').join(' ').trim();
+  const archivedOnly = rawArgs.includes('--archived');
+  if (includeAll && archivedOnly) throw new Error('--archived 与 --all 不能同时使用');
+  const customerInput = rawArgs.filter((arg) => arg !== '--all' && arg !== '--archived').join(' ').trim();
   const customer = customerInput ? await resolveCustomer(customerInput) : null;
   const query = `${customer ? `customer_id=${encodeURIComponent(customer.id)}` : ''}${customer && includeAll ? '&' : ''}${includeAll ? 'include=written' : ''}`;
   const body = await request<any>(`/api/draft-batches${query ? `?${query}` : ''}`);
-  if (jsonOutput) return print(body.batches);
-  const rows = (body.batches ?? []).flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
+  // 分组口径与 Web 端一致：actionableItemCount（服务端装饰）缺失时按条目状态本地回退。
+  const actionableOf = (batch: any) => batch.actionableItemCount ?? (batch.items ?? []).filter((item: any) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
+  const batches = (body.batches ?? []).filter((batch: any) => includeAll || (archivedOnly ? actionableOf(batch) === 0 : actionableOf(batch) > 0));
+  if (jsonOutput) return print(batches);
+  const rows = batches.flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
     customerId: item.customerId, type: item.type, status: item.status, version: item.version, target: item.targetObject || '', title: item.title })));
-  if (!rows.length) console.log(includeAll ? '没有任何草稿批次' : '没有待处理草稿（csm-agent drafts --all 查看全部）');
+  if (!rows.length) {
+    if (includeAll) console.log('没有任何草稿批次');
+    else if (archivedOnly) console.log('没有已忽略/已作废批次（csm-agent drafts 查看待处理，drafts --all 查看全部）');
+    else console.log('没有待处理草稿（csm-agent drafts --archived 查看已忽略/已作废，--all 查看全部）');
+  }
   else console.table(rows);
 }
 

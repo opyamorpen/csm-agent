@@ -67,6 +67,8 @@
   const hemorySelectedCount = document.getElementById('hemorySelectedCount');
   const hemoryFragmentList = document.getElementById('hemoryFragmentList');
   const draftBatchList = document.getElementById('draftBatchList');
+  const draftTabPending = document.getElementById('draftTabPending');
+  const draftTabArchived = document.getElementById('draftTabArchived');
   const draftFailedJobs = document.getElementById('draftFailedJobs');
   const draftGenerationNotice = document.getElementById('draftGenerationNotice');
   const draftGenerationText = document.getElementById('draftGenerationText');
@@ -110,7 +112,7 @@
   let archivedExpanded = false;
   const draftJobTracking = new Map();
   let draftJobTimer = null;
-  let draftArchivedExpanded = false;
+  let activeDraftTab = 'pending';
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -1369,28 +1371,29 @@
     updateAgentNavCount();
     await renderDraftFailedJobs();
     draftBatchList.innerHTML = '';
-    if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
-    // 纯已作废/已忽略批次默认折叠成一行摘要（点击展开，展开态在整表重渲染间保持）：
-    // 这些卡片 checkbox 被禁用且不再需要处理，留在列表里只会让「选不中」像故障。
+    // 纯已作废/已忽略批次（actionableItemCount=0）与待处理批次分列两个 tab，互不混排：
+    // 这些卡片 checkbox 被禁用且不再需要处理，留在待处理列表只会让「选不中」像故障。
     const actionable = batches.filter((batch) => (batch.actionableItemCount ?? batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length) > 0);
     const archived = batches.filter((batch) => !actionable.includes(batch));
-    if (archived.length) {
-      const row = el('button', 'draft-archive-toggle');
-      row.type = 'button';
-      row.textContent = draftArchivedExpanded ? `收起已作废/已忽略批次（${archived.length} 个）` : `已作废/已忽略批次（${archived.length} 个），点击展开`;
-      row.onclick = () => { draftArchivedExpanded = !draftArchivedExpanded; void loadDraftBatches(); };
-      draftBatchList.append(row);
-    }
-    for (const batch of (draftArchivedExpanded ? [...actionable, ...archived] : actionable)) {
+    for (const tab of document.querySelectorAll('.draft-subtab')) tab.classList.toggle('active', tab.dataset.draftTab === activeDraftTab);
+    draftTabPending.textContent = actionable.length ? `待处理（${actionable.length}）` : '待处理';
+    draftTabArchived.textContent = archived.length ? `已忽略/已作废（${archived.length}）` : '已忽略/已作废';
+    if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
+    const visible = activeDraftTab === 'archived' ? archived : actionable;
+    if (!visible.length) return draftBatchList.append(el('div', 'workspace-empty', activeDraftTab === 'archived' ? '还没有已忽略/已作废批次' : '还没有待处理草稿'));
+    for (const batch of visible) {
       const section = el('section', 'draft-batch');
       const head = el('div', 'draft-batch-head');
       const customer = customersCache.find((item) => item.id === batch.customerId);
       const title = el('div'); title.append(el('strong', null, customer?.name || batch.customerId), el('div', 'cell-sub', `${formatDateTime(batch.updatedAt)} · ${batch.generator} · ${batch.status}`));
       const headActions = el('div', 'row-actions');
-      const confirmButton = el('button', 'primary-command small', '确认所选草稿');
-      confirmButton.type = 'button';
-      confirmButton.onclick = () => confirmDraftBatch(batch, section);
-      headActions.append(confirmButton);
+      // 已忽略/已作废批次：条目全部禁用，确认与忽略按钮不再出现；重新生成是找回内容的出口，保留。
+      if (!archived.includes(batch)) {
+        const confirmButton = el('button', 'primary-command small', '确认所选草稿');
+        confirmButton.type = 'button';
+        confirmButton.onclick = () => confirmDraftBatch(batch, section);
+        headActions.append(confirmButton);
+      }
       // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
       const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
       if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch)) {
@@ -1407,8 +1410,8 @@
         };
         headActions.append(regenerate);
       }
-      // 忽略批次：作废/阻断批次不需要重生成时的软删除出口（已写入项不受影响）。
-      if ((batch.items || []).some((item) => !['written', 'writing'].includes(item.status))) {
+      // 忽略批次：作废/阻断批次不需要重生成时的软删除出口（已写入项不受影响）；纯作废批次已是终态，不再提供。
+      if (!archived.includes(batch) && (batch.items || []).some((item) => !['written', 'writing'].includes(item.status))) {
         const dismiss = el('button', 'quiet-command small', '忽略批次');
         dismiss.type = 'button';
         dismiss.onclick = async () => {
@@ -1535,6 +1538,12 @@
   }
 
   for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.onclick = () => void showAgentMode(tab.dataset.agentMode);
+  // 草稿箱二级 tab：待处理 / 已忽略/已作废 分列；切换后整表重渲染（选中 tab 态跨重渲染保持）。
+  for (const tab of document.querySelectorAll('.draft-subtab')) tab.onclick = () => {
+    if (activeDraftTab === tab.dataset.draftTab) return;
+    activeDraftTab = tab.dataset.draftTab;
+    void loadDraftBatches();
+  };
   // 筛选面板：打开时预填当前已应用筛选；草稿不实时生效，点「筛选」应用、点「重置」回默认。
   hemoryFilterToggle.onclick = () => {
     const opening = hemoryFilterPanel.classList.contains('hidden');

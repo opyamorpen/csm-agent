@@ -160,17 +160,23 @@ test('draft review prints structured display fields with raw JSON behind --json'
   assert.match(listing, /target: item\.targetObject \|\| ''/);
 });
 
-test('drafts listing hides written items by default and --all restores the full view', () => {
+test('drafts listing hides written items by default, --archived isolates fully dismissed batches, --all restores the full view', () => {
   const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
   const listing = source.match(/async function showDrafts[\s\S]*?\n}\n\nasync function editBatchItems/)?.[0];
   const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
 
-  // 显示契约：CLI 与 Web 草稿箱一致，默认隐藏已写入草稿；--all 携带 include=written 查看全量。
+  // 显示契约：CLI 与 Web 草稿箱双 tab 一致——默认只列待处理批次（隐藏已写入与纯已忽略/已作废），
+  // --archived 只看纯已忽略/已作废批次，--all 携带 include=written 查看全量。
   assert.ok(listing, 'showDrafts source was not found');
   assert.match(listing, /rawArgs\.includes\('--all'\)/);
+  assert.match(listing, /rawArgs\.includes\('--archived'\)/);
+  assert.match(listing, /--archived 与 --all 不能同时使用/);
   assert.match(listing, /include=written/);
+  assert.match(listing, /actionableOf\(batch\) === 0/);
+  assert.match(listing, /actionableOf\(batch\) > 0/);
   assert.match(listing, /没有待处理草稿/);
-  assert.match(source, /csm-agent drafts \[客户ID或名称\] \[--all\] \[--json\]/);
+  assert.match(listing, /没有已忽略\/已作废批次/);
+  assert.match(source, /csm-agent drafts \[客户ID或名称\] \[--archived\|--all\] \[--json\]/);
   const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string; api: string[] }>;
   assert.ok(capabilities.some((item) => item.command === 'drafts' && item.api.includes('/api/draft-batches?include=written')));
   // 服务端同一契约：默认剔除 written 项与全写入批次，include=written 恢复全量。

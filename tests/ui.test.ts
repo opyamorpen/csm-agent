@@ -39,16 +39,30 @@ test('draft inbox exposes regenerate control and operations label', () => {
   assert.match(source, /operations: '运维工单'/);
 });
 
-test('draft inbox collapses fully stale batches and exposes dismiss control', () => {
+test('draft inbox separates fully stale batches into a dedicated tab and exposes dismiss control', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+  const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
   assert.ok(renderer, 'loadDraftBatches source was not found');
-  // 纯已作废/已忽略批次折叠成一行摘要按钮，展开态跨重渲染保持。
+  // 双 tab：待处理与纯已作废/已忽略批次分列，选中态跨重渲染保持，只渲染当前组。
   assert.match(renderer, /actionableItemCount/);
-  assert.match(renderer, /draftArchivedExpanded/);
-  assert.match(renderer, /已作废\/已忽略批次/);
-  assert.match(renderer, /draft-archive-toggle/);
+  assert.match(renderer, /activeDraftTab === 'archived' \? archived : actionable/);
+  assert.match(renderer, /还没有已忽略\/已作废批次/);
+  assert.match(renderer, /还没有待处理草稿/);
+  assert.match(source, /let activeDraftTab = 'pending';/);
+  // 已忽略/已作废批次的确认/忽略按钮不再渲染（条目全禁用，两按钮无意义）。
+  assert.match(renderer, /if \(!archived\.includes\(batch\)\) \{\s*const confirmButton/);
+  assert.match(renderer, /!archived\.includes\(batch\) && \(batch\.items \|\| \[\]\)\.some/);
+  // tab 按钮：index.html 提供两个 data-draft-tab，JS 绑定点击切换并整表重渲染。
+  assert.match(page, /data-draft-tab="pending"/);
+  assert.match(page, /data-draft-tab="archived"/);
+  assert.match(page, /id="draftTabPending" class="draft-subtab active"/);
+  assert.match(renderer, /querySelectorAll\('\.draft-subtab'\)\) tab\.classList\.toggle\('active', tab\.dataset\.draftTab === activeDraftTab\)/);
+  assert.match(source, /activeDraftTab = tab\.dataset\.draftTab;\s*void loadDraftBatches\(\);/);
+  // 旧折叠方案彻底移除。
+  assert.ok(!source.includes('draftArchivedExpanded'), 'draftArchivedExpanded should be gone');
+  assert.ok(!source.includes('draft-archive-toggle'), 'draft-archive-toggle should be gone');
   // 忽略批次：软删除出口，已写入项不受影响。
   assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/dismiss/);
   assert.match(renderer, /忽略后未写入的草稿不再出现在待处理列表/);
@@ -56,7 +70,8 @@ test('draft inbox collapses fully stale batches and exposes dismiss control', ()
   assert.match(renderer, /item\.statusLabel \|\| item\.status/);
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   assert.match(styles, /\.draft-item-disabled \{ cursor: default; background: #f7f8fa; opacity: 0\.62; \}/);
-  assert.match(styles, /\.draft-archive-toggle \{/);
+  assert.match(styles, /\.draft-subtab \{/);
+  assert.match(styles, /\.draft-subtab\.active \{[^}]*border-bottom-color: #2457c5/);
 });
 
 test('draft inbox renders persistent failed generation jobs with fragment details', () => {

@@ -711,9 +711,11 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .draft-errors { margin: 7px 0; padding: 7px 9px; border-left: 3px solid #c64b45; background: #fff0f0; color: #952e2a; font-size: 12px; overflow-wrap: anywhere; }
 .draft-fields { margin: 7px 0; display: grid; gap: 3px; }
 .draft-field-row { font-size: 12.5px; color: #36414e; overflow-wrap: anywhere; }
-/* 纯已作废/已忽略批次的折叠行：一行摘要替代沉底的不可选卡片。 */
-.draft-archive-toggle { justify-self: start; padding: 4px 10px; border: 1px dashed #c3cad3; border-radius: 6px; background: #fafbfc; color: #6b7683; font-size: 12.5px; cursor: pointer; }
-.draft-archive-toggle:hover { border-color: #8ba8de; color: #174a9d; }
+/* 草稿箱二级 tab：待处理与纯已作废/已忽略批次分列，风格对齐一级 tab、尺寸小一号。 */
+.draft-subtabs { display: flex; gap: 2px; margin: 0 0 10px; border-bottom: 1px solid var(--border); }
+.draft-subtab { min-height: 32px; padding: 0 10px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: #5c6673; cursor: pointer; font: inherit; font-size: 13px; }
+.draft-subtab:hover { color: #26313e; }
+.draft-subtab.active { border-bottom-color: #2457c5; color: #174a9d; font-weight: 650; }
 /* 失败生成任务卡片：失败任务不建批次，这里是失败明细与重试的持久入口。 */
 .draft-failed-jobs { display: grid; gap: 8px; margin-bottom: 12px; }
 .draft-failed-head { font-size: 13px; font-weight: 600; color: #952e2a; }
