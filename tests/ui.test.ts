@@ -88,8 +88,9 @@ test('draft inbox separates archived items into a dedicated tab without batch-le
   assert.match(renderer, /item\.statusLabel \|\| item\.status/);
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   assert.match(styles, /\.draft-item-disabled \{ cursor: default; background: #f7f8fa; opacity: 0\.62; \}/);
-  assert.match(styles, /\.draft-subtab \{/);
-  assert.match(styles, /\.draft-subtab\.active \{[^}]*border-bottom-color: #2457c5/);
+  // tab 样式与行动页 subtab 并列复用（同一组选择器，草稿箱视觉不变）。
+  assert.match(styles, /\.draft-subtab, \.action-subtab \{/);
+  assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{[^}]*border-bottom-color: #2457c5/);
 });
 
 test('draft subtab counts are item-level and share the pending badge source', () => {
@@ -310,11 +311,39 @@ test('draft cards expose per-card confirm/ignore and a sticky selection bar with
   assert.match(styles, /\.primary-command\.danger \{/);
 });
 
-test('weekly actions view exposes card-click selection and a sticky bulk-complete toolbar (accept flow removed)', () => {
+test('weekly actions view exposes two-state tabs, customer grouping and a sticky bulk-complete toolbar', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
+  // 双 tab：未完成 / 已完成 分列，计数写进按钮文案；切换后整表重渲染，active 态跨重渲染保持。
+  assert.match(html, /data-action-tab="pending"/);
+  assert.match(html, /data-action-tab="completed"/);
+  assert.match(html, /id="actionTabPending"/);
+  assert.match(html, /id="actionTabCompleted"/);
+  assert.match(source, /let activeActionTab = 'pending';/);
+  assert.match(source, /actionTabPending\.textContent = pending\.length \? `未完成（\$\{pending\.length\}）` : '未完成';/);
+  assert.match(source, /actionTabCompleted\.textContent = completed\.length \? `已完成（\$\{completed\.length\}）` : '已完成';/);
+  assert.match(source, /querySelectorAll\('\.action-subtab'\)/);
+  assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{/);
+  // 两态划分 + 客户分组渲染：未完成= status==='new'（后端 due_at 升序），已完成按 updatedAt 倒序；
+  // 按 customerId 分桶为 details.customer-group（默认折叠，客户名经 customersCache 解析）。
+  const loader = source.match(/async function loadActions[\s\S]*?\n  \}\n\n  \/\/ 本周行动二级 tab/)?.[0];
+  assert.ok(loader, 'loadActions source was not found');
+  assert.match(loader, /actions\.filter\(\(a\) => a\.status === 'new'\)/);
+  assert.match(loader, /actions\.filter\(\(a\) => a\.status === 'completed'\)/);
+  assert.match(loader, /Date\.parse\(b\.updatedAt\) - Date\.parse\(a\.updatedAt\)/);
+  assert.match(loader, /groups\.set\(action\.customerId, \[\.\.\.\(groups\.get\(action\.customerId\) \?\? \[\]\), action\]\)/);
+  assert.match(loader, /'customer-group'/);
+  assert.match(loader, /fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 项/);
+  // 客户名懒加载：进行动页时 customersCache 为空才请求 /api/customers。
+  assert.match(loader, /if \(!customersCache\.length\) customersCache = \(await api\('\/api\/customers'\)\)\.customers \|\| \[\];/);
+  // 导航角标与 tab 计数同源（未完成数）。
+  assert.match(loader, /actionNavCount\.textContent = pending\.length \|\| '';/);
+  // 已完成 tab 无可勾选卡片，隐藏批量操作条。
+  assert.match(loader, /actionBulkBar\.classList\.toggle\('hidden', activeActionTab !== 'pending'\)/);
+  // 空态分 tab 文案。
+  assert.match(loader, /'暂无未完成行动' : '暂无已完成行动'/);
   // 工具条：全选 + 已选计数 + 批量完成按钮（接受流程整体移除：草稿确认即视为接受）。
   assert.match(html, /id="actionSelectAll"/);
   assert.match(html, /id="actionSelectedCount"/);
@@ -322,12 +351,17 @@ test('weekly actions view exposes card-click selection and a sticky bulk-complet
   assert.match(html, />批量完成</);
   assert.ok(!html.includes('actionBulkAccept'), 'bulk accept button should be removed');
   assert.ok(!source.includes('bulk-accept'), 'bulk accept API call should be removed');
-  // 卡片勾选：仅可操作状态（new/in_progress）头插 checkbox，dataset 带 actionId，卡片加 selectable 类。
+  assert.ok(!source.includes('in_progress'), 'in_progress dead status should be removed from the frontend');
+  // 卡片勾选：仅未完成状态头插 checkbox，dataset 带 actionId，卡片加 selectable 类；状态徽章两态中文化，已完成展示 outcome。
   const card = source.match(/function actionCard[\s\S]*?\n  }\n\n  function inputField/)?.[0];
   assert.ok(card, 'actionCard source was not found');
-  assert.match(card, /selectable && \['new', 'in_progress'\]\.includes\(action\.status\)/);
+  assert.match(card, /selectable && action\.status === 'new'/);
   assert.match(card, /check\.dataset\.actionId = action\.id/);
   assert.match(card, /card\.classList\.add\('selectable'\)/);
+  assert.match(card, /action\.status === 'completed' \? '已完成' : '未完成'/);
+  assert.match(card, /action\.status === 'completed' && action\.outcome/);
+  assert.match(card, /实际结果：\$\{action\.outcome\}/);
+  assert.match(card, /if \(action\.status === 'new'\) \{/);
   assert.doesNotMatch(card, /'接受'/);
   // 点卡片本体切换选中：委托监听排除按钮/勾选框等交互元素，无勾选框的卡片不响应。
   assert.match(source, /actionBoard\.addEventListener\('click'/);
@@ -341,11 +375,13 @@ test('weekly actions view exposes card-click selection and a sticky bulk-complet
   assert.match(source, /已选 \$\{selected\}\/\$\{checks\.length\}/);
   assert.match(source, /classList\.toggle\('selected', input\.checked\)/);
   assert.match(source, /function setActionBulkBusy\(busy\)/);
-  // 操作条样式：sticky 冻结在滚动容器顶 + selectable/selected 卡片态。
+  // 操作条样式：sticky 冻结在滚动容器顶 + selectable/selected 卡片态 + 客户组内卡片间距。
   assert.match(styles, /\.action-bulk-bar \{ position: sticky; top: 0; z-index: 8;/);
   assert.match(styles, /\.action-card\.selectable/);
   assert.match(styles, /\.action-card\.selected/);
   assert.match(styles, /\.action-head input\[type="checkbox"\]/);
+  assert.match(styles, /\.customer-group-body \.action-card \+ \.action-card \{ margin-top: 8px; \}/);
+  assert.ok(!styles.includes('status-in_progress'), 'status-in_progress badge style should be removed');
 });
 
 test('hemory inbox exposes ignore and restore actions with incremental sync', () => {

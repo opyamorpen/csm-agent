@@ -532,7 +532,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const sub = actionMatch[2] ?? '';
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
-          const allowed = ['new', 'in_progress', 'completed', 'snoozed', 'false_positive'];
+          const allowed = ['new', 'completed'];
           if (body.status && !allowed.includes(body.status)) return json(res, 400, { error: 'invalid action status' });
           const action = workbench.db.updateAction(actionId, body);
           return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });

@@ -121,7 +121,7 @@ function help(): void {
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
   csm-agent action complete <行动ID...> [--outcome <实际结果>]
-    （批量完成：仅待处理/进行中状态生效，其余跳过；单项失败不影响其他项；
+    （批量完成：仅未完成状态生效，已完成跳过；单项失败不影响其他项；
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
@@ -313,7 +313,9 @@ async function showActions(customerInput?: string): Promise<void> {
   const customer = customerInput ? await resolveCustomer(customerInput) : null;
   const body = await request<{ actions: any[] }>(`/api/action-items${customer ? `?customer_id=${encodeURIComponent(customer.id)}` : ''}`);
   if (jsonOutput) return print(body.actions);
-  console.table(body.actions.map((action) => ({ id: action.id, customerId: action.customerId, status: action.status,
+  // 状态两态中文化展示；--json 保持 API 原值。
+  console.table(body.actions.map((action) => ({ id: action.id, customerId: action.customerId,
+    status: action.status === 'completed' ? '已完成' : '未完成',
     owner: action.owner ?? 'unknown', dueAt: action.dueAt ?? 'unknown', title: action.title })));
 }
 

@@ -67,6 +67,9 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent capabilities/);
   assert.doesNotMatch(help.stdout, /action accept/);
   assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
+  // 两态模型：批量完成仅未完成生效，已完成跳过。
+  assert.match(help.stdout, /仅未完成状态生效，已完成跳过/);
+  assert.doesNotMatch(help.stdout, /待处理\/进行中/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
   assert.match(help.stdout, /默认输出客户版周报 Markdown（与复制\/Wiki 发布同源）/);
@@ -183,6 +186,16 @@ test('draft review prints structured display fields with raw JSON behind --json'
   assert.match(handler, /printDraftItems\(\(confirmed as any\)\.items \?\? \[\]\)/);
   assert.ok(listing, 'showDrafts source was not found');
   assert.match(listing, /target: item\.targetObject \|\| ''/);
+});
+
+test('actions listing renders two-state Chinese status labels (CLI parity with web tabs)', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const listing = source.match(/async function showActions[\s\S]*?\n}\n\nasync function showCases/)?.[0];
+
+  // 显示契约：CLI 表格状态列与 Web 双 tab 同口径（未完成/已完成中文化），--json 保持 API 原值。
+  assert.ok(listing, 'showActions source was not found');
+  assert.match(listing, /action\.status === 'completed' \? '已完成' : '未完成'/);
+  assert.doesNotMatch(listing, /in_progress/);
 });
 
 test('drafts listing hides written items by default, --archived isolates fully dismissed batches, --all restores the full view', () => {

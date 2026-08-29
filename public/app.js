@@ -88,6 +88,9 @@
   const customerOverview = document.getElementById('customerOverview');
   const actionBoard = document.getElementById('actionBoard');
   const actionNavCount = document.getElementById('actionNavCount');
+  const actionTabPending = document.getElementById('actionTabPending');
+  const actionTabCompleted = document.getElementById('actionTabCompleted');
+  const actionBulkBar = document.querySelector('#actionsView .action-bulk-bar');
   const actionSelectAll = document.getElementById('actionSelectAll');
   const actionSelectedCount = document.getElementById('actionSelectedCount');
   const actionBulkComplete = document.getElementById('actionBulkComplete');
@@ -118,6 +121,7 @@
   const draftJobTracking = new Map();
   let draftJobTimer = null;
   let activeDraftTab = 'pending';
+  let activeActionTab = 'pending';
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -2123,24 +2127,26 @@
   }
 
   /**
-   * 单条行动卡。selectable（本周行动页）：可操作状态（待处理/进行中）头插勾选框参与批量完成，
+   * 单条行动卡。selectable（本周行动页）：未完成状态头插勾选框参与批量完成，
    * 点卡片本体也可切换选中；客户详情行动 tab 不传参，维持纯单条操作。
+   * 状态两态（未完成 new / 已完成 completed），徽章中文化；已完成卡展示实际结果 outcome。
    */
   function actionCard(action, customerMode, selectable = false) {
     const card = el('article', 'action-card');
     const head = el('div', 'action-head');
-    if (selectable && ['new', 'in_progress'].includes(action.status)) {
+    if (selectable && action.status === 'new') {
       card.classList.add('selectable');
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.dataset.actionId = action.id;
       head.append(check);
     }
-    head.append(el('strong', null, action.title), badge(action.status, `status-${action.status}`));
+    head.append(el('strong', null, action.title), badge(action.status === 'completed' ? '已完成' : '未完成', `status-${action.status}`));
     card.append(head, el('p', null, action.whyNow), el('div', 'action-meta', `${action.owner || '未分配'} · ${action.dueAt ? formatDateTime(action.dueAt) : '无截止时间'} · 置信度 ${Math.round((action.confidence || 0) * 100)}%`));
+    if (action.status === 'completed' && action.outcome) card.append(el('p', null, `实际结果：${action.outcome}`));
     const buttons = el('div', 'row-actions');
     const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editAction(action); buttons.append(edit);
-    if (['new', 'in_progress'].includes(action.status)) {
+    if (action.status === 'new') {
       const complete = el('button', 'quiet-command small', '完成');
       complete.onclick = async () => { const outcome = (await promptDialog('记录实际结果：', '')) ?? ''; await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }) }); customerMode ? openCustomer(action.customerId) : loadActions(); };
       buttons.append(complete);
@@ -2554,15 +2560,48 @@
     tabs[0].button.click();
   }
 
+  /**
+   * 本周行动双 tab：未完成（status='new'，可勾选批量完成）/ 已完成（status='completed'，最近完成在前）。
+   * 两个 tab 都按客户分组（details.customer-group 默认折叠，客户名经 customersCache 解析）；
+   * 客户组顺序跟随列表序——未完成 tab 紧急客户（截止时间早）在前，已完成 tab 最近完成的客户在前。
+   */
   async function loadActions() {
     const data = await api('/api/action-items');
     const actions = data.actions || [];
-    actionNavCount.textContent = actions.filter((a) => !['completed', 'false_positive'].includes(a.status)).length || '';
+    if (!customersCache.length) customersCache = (await api('/api/customers')).customers || [];
+    const pending = actions.filter((a) => a.status === 'new');
+    const completed = actions.filter((a) => a.status === 'completed')
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    actionNavCount.textContent = pending.length || '';
+    actionTabPending.textContent = pending.length ? `未完成（${pending.length}）` : '未完成';
+    actionTabCompleted.textContent = completed.length ? `已完成（${completed.length}）` : '已完成';
+    actionBulkBar.classList.toggle('hidden', activeActionTab !== 'pending');
     actionBoard.innerHTML = '';
-    if (!actions.length) actionBoard.append(el('div', 'workspace-empty', '暂无待处理行动'));
-    for (const action of actions) actionBoard.append(actionCard(action, false, true));
+    const visible = activeActionTab === 'pending' ? pending : completed;
+    if (!visible.length) {
+      actionBoard.append(el('div', 'workspace-empty', activeActionTab === 'pending' ? '暂无未完成行动' : '暂无已完成行动'));
+    } else {
+      const groups = new Map();
+      for (const action of visible) groups.set(action.customerId, [...(groups.get(action.customerId) ?? []), action]);
+      for (const [customerId, rows] of groups) {
+        const group = document.createElement('details');
+        group.className = 'customer-group';
+        group.append(el('summary', 'customer-group-title', `${fragmentCustomerLabel(customerId)} · ${rows.length} 项`));
+        const body = el('div', 'customer-group-body');
+        for (const action of rows) body.append(actionCard(action, false, true));
+        group.append(body);
+        actionBoard.append(group);
+      }
+    }
     updateActionSelection();
   }
+
+  // 本周行动二级 tab：未完成 / 已完成 分列；切换后整表重渲染（选中 tab 态跨重渲染保持）。
+  for (const tab of document.querySelectorAll('.action-subtab')) tab.onclick = () => {
+    if (activeActionTab === tab.dataset.actionTab) return;
+    activeActionTab = tab.dataset.actionTab;
+    void loadActions();
+  };
 
   // ── 本周行动批量操作：勾选联动 + 批量完成（逐项处理，单项失败/跳过不影响其他项）──
   function selectedActionIds() {

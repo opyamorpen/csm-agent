@@ -526,8 +526,9 @@ export class WorkbenchDatabase {
       WHERE source_system = 'ones'
         AND display_id IS NULL;
     `);
-    // 「接受」流程已移除：草稿确认即视为接受，历史 accepted 行归入待处理组（幂等，新库无 accepted 行）。
-    this.db.prepare(`UPDATE action_items SET status='new', updated_at=? WHERE status='accepted'`).run(nowIso());
+    // 行动状态收敛两态（未完成 new / 已完成 completed）：历史上 accepted/「接受」流程与 in_progress/snoozed/false_positive
+    // 等仅 CLI 可设的旧状态在开库时一律归入未完成；completed 不动，保持周报完成统计口径（幂等，新库无旧状态行）。
+    this.db.prepare(`UPDATE action_items SET status='new', updated_at=? WHERE status NOT IN ('new','completed')`).run(nowIso());
     this.repairMiswrittenDraftItems();
   }
 
@@ -1073,7 +1074,7 @@ export class WorkbenchDatabase {
 
   listActions(customerId?: string): ActionItem[] {
     const sql = `SELECT * FROM action_items ${customerId ? 'WHERE customer_id=?' : ''}
-      ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'snoozed' THEN 2 ELSE 3 END, COALESCE(due_at,'9999')`;
+      ORDER BY CASE status WHEN 'new' THEN 0 ELSE 1 END, COALESCE(due_at,'9999')`;
     const rows = (customerId ? this.db.prepare(sql).all(customerId) : this.db.prepare(sql).all()) as Row[];
     return rows.map(actionFromRow);
   }
@@ -1097,7 +1098,7 @@ export class WorkbenchDatabase {
     return updated;
   }
 
-  /** 批量完成：逐项处理互不影响——不存在 failed、非待处理/进行中 skipped、其余置 completed 并逐条审计。 */
+  /** 批量完成：逐项处理互不影响——不存在 failed、已完成 skipped、未完成置 completed 并逐条审计。 */
   bulkCompleteActions(ids: string[], outcome?: string, actor = 'csm'): ActionBulkResult[] {
     const results: ActionBulkResult[] = [];
     for (const id of [...new Set(ids)]) {
@@ -1106,8 +1107,8 @@ export class WorkbenchDatabase {
         results.push({ id, title: null, result: 'failed', error: '行动不存在' });
         continue;
       }
-      if (!['new', 'in_progress'].includes(action.status)) {
-        results.push({ id, title: action.title, result: 'skipped', reason: `当前状态 ${action.status}，仅待处理/进行中可完成` });
+      if (action.status !== 'new') {
+        results.push({ id, title: action.title, result: 'skipped', reason: '当前状态已完成，仅未完成可完成' });
         continue;
       }
       this.completeAction(id, outcome, actor);
