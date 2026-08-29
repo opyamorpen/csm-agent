@@ -1172,6 +1172,12 @@ export class WorkbenchDatabase {
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
+  /** 进行中（pending/running）任务：草稿列表「重新生成中」标记的数据源；与含 failed 的 resume 语义分开。 */
+  listActiveDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob[] {
+    const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status IN ('pending','running') ORDER BY created_at").all(kind) as Row[];
+    return rows.map((row) => this.draftJobFromRow(row));
+  }
+
   /** 失败任务清单（最近 limit 条，默认 50）：失败明细展示与 CLI 入口；不含已被新任务取代的 superseded。 */
   listFailedDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory', limit = 50): DraftGenerationJob[] {
     const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status='failed' ORDER BY updated_at DESC LIMIT ?").all(kind, limit) as Row[];

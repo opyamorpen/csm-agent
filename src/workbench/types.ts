@@ -188,6 +188,8 @@ export interface DraftBatch {
   items?: DraftItem[];
   /** 服务端装饰：仍需处理（可确认）的条目数；0 = 纯已作废/已忽略批次，前端默认折叠。 */
   actionableItemCount?: number;
+  /** 服务端装饰：该批次的客户×上海日正处于进行中的生成任务覆盖下（重新生成期间旧草稿禁操作）。 */
+  regenerating?: boolean;
   createdAt: string;
   updatedAt: string;
 }

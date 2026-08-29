@@ -1562,11 +1562,14 @@
       const head = el('div', 'draft-batch-head');
       const customer = customersCache.find((item) => item.id === batch.customerId);
       const title = el('div'); title.append(el('strong', null, customer?.name || batch.customerId), el('div', 'cell-sub', `${formatDateTime(batch.updatedAt)} · ${batch.generator} · ${batch.status}`));
+      // 重新生成中：服务端标记（同客户×上海日有进行中任务），角标取代重新生成按钮并禁用全部操作，
+      // 防止确认/忽略一份即将被作废的草稿；生成失败自动恢复（旧草稿未被作废）。
+      if (batch.regenerating) title.append(el('div', 'draft-regenerating', '重新生成中…'));
       const headActions = el('div', 'row-actions');
       // 批次级「确认所选/忽略批次」已由单卡按钮 + 底部浮动条承担（整批忽略走 CLI draft dismiss），头部只留重新生成。
       // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
       const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
-      if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch)) {
+      if (!batch.regenerating && (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch))) {
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.type = 'button';
         regenerate.onclick = async () => {
@@ -1583,10 +1586,10 @@
       head.append(title, headActions);
       section.append(head);
       for (const item of batch.items || []) {
-        // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing）点击无效，仅去掉手型提示。
+        // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing 或批次重新生成中）点击无效，仅去掉手型提示。
         const row = el('label', 'draft-item');
         const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id; selector.dataset.batchId = batch.id;
-        selector.disabled = ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
+        selector.disabled = batch.regenerating || ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
         if (selector.disabled) row.classList.add('draft-item-disabled');
         const body = el('div', 'draft-item-body');
         const itemHead = el('div', 'draft-item-head'); itemHead.append(badge(draftTypeLabel(item.type), 'accent'), el('strong', null, item.title), badge(item.statusLabel || item.status, item.status === 'written' ? 'success' : item.status === 'failed' ? 'risk-high' : item.status === 'stale' || item.status === 'dismissed' ? 'muted' : 'warning'));
@@ -1603,7 +1606,7 @@
         if (item.unknowns?.length) body.append(el('div', 'cell-sub', `待确认: ${item.unknowns.join('、')}`));
         const actions = el('div', 'row-actions');
         // 卡片是 label，按钮须 type=button 并阻断默认勾选与冒泡，避免点按钮误切换选择。
-        if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) {
+        if (!batch.regenerating && !['written', 'dismissed', 'stale', 'writing'].includes(item.status)) {
           // 单卡确认/忽略：不必回到批次头部，也不必先勾选再滚动到操作条。
           const confirmOne = el('button', 'primary-command small', '确认'); confirmOne.type = 'button';
           confirmOne.onclick = async (event) => {
@@ -1621,7 +1624,7 @@
           };
           actions.append(ignoreOne);
         }
-        if (item.status === 'failed') {
+        if (!batch.regenerating && item.status === 'failed') {
           const retry = el('button', 'quiet-command small', '重试'); retry.type = 'button';
           retry.onclick = async (event) => {
             event.preventDefault(); event.stopPropagation();

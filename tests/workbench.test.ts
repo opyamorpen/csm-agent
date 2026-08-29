@@ -605,6 +605,72 @@ async function waitForJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
   assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
 }
 
+test('workbench: batch regenerating flag tracks in-flight job and clears on success or failure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-regen-'));
+  const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = draftModelRetryDelays.baseMs;
+  draftModelRetryDelays.baseMs = 1;
+  try {
+    db.upsertCustomer({ id: 'crm-rg', name: '再生客户' });
+    const event = segment(db, 'crm-rg', 'rrg:t1', 'rrg', '重生成标记话题', '2026-08-25T05:00:00Z', '客户提到工单报错需要跟进');
+    // 模型行为三态：pass 立即出 followup 提案；hold 挂起等测试放行（模拟模型调用窗口）；fail 抛错走失败路径。
+    let behavior: 'pass' | 'hold' | 'fail' = 'pass';
+    let heldRelease: ((drafts: unknown[]) => void) | null = null;
+    const runtime = { llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async () => new Promise((resolve, reject) => {
+        if (behavior === 'fail') { reject(new Error('模型调用失败')); return; }
+        const respond = (drafts: unknown[]) => resolve({ content: [{ type: 'text', text: JSON.stringify({ drafts }) }], stopReason: 'stop' });
+        if (behavior === 'hold') heldRelease = respond;
+        else respond([{ type: 'followup', title: '沟通记录', summary: '综述。', fields: { one_line_summary: '跟进报错沟通' }, evidence_refs: [event.id] }]);
+      }) } } as any;
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), runtime);
+    const queued = service.enqueue('crm-rg', [event.id]);
+    await waitForJob(db, queued[0].jobId);
+    const batch = db.listDraftBatches('crm-rg')[0];
+    assert.ok(batch);
+    assert.equal(service.batchRegenerating(batch, service.activeRegenerationDays()), false, '无进行中任务时不得标记重新生成中');
+
+    // regenerate 后模型挂起：任务进行中，旧批次必须被判「重新生成中」。
+    behavior = 'hold';
+    const regen = service.regenerate(batch.id);
+    assert.ok(regen.length);
+    for (let i = 0; i < 100 && !heldRelease; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(heldRelease, '模型调用须已挂起待放行');
+    assert.equal(db.listActiveDraftJobs().length, 1, '进行中任务须可经 listActiveDraftJobs 查到');
+    const days = service.activeRegenerationDays();
+    assert.equal(days.size, 1);
+    assert.ok(days.has('crm-rg:2026-08-25'), '活跃日集合按 客户:上海日 记键');
+    assert.equal(service.batchRegenerating(batch, days), true, '生成窗口内旧批次必须标记重新生成中');
+    assert.equal(db.listActiveDraftJobs().length, 1, '数据库层照实返回 running；孤儿判定在服务层');
+
+    // 孤儿 running（进程崩溃残留、attempts 耗尽 resume 不再认领）不算进行中：否则批次永久禁操作。
+    // 服务实例重启后 processing 清空，同一任务仍处 running 状态即成孤儿。
+    const restarted = new HemoryDraftService(db, fakeMcpForDrafts(), runtime);
+    assert.equal(restarted.activeRegenerationDays().size, 0, '孤儿 running 不得计入活跃日集合');
+    assert.equal(service.activeRegenerationDays().size, 1, '原进程内任务仍在 processing，照常计入');
+
+    // 放行出提案：新批次建成，旧条目作废，标记随任务终态清除。
+    heldRelease([{ type: 'internal_todo', title: '跟进报错', summary: '请跟进', evidence_refs: [event.id] }]);
+    await waitForJob(db, regen[0].jobId);
+    assert.equal(service.activeRegenerationDays().size, 0, '任务终态后活跃日集合须清空');
+    const staleItems = (db.getDraftBatch(batch.id)?.items ?? []).filter((item) => item.status === 'stale');
+    assert.ok(staleItems.length, '有新提案后旧条目须作废');
+    assert.equal(db.listActiveDraftJobs().length, 0);
+
+    // 失败路径：再次 regenerate 且模型抛错 → 任务 failed，旧批次原样保留且标记清除。
+    behavior = 'fail';
+    const newBatch = db.listDraftBatches('crm-rg').find((item) => item.status !== 'stale');
+    assert.ok(newBatch, '须存在一个活跃新批次');
+    const regen2 = service.regenerate(newBatch.id);
+    for (let i = 0; i < 400 && db.getDraftJob(regen2[0].jobId)?.status !== 'failed'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getDraftJob(regen2[0].jobId)?.status, 'failed');
+    assert.equal(service.activeRegenerationDays().size, 0, '失败后不得残留进行中日集合');
+    assert.equal(service.batchRegenerating(newBatch), false, '失败后旧批次恢复可操作');
+    const kept = db.getDraftBatch(newBatch.id)?.items ?? [];
+    assert.ok(kept.length && kept.every((item) => item.status !== 'stale'), '生成失败不得作废旧批次条目');
+  } finally { draftModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: draft prompt carries the ONES ASR phonetic-alias rule', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-asr-'));
   const db = new WorkbenchDatabase(dir);

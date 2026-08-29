@@ -159,7 +159,8 @@ function help(): void {
      同类型重复提案——全部消费时任务以备注收尾，不产出新草稿）
   csm-agent drafts [客户ID或名称] [--archived|--all] [--json]
     （默认只列待处理批次；--archived 只看纯已忽略/已作废批次，
-     与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图）
+     与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图；
+     重新生成进行中的批次带「生成中」标记，期间不建议确认旧草稿）
   csm-agent draft review <批次ID>
   csm-agent draft edit <草稿ID> [--set 键=值 ...]
     （结构化编辑草稿：--set 可用中文标签（--set 优先级=P1 --set 描述=...）或字段键，
@@ -758,7 +759,8 @@ async function showDrafts(rawArgs: string[]): Promise<void> {
   const batches = (body.batches ?? []).filter((batch: any) => includeAll || (archivedOnly ? actionableOf(batch) === 0 : actionableOf(batch) > 0));
   if (jsonOutput) return print(batches);
   const rows = batches.flatMap((batch: any) => (batch.items ?? []).map((item: any) => ({ batch: batch.id, id: item.id,
-    customerId: item.customerId, type: item.type, status: item.status, version: item.version, target: item.targetObject || '', title: item.title })));
+    customerId: item.customerId, type: item.type, status: item.status, regenerating: batch.regenerating ? '生成中' : '',
+    version: item.version, target: item.targetObject || '', title: item.title })));
   if (!rows.length) {
     if (includeAll) console.log('没有任何草稿批次');
     else if (archivedOnly) console.log('没有已忽略/已作废批次（csm-agent drafts 查看待处理，drafts --all 查看全部）');

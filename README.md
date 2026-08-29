@@ -114,7 +114,7 @@ csm-agent hemory assign <客户ID或名称> <片段ID...> # 归属即触发后�
 csm-agent hemory clear <片段ID...>
 csm-agent hemory ignore <片段ID...>
 csm-agent hemory regenerate <片段ID...> [--wait] # 按天强制重生成草稿：片段决定重建的「客户+上海日」，各天全部已确认片段参与，旧批次作废；已写入草稿消费过的片段不再被同类型重复提案
-csm-agent drafts [客户ID或名称] [--archived|--all] # 默认只列待处理批次；--archived 只看纯已忽略/已作废批次；--all 含已写入的全量视图
+csm-agent drafts [客户ID或名称] [--archived|--all] # 默认只列待处理批次；--archived 只看纯已忽略/已作废批次；--all 含已写入的全量视图；重新生成进行中的批次带「生成中」标记（Web 端同状态角标+禁用操作）
 csm-agent draft review <批次ID>
 csm-agent draft edit <草稿ID> [--set 键=值 ...] # 结构化编辑草稿（--set 可用中文标签如 优先级=P1，选项字段可填中文选项名；无 --set 进入逐字段交互）；与 Web「编辑」弹窗同一契约
 csm-agent draft retry <草稿ID>

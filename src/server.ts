@@ -167,11 +167,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
 
   // 草稿确认视图共用最小必填项结构（displayFields），Web 卡片与 CLI 渲染同一份数据。
   const DRAFT_ITEM_STATUS_LABELS: Record<string, string> = { draft: '草稿', ready: '就绪', writing: '写入中', written: '已写入', failed: '失败', dismissed: '已忽略', stale: '已作废' };
-  function decorateDraftBatch(batch: DraftBatch): DraftBatch {
-    if (!batch.items) return batch;
+  function decorateDraftBatch(batch: DraftBatch, activeDays?: Set<string>): DraftBatch {
+    // 重新生成中标记：服务端权威下发（进行中任务覆盖同客户×上海日），三端与刷新后一致。
+    const regenerating = workbench.drafts.batchRegenerating(batch, activeDays);
+    if (!batch.items) return { ...batch, regenerating };
     // actionableItemCount：仍需处理（可勾选确认）的条目数；为 0 的批次是纯已作废/已忽略批次，前端默认折叠。
     const actionableItemCount = batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
-    return { ...batch, actionableItemCount, items: batch.items.map((item) => decorateDraftItem(item)) };
+    return { ...batch, regenerating, actionableItemCount, items: batch.items.map((item) => decorateDraftItem(item)) };
   }
   function decorateDraftItem(item: DraftItem): DraftItem {
     const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
@@ -554,7 +556,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           : batches
             .map((batch) => (batch.items ? { ...batch, items: batch.items.filter((item) => item.status !== 'written') } : batch))
             .filter((batch) => (batch.items ? batch.items.length > 0 : true));
-        return json(res, 200, { batches: visible.map(decorateDraftBatch) });
+        // 重新生成中日集合按请求算一次，批次装饰复用（单批次 GET 则在装饰内自算）。
+        const activeDays = workbench.drafts.activeRegenerationDays();
+        return json(res, 200, { batches: visible.map((batch) => decorateDraftBatch(batch, activeDays)) });
       }
       // 生成任务状态查询：归属/重生成响应里的 jobId 在此轮询。失败任务不会创建批次，只能通过任务状态感知。
       if (req.method === 'GET' && path === '/api/draft-jobs') {

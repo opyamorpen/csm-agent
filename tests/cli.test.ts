@@ -192,6 +192,22 @@ test('drafts listing hides written items by default, --archived isolates fully d
   assert.match(server, /item\.status !== 'written'/);
 });
 
+test('drafts listing marks regenerating batches via the server-decorated flag', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const draftsModule = readFileSync(new URL('../src/workbench/drafts.ts', import.meta.url), 'utf8');
+  const listing = source.match(/async function showDrafts[\s\S]*?\n}\n\nasync function editBatchItems/)?.[0];
+
+  // 显示契约：重新生成进行中的批次在 drafts 表格带「生成中」列（服务端 regenerating 装饰直通）。
+  assert.ok(listing, 'showDrafts source was not found');
+  assert.match(listing, /regenerating: batch\.regenerating \? '生成中' : ''/);
+  // 服务端权威标记：活跃日集合按请求算一次，批次装饰复用；判定逻辑在服务层三端共用。
+  assert.match(server, /workbench\.drafts\.activeRegenerationDays\(\)/);
+  assert.match(server, /decorateDraftBatch\(batch, activeDays\)/);
+  assert.match(draftsModule, /activeRegenerationDays\(\)/);
+  assert.match(draftsModule, /batchRegenerating\(batch/);
+});
+
 test('sessions CLI hides archived sessions by default and --all restores the full view', () => {
   const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
   const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');

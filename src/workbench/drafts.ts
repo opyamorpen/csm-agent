@@ -1008,6 +1008,33 @@ export class HemoryDraftService {
     return { jobs, days: dayList };
   }
 
+  /**
+   * 进行中任务覆盖的「客户×上海日」集合：重新生成期间旧批次判定的数据源（刷新页面/CLI 触发同样可见）。
+   * 数据库 running 状态跨进程不可信——进程崩溃会留下永不终结的孤儿 running（attempts 耗尽后 resume
+   * 也不再认领，2026-08-28 真实库就有 20 条）。真进行中 = pending（创建即处理，resume 会认领）或
+   * 当前进程 processing 集合内的 running；孤儿 running 一律不算，否则对应批次永久禁操作。
+   */
+  activeRegenerationDays(): Set<string> {
+    const days = new Set<string>();
+    for (const job of this.db.listActiveDraftJobs()) {
+      if (job.status === 'running' && !this.processing.has(job.id)) continue;
+      for (const id of job.sourceEventIds) {
+        const event = this.db.getSourceEvent(id);
+        if (event && event.customerId === job.customerId) days.add(`${job.customerId}:${shanghaiEventDate(event)}`);
+      }
+    }
+    return days;
+  }
+
+  /** 批次是否落在重新生成中的客户×日上：日推导与 regenerate() 同款（片段归属须仍属该客户）。 */
+  batchRegenerating(batch: DraftBatch, activeDays: Set<string> = this.activeRegenerationDays()): boolean {
+    for (const id of batch.sourceEventIds) {
+      const event = this.db.getSourceEvent(id);
+      if (event && event.customerId === batch.customerId && activeDays.has(`${batch.customerId}:${shanghaiEventDate(event)}`)) return true;
+    }
+    return false;
+  }
+
   private confirmedSegments(customerId: string, eventIds: string[]): SourceEvent[] {
     // 停用片段不得再生草稿：重切后被取代的 v1 片段即使仍是 confirmed 也已经不属于当前代际。
     return [...new Set(eventIds)].map((id) => this.db.getSourceEvent(id)).filter((event): event is SourceEvent =>

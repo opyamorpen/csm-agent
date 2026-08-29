@@ -39,6 +39,24 @@ test('draft inbox exposes regenerate control and operations label', () => {
   assert.match(source, /operations: '运维工单'/);
 });
 
+test('draft inbox marks regenerating batches with a badge and disables all actions', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // 服务端下发的 regenerating 标记驱动：头部角标 + 隐藏重新生成按钮。
+  assert.match(renderer, /if \(batch\.regenerating\) title\.append\(el\('div', 'draft-regenerating', '重新生成中…'\)\)/);
+  assert.match(renderer, /if \(!batch\.regenerating && \(\['stale', 'partial', 'failed'\]/);
+  // 全部操作禁用：checkbox 勾选、确认/编辑/忽略、失败重试。
+  assert.match(renderer, /selector\.disabled = batch\.regenerating \|\| \['written', 'dismissed', 'stale', 'writing'\]\.includes\(item\.status\)/);
+  assert.match(renderer, /if \(!batch\.regenerating && !\['written', 'dismissed', 'stale', 'writing'\]\.includes\(item\.status\)\)/);
+  assert.match(renderer, /if \(!batch\.regenerating && item\.status === 'failed'\)/);
+  // 角标样式：spinner 动画复用 draft-spin。
+  assert.match(styles, /\.draft-regenerating \{[^}]*color: #174a9d/);
+  assert.match(styles, /\.draft-regenerating::before \{[^}]*animation: draft-spin/);
+});
+
 test('draft inbox separates fully stale batches into a dedicated tab without batch-level buttons', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
