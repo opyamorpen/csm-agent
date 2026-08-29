@@ -2551,7 +2551,7 @@ test('workbench: regenerateByEventIds rebuilds per customer-day and rejects inva
 
 // ── 实施周报（weekly reports） ──
 
-import { WeeklyReportService, weekMonday, weekRange, weeklyFingerprint, renderWeeklyMarkdown } from '../src/workbench/weekly.js';
+import { WeeklyReportService, weekMonday, weekRange, weeklyFingerprint, renderWeeklyMarkdown, weeklyContentWarnings, WEEKLY_REPORT_GENERATION_VERSION } from '../src/workbench/weekly.js';
 
 function fakeWeeklyModel(content: unknown): any {
   return {
@@ -2561,13 +2561,13 @@ function fakeWeeklyModel(content: unknown): any {
 }
 
 const WEEKLY_CONTENT = {
-  summary: '本周与客户完成两次关键沟通，围绕报表性能与培训计划达成一致，整体交付平稳。',
+  summary: '本周双方完成报表导出性能问题定位与方案确认，整体交付按计划推进。',
   accomplishments: [
-    { category: '沟通与会议', date: '2026-08-25', text: '电话沟通报表导出性能问题，定位索引缺失', source: 'Hemory 片段 08-25' },
-    { category: '工单处理', date: '2026-08-26', text: '导出超时工单已解决（近似口径）', source: '工单 T-2001' },
+    { category: '问题与支持', date: '2026-08-25', text: '双方已确认导出性能问题的定位结论与优化方案', source: '08-25 会议' },
+    { category: '问题与支持', date: '2026-08-26', text: '导出超时问题已完成修复验证', source: '工单 T-2001' },
   ],
-  next_week_plan: [{ text: '跟进导出性能复测结果', source: '08-25 电话约定' }],
-  risks: [{ text: '客户对导出性能表达不满，需重点关注', source: '08-25 电话' }],
+  next_week_plan: [{ text: '双方按约定完成导出性能复测，预计周四前出结论', source: '08-25 会议约定' }],
+  risks: [{ text: '【风险】导出性能复测结果尚待确认，若未达预期可能影响后续验收节点。项目组已准备备选优化方案，届时将与贵方确认调整安排。', source: '08-25 电话' }],
 };
 
 test('workbench: week helpers align to Monday and compute Shanghai week bounds', () => {
@@ -2654,19 +2654,41 @@ test('workbench: weekly report generation uses full-context model call and persi
     assert.match(capturedPrompt, /约定周四复测/);
     assert.match(capturedPrompt, /问题排查/);
     assert.match(capturedPrompt, /next_week_plan/);
-    // 近音词规则与「原话保持口语原样」的订正优先级说明都必须注入周报提示词。
+    // 客户版定位与章节规则：面向外部客户、结果导向、合并会议流水、禁内部统计/评级、风险不隐藏且中性可行动、source 仅内部依据。
+    assert.match(capturedPrompt, /面向外部客户/);
+    assert.match(capturedPrompt, /直接复制或发布给外部客户/);
+    assert.match(capturedPrompt, /项目成果、已确认结论/);
+    assert.match(capturedPrompt, /合并后的项目进展/);
+    assert.match(capturedPrompt, /逐场复述会议流水/);
+    assert.match(capturedPrompt, /内部统计/);
+    assert.match(capturedPrompt, /风险评级/);
+    assert.match(capturedPrompt, /不能为了让周报显得积极而隐藏真实风险/);
+    assert.match(capturedPrompt, /客观、克制、透明、可行动/);
+    assert.match(capturedPrompt, /【风险】/);
+    assert.match(capturedPrompt, /【阻塞】/);
+    assert.match(capturedPrompt, /【待确认】/);
+    assert.match(capturedPrompt, /仅供内部审核的证据标注/);
+    assert.match(capturedPrompt, /不进入客户版正文/);
+    // 近音词规则注入。
     assert.match(capturedPrompt, /发音相近/);
     for (const alias of ['万死', '万斯', 'vans']) assert.ok(capturedPrompt.includes(alias), `周报提示词必须包含近音词 ${alias}`);
     assert.match(capturedPrompt, /优先理解为并写作 ONES/);
-    assert.match(capturedPrompt, /订正优先于/);
+    assert.match(capturedPrompt, /适用于全部正文与 source/);
     // 幂等：同指纹再次生成复用任务，不新建。
     const again = service.generate('crm-w2', '2026-08-26');
     assert.equal(again.jobId, result.jobId);
-    // Markdown 渲染四章节齐全。
+    // 客户版 Markdown：新标题格式 + 四个编号章节；不含统计与来源。
     const markdown = renderWeeklyMarkdown(report, '周报客户二');
-    assert.match(markdown, /# 周报客户二 实施周报（2026-08-24 ~ 2026-08-30）/);
-    assert.match(markdown, /## 一、本周执行摘要|本周执行摘要/);
-    assert.match(markdown, /## 下周工作计划/);
+    assert.match(markdown, /# 周报客户二 ONES 项目实施周报/);
+    assert.match(markdown, /周报周期：2026-08-24 至 2026-08-30/);
+    assert.match(markdown, /## 一、本周工作概览/);
+    assert.match(markdown, /## 二、本周关键进展/);
+    assert.match(markdown, /## 三、下周工作计划/);
+    assert.match(markdown, /## 四、风险与待协调事项/);
+    assert.doesNotMatch(markdown, /（\d{2}-\d{2} 会议）/);
+    assert.doesNotMatch(markdown, /【问题与支持】/);
+    // 生成版本锁定：回退版本字符串会让旧指纹复活幂等短路，旧内容周报无法重建。
+    assert.equal(WEEKLY_REPORT_GENERATION_VERSION, 'weekly-report-v3-customer-facing');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -2720,7 +2742,11 @@ test('workbench: weekly report edit uses optimistic lock and publish goes throug
     // 发布哈希门：preview → 篡改内容后 hash 不匹配 → publish 拒绝。
     const preview = service.publishPreview(report.id, 'parent-1');
     assert.equal(preview.args.parentPageID, 'parent-1');
-    assert.match(String(preview.args.title), /周报客户四 实施周报/);
+    assert.match(String(preview.args.title), /周报客户四 ONES 项目实施周报/);
+    // 客户版发布正文：无来源括号、无内部统计。
+    assert.match(String(preview.args.content), /# 周报客户四 ONES 项目实施周报/);
+    assert.doesNotMatch(String(preview.args.content), /（08-25/);
+    assert.doesNotMatch(String(preview.args.content), /沟通 \d+ 场/);
     const stale = db.updateWeeklyReport(report.id, report.version, { ...edited, summary: '偷改后的摘要' })!;
     assert.equal(stale.version, 3);
     await assert.rejects(() => service.publish(report.id, preview.report.version, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
@@ -2731,6 +2757,97 @@ test('workbench: weekly report edit uses optimistic lock and publish goes throug
     assert.equal(published.publishedPageId, 'page-77');
     // 已发布的周报不可再 preview。
     assert.throws(() => service.publishPreview(published.id, 'parent-1'), /不可发布/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: customer-facing markdown excludes internal evidence and stats while keeping real risks', () => {
+  // 新版生成的干净周报：内部证据只在 source/category/stats 里，正文为客户版表达。
+  // （正文残留内部措辞的场景由 legacy 兼容测试的 warnings 覆盖——渲染器不改写正文。）
+  const report = {
+    id: 'wr-x', customerId: 'crm-x', weekStart: '2026-08-24', weekEnd: '2026-08-30', version: 1, status: 'draft' as const,
+    content: {
+      summary: '本周双方完成需求调研初步对齐并确认部署窗口，项目整体按计划推进。',
+      accomplishments: [
+        { category: '需求调研', date: '2026-08-25', text: '完成需求调研初步对齐', source: 'Hemory 片段 08-25' },
+      ],
+      next_week_plan: [{ text: '双方完成部署方案确认', source: '行动事项' }],
+      risks: [
+        { text: '【风险】服务器资源到位时间尚待确认，可能影响部署节点。双方将于下周确认资源清单。', source: '08-26 电话' },
+        { text: '【阻塞】第三方接口未开通导致联调暂停。项目组已同步替代验证方案。', source: '工单 T-2005' },
+        { text: '【待确认】数据库选型尚需双方确认，项目组将给出建议方案。', source: '08-27 会议' },
+      ],
+    },
+    stats: { communications: 3, newSuggestions: 0, newTickets: 0, newOperations: 0, resolvedSuggestions: 0, resolvedTickets: 0, resolvedOperations: 0, blockedTickets: 1, openTickets: 2, workhours: 0, actionsCompleted: 0, notes: [] },
+    generator: 'fake/model', fingerprint: 'fp-x', createdAt: '2026-08-31T00:00:00Z', updatedAt: '2026-08-31T00:00:00Z',
+  };
+  const markdown = renderWeeklyMarkdown(report as any, '测试客户');
+  // 四章节标题与条目保留。
+  assert.match(markdown, /## 一、本周工作概览/);
+  assert.match(markdown, /## 二、本周关键进展/);
+  assert.match(markdown, /## 三、下周工作计划/);
+  assert.match(markdown, /## 四、风险与待协调事项/);
+  assert.match(markdown, /【风险】服务器资源到位时间尚待确认/);
+  assert.match(markdown, /【阻塞】第三方接口未开通/);
+  assert.match(markdown, /【待确认】数据库选型/);
+  // 客户版正文不得包含的内部证据：source 括号、Hemory/CRM/行动事项、统计、[分类] 前缀、unknown。
+  assert.ok(!/Hemory/.test(markdown), 'markdown 不得包含 Hemory');
+  assert.ok(!/CRM 跟进/.test(markdown), 'markdown 不得包含 CRM 跟进');
+  assert.ok(!/行动事项/.test(markdown), 'markdown 不得包含行动事项来源');
+  assert.ok(!/风险评级|评分/.test(markdown), 'markdown 不得包含风险评级');
+  assert.ok(!/沟通 \d+ 场/.test(markdown), 'markdown 不得包含沟通场次统计');
+  assert.ok(!/新增工单 \d+/.test(markdown), 'markdown 不得包含工单统计');
+  assert.ok(!/工时 0\.0h/.test(markdown), 'markdown 不得包含工时统计');
+  assert.ok(!/（08-25|（08-26|（08-27|（工单/.test(markdown), 'markdown 不得包含来源括号');
+  assert.ok(!/unknown/.test(markdown), 'markdown 不得包含 unknown 占位词');
+  // 干净内容不告警。
+  assert.deepEqual(weeklyContentWarnings(report.content), []);
+  // 空风险章节输出固定兜底句。
+  const noRiskReport = { ...report, content: { ...report.content, risks: [] } };
+  assert.match(renderWeeklyMarkdown(noRiskReport as any, '测试客户'), new RegExp('当前暂无影响项目计划的重大风险或阻塞'));
+});
+
+test('workbench: legacy weekly reports render and publish under the customer-facing contract with warnings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-w9', name: '周报客户九' });
+    segment(db, 'crm-w9', 'w9-r1:t1', 'w9-r1', '周会', '2026-08-25T05:00:00Z', '推进顺利');
+    // 直接落一份「旧版提示词口径」的历史周报：正文残留内部统计、Hemory 引用与情绪记录，source 为内部证据。
+    const legacyContent = {
+      summary: '本周沟通 2 场（详见 Hemory 片段），工时 0.0h，客户对进度表示不满，整体基调平稳。',
+      accomplishments: [{ category: '沟通与会议', date: '2026-08-25', text: '完成周度例会', source: 'Hemory 片段 08-25' }],
+      next_week_plan: [{ text: '推进部署准备', source: '行动事项' }],
+      risks: [{ text: '客户担忧资源到位时间', source: '风险评级 medium' }],
+    };
+    const legacyReport = db.upsertWeeklyReport({ customerId: 'crm-w9', weekStart: '2026-08-24', weekEnd: '2026-08-30',
+      content: legacyContent as any, stats: { communications: 2, newSuggestions: 0, newTickets: 0, newOperations: 0, resolvedSuggestions: null, resolvedTickets: null, resolvedOperations: null, blockedTickets: 0, openTickets: 0, workhours: 0, actionsCompleted: 0, notes: [] }, generator: 'old/model', fingerprint: 'fp-legacy-9' });
+    // 读取正常（历史周报兼容），详情出口的 markdown 已剥离结构性内部证据。
+    const detail = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any).detailWithMarkdown(legacyReport.id);
+    assert.ok(detail, '历史周报必须能通过详情出口读取');
+    assert.match(detail!.markdown, /# 周报客户九 ONES 项目实施周报/);
+    assert.ok(!/（Hemory 片段 08-25）/.test(detail!.markdown), '历史周报的 source 括号必须被剥离');
+    assert.ok(!/（风险评级 medium）/.test(detail!.markdown), '历史周报的风险评级来源必须被剥离');
+    // warnings 检出正文残留的内部信息（工时统计/Hemory/客户情绪），提示 CSM 修正。
+    assert.ok(detail!.warnings.some((warning) => /内部工时统计/.test(warning)), '必须检出正文工时统计残留');
+    assert.ok(detail!.warnings.some((warning) => /Hemory/.test(warning)), '必须检出正文 Hemory 残留');
+    assert.ok(detail!.warnings.some((warning) => /客户情绪内部记录/.test(warning)), '必须检出客户情绪记录残留');
+    // 新版干净内容不告警（在下一周 2026-08-31 生成，不覆盖 legacy 周报）。
+    const clean = await (async () => {
+      segment(db, 'crm-w9', 'w9-r2:t1', 'w9-r2', '下周会', '2026-09-01T05:00:00Z', '推进顺利');
+      const service = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any, fakeWeeklyModel(WEEKLY_CONTENT));
+      const queued = service.generate('crm-w9', '2026-08-31', true);
+      await waitForJob(db, queued.jobId!);
+      return db.getWeeklyReportByWeek('crm-w9', '2026-08-31')!;
+    })();
+    assert.deepEqual(weeklyContentWarnings(clean.content), []);
+    // 发布哈希门照常工作（preview 返回 warnings；篡改内容后旧批准哈希失效）。
+    const service = new WeeklyReportService(db,
+      { listTools: () => [], call: async () => ({ text: '{"result":"SUCCESS","data":{"pageID":"page-99"}}', isError: false }) } as any);
+    const preview = service.publishPreview(legacyReport.id, 'parent-9');
+    assert.ok(Array.isArray(preview.warnings) && preview.warnings.length > 0, '历史周报 preview 必须带 warnings');
+    await assert.rejects(() => service.publish(legacyReport.id, preview.report.version + 1, 'parent-9', preview.approvalHash), /版本或批准内容已变化/);
+    const published = await service.publish(legacyReport.id, preview.report.version, 'parent-9', preview.approvalHash);
+    assert.equal(published.status, 'published');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

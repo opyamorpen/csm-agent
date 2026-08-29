@@ -695,8 +695,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const reportId = weeklyMatch[1];
         const sub = weeklyMatch[2] ?? '';
         if (req.method === 'GET' && sub === '') {
-          const report = workbench.weekly.get(reportId);
-          return report ? json(res, 200, { report }) : json(res, 404, { error: 'weekly report not found' });
+          // markdown 是服务端权威渲染的客户版正文（Web 复制与 CLI 默认输出共用），warnings 为内部证据残留提示。
+          const detail = workbench.weekly.detailWithMarkdown(reportId);
+          return detail ? json(res, 200, { report: detail.report, markdown: detail.markdown, warnings: detail.warnings }) : json(res, 404, { error: 'weekly report not found' });
         }
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);

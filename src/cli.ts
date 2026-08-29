@@ -131,13 +131,14 @@ function help(): void {
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
   csm-agent weekly-report list <客户ID或名称> [--json]
   csm-agent weekly-report show <周报ID> [--json]
-    （四章节内容 + 确定性统计一览；--json 输出完整对象）
+    （默认输出客户版周报 Markdown（与复制/Wiki 发布同源）；--json 输出含 source/stats 的完整对象）
   csm-agent weekly-report generate <客户ID或名称> [YYYY-MM-DD] [--force] [--wait]
-    （日期为周内任意一天，自动对齐周一；基于该客户本周全部信息生成四章节周报；
+    （日期为周内任意一天，自动对齐周一；基于该客户本周全部信息生成客户版四章节周报；
      --force 强制重建已存在的周报；--wait 轮询生成任务到终态）
   csm-agent weekly-report update <周报ID> <版本> <JSON>
     （JSON 为四章节 content 对象：summary/accomplishments/next_week_plan/risks）
   csm-agent weekly-report preview <周报ID> [ONES父页面ID]
+    （客户版发布正文 + 内部信息警告 + 批准哈希）
   csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <批准哈希>
   csm-agent wiki spaces [--json]
   csm-agent wiki pages --space <页面组ID> [--parent <页面ID>] [--json]
@@ -408,19 +409,16 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
   throw new Error('case 子命令只允许 list/generate/update/preview/publish');
 }
 
-function printWeeklyReport(report: any, customerName = ''): void {
-  const stats = report.stats ?? {};
+function printWeeklyReport(report: any, markdown = '', customerName = ''): void {
   console.log(`${customerName ? `${customerName} · ` : ''}${report.weekStart} ~ ${report.weekEnd} · ${report.status === 'published' ? `已发布(${report.publishedPageId ?? ''})` : `草稿 v${report.version}`} · ${report.generator ?? 'unknown'}`);
-  console.log(`统计: 沟通 ${stats.communications ?? 0} 场 · 新增建议 ${stats.newSuggestions ?? 0}(解决 ${stats.resolvedSuggestions ?? 'unknown'}) · 新增工单 ${stats.newTickets ?? 0}(解决 ${stats.resolvedTickets ?? 'unknown'}) · 新增运维 ${stats.newOperations ?? 0}(解决 ${stats.resolvedOperations ?? 'unknown'}) · 工时 ${stats.workhours == null ? 'unknown' : `${Number(stats.workhours).toFixed(1)}h`}`);
-  const content = report.content ?? {};
-  console.log(`\n一、本周执行摘要\n${content.summary ?? '(空)'}`);
-  console.log(`\n二、本周完成情况`);
-  for (const item of content.accomplishments ?? []) console.log(`  [${item.category}]${item.date ? ` ${item.date}` : ''} ${item.text}${item.source ? `（${item.source}）` : ''}`);
-  console.log(`\n三、下周工作计划`);
-  for (const [index, item] of (content.next_week_plan ?? []).entries()) console.log(`  ${index + 1}. ${item.text}${item.source ? `（${item.source}）` : ''}`);
-  console.log(`\n四、问题风险与阻塞`);
-  for (const item of content.risks ?? []) console.log(`  - ${item.text}${item.source ? `（${item.source}）` : ''}`);
-  if ((report.stats?.notes ?? []).length) console.log(`\n口径说明: ${(report.stats.notes).join('；')}`);
+  // 正文 = 服务端 renderWeeklyMarkdown 权威渲染的客户版 Markdown（与 Web 复制、Wiki 发布同源）；
+  // 内部证据与统计不进默认输出，--json 保留完整结构化数据供审核与审计。
+  if (markdown) console.log(`\n${markdown}`);
+  else {
+    const content = report.content ?? {};
+    console.log(`\n## 一、本周工作概览\n${content.summary ?? '(空)'}`);
+  }
+  console.log(`\n（完整内部证据与统计：csm-agent weekly-report show ${report.id} --json）`);
 }
 
 async function weeklyReportCommand(subcommand: string, values: string[]): Promise<void> {
@@ -448,7 +446,10 @@ async function weeklyReportCommand(subcommand: string, values: string[]): Promis
       if (jobs.every((job) => job.status === 'succeeded')) {
         const body = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`);
         const report = (body.reports ?? []).find((item: any) => item.weekStart === result.weekStart);
-        if (report) printWeeklyReport(report, customer.name);
+        if (report) {
+          const detail = await request<any>(`/api/weekly-reports/${encodeURIComponent(report.id)}`);
+          printWeeklyReport(detail.report, detail.markdown, customer.name);
+        }
       }
       return;
     }
@@ -459,7 +460,7 @@ async function weeklyReportCommand(subcommand: string, values: string[]): Promis
   if (subcommand === 'show') {
     const body = await request<any>(`/api/weekly-reports/${encodeURIComponent(reportId)}`);
     if (jsonOutput) return print(body.report);
-    return printWeeklyReport(body.report);
+    return printWeeklyReport(body.report, body.markdown ?? '');
   }
   if (subcommand === 'update') {
     const version = Number(values.shift());
@@ -476,9 +477,20 @@ async function weeklyReportCommand(subcommand: string, values: string[]): Promis
     return print(result);
   }
   if (subcommand === 'preview') {
-    return print(await request(`/api/weekly-reports/${encodeURIComponent(reportId)}/publish-preview`, {
+    const body = await request<any>(`/api/weekly-reports/${encodeURIComponent(reportId)}/publish-preview`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID: values.join(' ') }),
-    }));
+    });
+    if (jsonOutput) return print(body);
+    // 人类可读预览：客户版发布正文 + 内部信息警告 + 批准哈希（不执行发布）。
+    if ((body.warnings ?? []).length) {
+      console.log('⚠️ 内部信息提示（请先修正再发布）：');
+      for (const warning of body.warnings) console.log(`  - ${warning}`);
+      console.log('');
+    }
+    console.log(`发布页面标题：${body.args?.title ?? ''}\n`);
+    console.log(String(body.args?.content ?? ''));
+    console.log(`\n批准哈希：${body.approvalHash ?? ''}`);
+    return;
   }
   if (subcommand === 'publish') {
     const version = Number(values.shift());

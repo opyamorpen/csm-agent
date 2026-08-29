@@ -1,46 +1,46 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "实施周报 Weekly Implementation Report",
-  "description": "每个客户每周一篇（周一~周日），默认发布到 ONES Wiki；基于该客户本周全部信息（沟通片段、建议、工单、运维、工时、CRM 跟进）生成。",
+  "title": "实施周报 Weekly Implementation Report（客户版）",
+  "description": "每个客户每周一篇（周一~周日），经 CSM 审核后可直接复制或发布给外部客户；基于该客户本周全部信息（沟通片段、建议、工单、运维、工时、CRM 跟进）生成，内部证据仅进 source 供审核。",
   "type": "object",
   "required": ["summary", "accomplishments", "next_week_plan", "risks"],
   "properties": {
-    "summary": { "type": "string", "description": "① 本周执行摘要：3~6 句总括叙述，引用确定性统计并给出整体基调" },
+    "summary": { "type": "string", "description": "① 本周工作概览：2~4 句概括项目阶段、推进重点与已确认结论、里程碑" },
     "accomplishments": {
       "type": "array",
-      "description": "② 本周完成情况：按小类逐条列出，每条带日期与来源引用",
+      "description": "② 本周关键进展：按项目主题归并的条目（4~8 条），每条说明完成了什么、确认了什么、形成了什么结果",
       "items": {
         "type": "object",
         "required": ["category", "text"],
         "properties": {
-          "category": { "type": "string", "enum": ["沟通与会议", "建议与反馈", "工单处理", "运维事项", "私有云实例", "CRM 跟进", "工时投入", "其他"], "description": "事项小类" },
-          "date": { "type": "string", "description": "YYYY-MM-DD" },
-          "text": { "type": "string", "description": "事项内容与结果" },
-          "source": { "type": "string", "description": "来源引用，如「Hemory 片段 08-25」「工单 T-2001」" }
+          "category": { "type": "string", "enum": ["需求调研", "方案与设计", "部署与实施", "联调与验证", "培训与赋能", "计划与协调", "问题与支持", "其他"], "description": "项目主题（内部元数据，不进入客户版正文）" },
+          "date": { "type": "string", "description": "YYYY-MM-DD，仅在有实际价值时保留（内部元数据，不进入客户版正文）" },
+          "text": { "type": "string", "description": "进展描述（客户可见正文）" },
+          "source": { "type": "string", "description": "内部依据，如「08-25 会议」「工单 T-2001」，不进入客户版正文" }
         }
       }
     },
     "next_week_plan": {
       "type": "array",
-      "description": "③ 下周工作计划：主要来自本周沟通片段中双方约定的后续动作与承诺，合并未完成行动事项与未关闭工单/建议",
+      "description": "③ 下周工作计划：客户可确认的关键计划（5~8 条），尽量含计划事项、时间节点、责任方（双方/ONES 项目组/贵方）与预期结果",
       "items": {
         "type": "object",
         "required": ["text"],
         "properties": {
-          "text": { "type": "string", "description": "计划事项" },
-          "source": { "type": "string", "description": "依据来源，如「08-27 会议约定」「行动事项」「工单 T-2005」" }
+          "text": { "type": "string", "description": "计划事项（客户可见正文）" },
+          "source": { "type": "string", "description": "内部依据，如「08-27 会议约定」「工单 T-2005」，不进入客户版正文" }
         }
       }
     },
     "risks": {
       "type": "array",
-      "description": "④ 问题风险与阻塞：主要来自本周沟通片段中客户表达的问题/担忧/外部依赖，合并阻塞工单与当前风险评级",
+      "description": "④ 风险与待协调事项：【风险】【阻塞】【待确认】前缀的客观、可行动条目；不得隐藏真实风险，也不得输出内部评分与情绪记录",
       "items": {
         "type": "object",
         "required": ["text"],
         "properties": {
-          "text": { "type": "string", "description": "风险/问题/阻塞描述" },
-          "source": { "type": "string", "description": "依据来源，如「08-26 电话」「工单 T-2005」「风险评级 medium」" }
+          "text": { "type": "string", "description": "风险/阻塞/待确认描述（客户可见正文）" },
+          "source": { "type": "string", "description": "内部依据，如「08-26 电话」「工单 T-2005」，不进入客户版正文" }
         }
       }
     }

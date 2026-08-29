@@ -751,6 +751,9 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .weekly-stats { margin: 6px 0 12px; padding: 8px 12px; border-radius: 6px; background: #f5f7fa; color: #36414e; font-size: 13px; }
 .weekly-section { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .weekly-list { margin: 4px 0 4px 20px; display: grid; gap: 5px; font-size: 13.5px; }
+.weekly-item { display: block; }
+.weekly-item-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.weekly-evidence { color: #8a93a0; font-size: 12px; overflow-wrap: anywhere; }
 .weekly-failure { background: #fff7f6; border: 1px solid #e5b5b0; border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
 .weekly-failure p { margin: 0; color: #952e2a; font-size: 13px; overflow-wrap: anywhere; }
 

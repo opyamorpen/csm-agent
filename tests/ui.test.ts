@@ -716,9 +716,14 @@ test('draft generation shows a loading banner and polls job status after attribu
 test('customer detail exposes the weekly report tab with generation, failure retry and wiki publish', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const serverSource = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
 
   // Tab 注册：客户案例之后新增「实施周报」。
   assert.match(source, /addTab\('weekly_report', '实施周报', buildWeeklyPanel\(c\)\)/);
+
+  // API 契约：周报详情接口下发服务端权威渲染的客户版 Markdown 与内部证据警告。
+  assert.match(serverSource, /detailWithMarkdown\(reportId\)/);
+  assert.match(serverSource, /markdown: detail\.markdown, warnings: detail\.warnings/);
 
   // 周选择对齐周一 + 生成入口。
   const panel = source.match(/function buildWeeklyPanel[\s\S]*?\n  \}\n+\n?  async function openCustomer/)?.[0]
@@ -741,29 +746,47 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(failure, /'再次生成'/);
   assert.match(failure, /force: true/);
 
-  // 展示四章节 + 统计条 + 操作（编辑/复制 Markdown/发布到 Wiki/重新生成）。
+  // 展示四章节（客户版）+ 内部统计标记 + 内部依据弱化 + 操作（编辑/复制 Markdown/发布到 Wiki/重新生成）。
   const renderer = source.match(/async function renderWeeklyReport[\s\S]*?\n  \}\n\n  function renderWeeklyBody/)?.[0];
   assert.ok(renderer, 'renderWeeklyReport source was not found');
-  for (const section of ['本周执行摘要', '本周完成情况', '下周工作计划', '问题风险与阻塞']) {
+  for (const section of ['本周工作概览', '本周关键进展', '下周工作计划', '风险与待协调事项']) {
     assert.match(renderer, new RegExp(section));
   }
   assert.match(renderer, /weeklyStatsLine/);
+  assert.match(renderer, /内部统计（不随客户版内容复制或发布）/);
+  assert.match(renderer, /内部依据：/);
+  assert.match(renderer, /weekly-evidence/);
   assert.match(renderer, /'编辑'/);
   assert.match(renderer, /'复制 Markdown'/);
   assert.match(renderer, /'发布到 Wiki'/);
   assert.match(renderer, /'重新生成'/);
-  assert.match(renderer, /navigator\.clipboard\.writeText/);
+  // 显示契约：复制内容 = 服务端权威渲染的客户版 Markdown（前端不再自行拼装第二份 Markdown）。
+  assert.match(renderer, /api\(`\/api\/weekly-reports\/\$\{report\.id\}`\)/);
+  assert.match(renderer, /detail\.markdown/);
+  assert.match(renderer, /copyText\(/);
+  assert.doesNotMatch(renderer, /navigator\.clipboard\.writeText/);
   assert.match(renderer, /publish-preview/);
+  // 发布确认弹窗前置内部信息警告。
+  assert.match(renderer, /preview\.warnings/);
 
   // 全部异步按钮走 withLoading loading 契约（禁用 + 进行中文案）。
   assert.match(source, /function withLoading\(button, busyText, fn\)/);
   assert.match(source, /button\.disabled = true;\n      button\.textContent = busyText;/);
 
-  // 周报样式：统计条、错误卡片、周选择工具条。
+  // 编辑弹窗：新章节字段名 + 客户版帮助文字（内部依据仅审核用、风险条目前缀提示）。
+  const editor = source.match(/function editWeeklyReport[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 轮询周报生成任务/)?.[0];
+  assert.ok(editor, 'editWeeklyReport source was not found');
+  assert.match(editor, /编辑实施周报（客户版）/);
+  assert.match(editor, /本周工作概览（客户可见正文/);
+  assert.match(editor, /内部依据，可省略/);
+  assert.match(editor, /【风险】【阻塞】【待确认】/);
+
+  // 周报样式：统计条、错误卡片、周选择工具条、内部依据弱化。
   assert.match(styles, /\.weekly-report-card \{/);
   assert.match(styles, /\.weekly-stats \{/);
   assert.match(styles, /\.weekly-failure \{/);
   assert.match(styles, /\.weekly-toolbar \{/);
+  assert.match(styles, /\.weekly-evidence \{/);
 });
 
 test('wiki page picker replaces manual page id input for case and weekly publishing', () => {

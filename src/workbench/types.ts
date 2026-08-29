@@ -271,19 +271,23 @@ export interface DraftGenerationJob {
   updatedAt: string;
 }
 
-/** 实施周报四章节内容（LLM 叙述部分）。 */
+/**
+ * 实施周报四章节内容（LLM 叙述部分）。定位为客户版项目周报：经 CSM 编辑确认后可直接
+ * 复制或发布给外部客户，text 是客户可见正文；source/category/date 仅供内部审核，
+ * 不进入客户版 Markdown（renderWeeklyMarkdown 只渲染 text 与 summary）。
+ */
 export interface WeeklyReportContent {
-  /** ① 本周执行摘要（总括叙述 3~6 句） */
+  /** ① 本周工作概览：2~4 句概括项目阶段、推进重点与已确认结论 */
   summary: string;
-  /** ② 本周完成情况：分小类逐条列出，每条带日期与来源引用 */
+  /** ② 本周关键进展：按项目主题归并的条目（4~8 条）；category 为项目主题，date 仅在有价值时保留 */
   accomplishments: Array<{ category: string; date: string; text: string; source: string }>;
-  /** ③ 下周工作计划：主要来自 Hemory 片段中的约定与承诺，逐条标注来源 */
+  /** ③ 下周工作计划：客户可确认的计划条目，尽量含时间节点、责任方与预期结果 */
   next_week_plan: Array<{ text: string; source: string }>;
-  /** ④ 问题风险与阻塞：主要来自 Hemory 片段中的问题信号 + 阻塞工单/风险评级 */
+  /** ④ 风险与待协调事项：【风险】【阻塞】【待确认】前缀的客观、可行动条目；source 为内部依据 */
   risks: Array<{ text: string; source: string }>;
 }
 
-/** 实施周报代码确定性统计（叙述之外的一眼指标）。 */
+/** 实施周报代码确定性统计（内部指标，保留供审核与审计，不进入客户版正文）。 */
 export interface WeeklyReportStats {
   /** 沟通场数（按录音去重，一场长会的多个话题片段只算一次） */
   communications: number;

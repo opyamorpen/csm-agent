@@ -69,6 +69,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
+  assert.match(help.stdout, /默认输出客户版周报 Markdown（与复制\/Wiki 发布同源）/);
   assert.match(help.stdout, /csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <批准哈希>/);
   assert.match(help.stdout, /csm-agent wiki spaces \[--json\]/);
   assert.match(help.stdout, /csm-agent wiki pages --space <页面组ID>/);
@@ -97,6 +98,22 @@ test('draft regenerate waits for the new batch and points to the review step', (
   assert.match(handler, /waitForRegeneratedBatch/);
   assert.match(handler, /draft review/);
   assert.match(handler, /已作废/);
+});
+
+test('weekly-report CLI defaults to the customer-facing markdown and keeps evidence behind --json', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const printer = source.match(/function printWeeklyReport[\s\S]*?\n}\n\nasync function weeklyReportCommand/)?.[0];
+
+  // 显示契约：默认输出 = 服务端权威渲染的客户版 Markdown；内部证据只留在 --json。
+  assert.ok(printer, 'printWeeklyReport source was not found');
+  assert.match(printer, /markdown/);
+  assert.doesNotMatch(printer, /统计: 沟通/);
+  assert.doesNotMatch(printer, /口径说明/);
+  assert.match(printer, /--json/);
+  // show 子命令走详情接口取 markdown。
+  const showHandler = source.match(/if \(subcommand === 'show'\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(showHandler, 'weekly-report show handler was not found');
+  assert.match(showHandler, /body\.markdown/);
 });
 
 test('hemory CLI covers ignore restore and incremental sync semantics', () => {

@@ -8,15 +8,21 @@ import { onesAsrAliasRule } from './drafts.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, SourceEvent, WeeklyReport, WeeklyReportContent, WeeklyReportStats } from './types.js';
 
-export const WEEKLY_REPORT_GENERATION_VERSION = 'weekly-report-v2-asr-alias';
+export const WEEKLY_REPORT_GENERATION_VERSION = 'weekly-report-v3-customer-facing';
 
-/** 周报四章节的字段契约（templates/weekly-report.json 同源描述，供前端/CLI 展示）。 */
-export const WEEKLY_REPORT_SECTIONS: Array<{ key: keyof WeeklyReportContent; label: string }> = [
-  { key: 'summary', label: '本周执行摘要' },
-  { key: 'accomplishments', label: '本周完成情况' },
-  { key: 'next_week_plan', label: '下周工作计划' },
-  { key: 'risks', label: '问题风险与阻塞' },
+/**
+ * 周报四章节的字段契约（templates/weekly-report.json 同源描述，供前端/CLI 展示）。
+ * 标签即客户版正文/复制/发布/CLI 的统一章节标题；description 为该章节的业务含义说明。
+ */
+export const WEEKLY_REPORT_SECTIONS: Array<{ key: keyof WeeklyReportContent; label: string; description: string }> = [
+  { key: 'summary', label: '本周工作概览', description: '2~4 句概括项目阶段、本周推进重点与已确认的关键结论、里程碑' },
+  { key: 'accomplishments', label: '本周关键进展', description: '按项目主题归并的进展条目（4~8 条），每条说明完成了什么、确认了什么、形成了什么结果' },
+  { key: 'next_week_plan', label: '下周工作计划', description: '客户可确认的关键计划（5~8 条），尽量含计划事项、时间节点、责任方与预期结果' },
+  { key: 'risks', label: '风险与待协调事项', description: '客观、可行动的风险/阻塞/待确认事项，使用【风险】【阻塞】【待确认】前缀，不得隐藏真实风险' },
 ];
+
+/** 空风险章节的固定兜底句（历史周报空数组时同样生效）。 */
+export const WEEKLY_NO_RISK_SENTENCE = '当前暂无影响项目计划的重大风险或阻塞。';
 
 /** 转写注入预算：超预算按片段均摊截取（保留每片段开头——承诺/风险信号多出现在对话开头）。 */
 const TRANSCRIPT_BUDGET = 24_000;
@@ -195,7 +201,7 @@ function parseContent(value: unknown): WeeklyReportContent {
       : { text: record.text, source };
   };
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
-  if (!summary) throw new Error('模型未返回本周执行摘要');
+  if (!summary) throw new Error('模型未返回本周工作概览');
   const accomplishments = (Array.isArray(raw.accomplishments) ? raw.accomplishments : [])
     .flatMap((item) => { const parsed = entry(item, true); return parsed ? [parsed as { category: string; date: string; text: string; source: string }] : []; });
   const nextWeekPlan = (Array.isArray(raw.next_week_plan) ? raw.next_week_plan : [])
@@ -207,16 +213,28 @@ function parseContent(value: unknown): WeeklyReportContent {
 
 async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<WeeklyReportContent> {
   const prompt = `为客户「${input.customer.name}」生成 ${input.weekStart} ~ ${input.weekEnd}（周一~周日）的实施周报。`
-    + `你是 CSM 实施周报撰写助手，基于下面提供的全量上下文（沟通录音片段、建议、工单、运维工单、CRM 跟进、工时、行动事项、风险评级）写作，不执行任何工具或外部写入。\n`
+    + `这份周报经 CSM 审核后会直接复制或发布给外部客户，是正式、克制、面向外部客户的项目周报。你只能基于下面提供的证据写作，不执行任何工具或外部写入。\n`
     + `输出四个章节，只输出 JSON：\n`
     + `{"summary":"...","accomplishments":[{"category":"...","date":"YYYY-MM-DD","text":"...","source":"..."}],"next_week_plan":[{"text":"...","source":"..."}],"risks":[{"text":"...","source":"..."}]}\n`
+    + `写作总则（全部章节适用）：\n`
+    + `- 面向外部客户、结果导向：正文围绕项目成果、已确认结论、里程碑、下一步计划与项目风险，使用「双方」「贵方」「ONES 项目组」「项目组」等正式称谓。\n`
+    + `- 上下文中的统计、工时、风险评级、行动事项、CRM 跟进等是内部证据，只用于帮助你理解事实，其本身一律不写入正文，仅可在 source 字段标注依据。\n`
+    + `- 同一事项经过多次沟通只保留一条合并后的项目进展，不得按日期逐场复述会议流水。\n`
+    + `- 缺失信息直接不写或转为「待确认」事项，不得推断责任方、时间或结论，不得虚构事实。\n`
+    + `- 正文禁止出现 unknown 等占位词，禁止出现 Hemory、CRM 跟进、行动事项、风险评级、风险评分、内部统计（沟通场次、工时合计、新增/解决工单建议数）等内部信息。\n`
+    + `- 不得泄露其他客户、其他项目或无关第三方名称；不得把内部讨论、猜测或未经确认的方案写成双方结论。\n`
+    + `- source 字段是仅供内部审核的证据标注（如 "08-27 会议"、"工单 T-2005"），不进入客户版正文；source 里的日期用 MM-DD。\n`
     + `章节要求：\n`
-    + `1. summary（本周执行摘要）：3~6 句总括叙述，引用统计（沟通场数、新增/解决的建议、工单、运维工单、工时合计等），并给出整体基调判断。\n`
-    + `2. accomplishments（本周完成情况）：按小类逐条列出本周发生的全部事项，category 从以下选择：沟通与会议、建议与反馈、工单处理、运维事项、私有云实例、CRM 跟进、工时投入；每条 date 为 YYYY-MM-DD，text 写明事项内容与结果，source 标注来源（如 "Hemory 片段 2026-08-25"、"工单 T-2001"、"CRM 跟进"）。工作项（work_items）已按「本周有更新」聚合去重——created_in_week=true 写新增、状态已完成/关闭且 updated_at 在本周写解决，其余按本周状态变化或持续处理描述；上周创建且本周无更新的事项不在列表中，不得凭空提及。建议/工单数量多时同状态的可适当合并成一条概述并注明条数，不必逐条罗列。\n`
-    + `3. next_week_plan（下周工作计划）：**主要证据是本周沟通片段（communications 里的 transcript/summary）中双方约定的后续动作与承诺**——复测/验证时间点、答应交付的事项、约定下次沟通主题、正在推进事项的下一步；再合并 actions 里未完成的行动事项与未关闭工单/建议，去重后逐条列出。每条 source 标注依据（如 "08-27 会议约定"、"行动事项"、"工单 T-2005"）。沟通中没有约定的事项不得编造。\n`
-    + `4. risks（问题风险与阻塞）：**主要证据是本周沟通片段中客户表达的问题与风险信号**——不满/抱怨、担忧、疑虑、外部依赖（客户机房窗口、第三方配合）、悬而未决的争议点；再合并阻塞工单（status 含阻塞/挂起）与当前风险评级。每条 source 标注依据（如 "08-26 电话"、"工单 T-2005"、"风险评级 medium"）。沟通中没有表达的担忧不得编造。\n`
-    + `通用规则：缺失数据按 unknown 表述，不得虚构事实；引用客户原话时保持口语原样可加引号；source 里的日期用 MM-DD。\n`
-    + `${onesAsrAliasRule()}该订正优先于“引用客户原话时保持口语原样”的规则。\n`
+    + `1. summary（本周工作概览）：2~4 句概括项目所处阶段、本周推进重点、双方已确认的关键结论和里程碑，回答「本周项目整体向前推进了什么」。可提及双方已确认的上线、部署、调研、交付等关键日期。不罗列会议场次，不引用任何内部统计与评级，不写客户画像或情绪判断，不把尚未确认的目标写成已承诺的结论。\n`
+    + `2. accomplishments（本周关键进展）：4~8 条，按项目主题、阶段成果和交付结果归并（不按小类或日期流水）。每条重点说明「完成了什么、确认了什么、形成了什么结果」，category 从以下选择：需求调研、方案与设计、部署与实施、联调与验证、培训与赋能、计划与协调、问题与支持、其他；date 为该事项最有价值的日期（YYYY-MM-DD）。CRM 跟进记录、沟通片段本身不得单独作为项目进展；对项目有实际价值的日期可保留，但不要写成会议纪要。纯内部动作（内部反馈、内部汇报、准备内部材料）不写。合同法审、付款比例、违约条款等商务细节只在确实影响项目计划且适合客户共同确认时用中性表达。人员证明、着装、安全要求等内容仅在构成明确入场条件时保留并归并为「入场准备」。工作项（work_items）已按「本周有更新」聚合去重——created_in_week=true 写新增、状态已完成/关闭且 updated_at 在本周写解决，其余按本周状态变化或持续处理描述；上周创建且本周无更新的事项不在列表中，不得凭空提及。\n`
+    + `3. next_week_plan（下周工作计划）：5~8 条客户能够理解和确认的关键计划，同一目标下的多个内部动作必须合并，不罗列纯内部待办。每条尽量包含计划事项、计划时间或目标节点、已明确的责任方、预期结果。责任方称谓：双方共同推进用「双方」，ONES 侧负责用「ONES 项目组」，客户侧负责且有明确证据时才用「贵方」；责任方、日期或结果没有证据时不得推断。不使用命令式或归责式表达；尚未确认的时间用「计划」「预计」「目标」表述，不能写成确定承诺。细碎待办应归并为客户可识别的项目主题（如现场需求调研、系统部署准备、实施计划与 SOW 确认、Demo 场景完善、二次开发接口梳理、项目启动与沟通机制建立）。主要证据是本周沟通片段（communications 里的 transcript/summary）中双方约定的后续动作与承诺，可合并未完成行动事项与未关闭工单/建议；沟通中没有约定的事项不得编造。\n`
+    + `4. risks（风险与待协调事项）：必须保留真实存在且可能影响项目范围、质量、进度、交付或上线目标的风险与阻塞——不能为了让周报显得积极而隐藏真实风险，但表达必须客观、克制、透明、可行动。仅写有明确证据的风险、阻塞或依赖，不根据客户情绪或内部评分推断。每条以「【风险】」「【阻塞】」「【待确认】」前缀开头，按「当前情况 → 可能影响 → 应对安排（已采取措施或下一步安排）→ 需协同（仅确实需要客户配合时）」组织；有应对方案必须同时写明，不能只提出问题。可以说明对具体里程碑的潜在影响，但不得夸大、施压或制造紧张。不直接引用客户的负面口语，不写「客户不满」「客户抱怨」「客户担忧」「有坑」「差距很大」等内部记录式表达，不把责任单方面归因于客户、ONES 项目组或第三方，用「尚待确认」「需要双方协同」「依赖相关资源到位」等中性表达。有证据时尽量说明责任方和期望完成时间。若本周确实没有风险或阻塞，输出一条文本为「${WEEKLY_NO_RISK_SENTENCE}」的条目。主要证据是本周沟通片段中客户表达的问题与风险信号、外部依赖与悬而未决的争议点，可合并阻塞工单；沟通中没有表达的担忧不得编造。\n`
+    + `风险表达转换示例（内部记录 → 客户版表达）：\n`
+    + `- 内部：「客户反馈外网 demo 与领导要求差距较大，否则影响下周入场和认可。」→ 客户版：「【风险】当前演示内容与一期目标场景仍需进一步对齐，若范围未及时收敛，可能影响后续方案确认。项目组将在下周现场调研中补充需求管理全流程，并根据双方确认结果完善演示内容。」\n`
+    + `- 内部：「客户服务器资源到位、网络协调及第三方接口提供进度存在不确定性。」→ 客户版：「【风险】服务器资源、网络条件及第三方接口信息的到位时间尚待确认，可能影响系统部署和后续联调节点。双方将在下周完成资源清单确认，并根据实际到位时间及时校准实施计划。」\n`
+    + `- 内部：「二开涉及六大系统，可能无法在十二月底前全部完成。」→ 客户版：「【风险】二次开发涉及多个外部系统，当前接口范围和依赖条件尚未全部确认，整体交付周期存在不确定性。建议双方优先完成接口清单、优先级和责任边界确认，并据此评估分阶段交付方案。」\n`
+    + `- 内部：「数据库选型有坑，高斯没有应答，费用也没有覆盖。」→ 客户版：「【待确认】数据库选型及适配范围尚需进一步确认，不同方案可能对实施工作量和交付周期产生影响。项目组将结合适配条件形成建议方案，并与贵方确认最终选型。」\n`
+    + `${onesAsrAliasRule()}该订正适用于全部正文与 source。\n`
     + `上下文：${renderContext(input)}`;
   // 中继端点偶发连接超时（undici 10s 连接超时，实测坏窗口可持续数分钟）：complete 不抛异常而是
   // 返回 stopReason='error' + errorMessage，必须显式透出真实原因并自动重试；固定短间隔重试会整个
@@ -226,7 +244,7 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
   let lastError = '模型未返回可解析的周报 JSON';
   for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
     const response = await runtime.models.complete(runtime.model, {
-      systemPrompt: '你是 CSM 实施周报撰写助手。你只能基于用户提供的证据写作周报，不执行任何工具或外部写入。',
+      systemPrompt: '你是 ONES 项目组实施周报撰写助手。你产出的是经 CSM 审核后直接发给外部客户的正式项目周报：只能基于用户提供的证据写作，客观克制、结果导向，不执行任何工具或外部写入。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
     });
@@ -243,25 +261,61 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
   throw new Error(lastError);
 }
 
+/**
+ * 客户版 Markdown 的唯一权威渲染（Web 复制、Wiki 发布正文、CLI 默认输出均复用本函数产物，
+ * 不允许任何一端自行拼装第二份格式）。只输出客户可见正文：条目仅 text，
+ * source/category/date 降级为内部元数据；不含统计引用块、来源括号与内部评级。
+ */
 export function renderWeeklyMarkdown(report: WeeklyReport, customerName = '客户'): string {
-  const section = (title: string, body: string) => `## ${title}\n\n${body || '待补充'}\n`;
-  const accomplishments = report.content.accomplishments.length
-    ? report.content.accomplishments.map((item) => `- [${item.category}]${item.date ? ` ${item.date}` : ''} ${item.text}${item.source ? `（${item.source}）` : ''}`).join('\n')
-    : '';
-  const plan = report.content.next_week_plan.length
-    ? report.content.next_week_plan.map((item, index) => `${index + 1}. ${item.text}${item.source ? `（${item.source}）` : ''}`).join('\n')
-    : '';
-  const risks = report.content.risks.length
-    ? report.content.risks.map((item) => `- ${item.text}${item.source ? `（${item.source}）` : ''}`).join('\n')
-    : '';
-  const statsLine = `沟通 ${report.stats.communications} 场 · 新增建议 ${report.stats.newSuggestions}（解决 ${report.stats.resolvedSuggestions ?? 'unknown'}）· 新增工单 ${report.stats.newTickets}（解决 ${report.stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${report.stats.newOperations}（解决 ${report.stats.resolvedOperations ?? 'unknown'}）· 工时 ${report.stats.workhours == null ? 'unknown' : `${Number(report.stats.workhours).toFixed(1)}h`}`;
+  const bodies: Record<keyof WeeklyReportContent, string> = {
+    summary: String(report.content.summary ?? '').trim(),
+    accomplishments: (report.content.accomplishments ?? []).map((item) => `- ${item.text}`).join('\n'),
+    next_week_plan: (report.content.next_week_plan ?? []).map((item, index) => `${index + 1}. ${item.text}`).join('\n'),
+    risks: (report.content.risks ?? []).map((item) => `- ${item.text}`).join('\n') || WEEKLY_NO_RISK_SENTENCE,
+  };
   return [
-    `# ${customerName} 实施周报（${report.weekStart} ~ ${report.weekEnd}）\n`,
-    section('本周执行摘要', `${report.content.summary}\n\n> ${statsLine}`),
-    section('本周完成情况', accomplishments),
-    section('下周工作计划', plan),
-    section('问题风险与阻塞', risks),
+    `# ${customerName} ONES 项目实施周报\n`,
+    `周报周期：${report.weekStart} 至 ${report.weekEnd}\n`,
+    ...WEEKLY_REPORT_SECTIONS.map((section, index) => `## ${SECTION_NUMBERS[index]}、${section.label}\n\n${bodies[section.key] || '待补充'}\n`),
   ].join('\n');
+}
+
+/** 章节序号（与 WEEKLY_REPORT_SECTIONS 顺序对应）。 */
+const SECTION_NUMBERS = ['一', '二', '三', '四'];
+
+/**
+ * 内部证据残留检测（非阻断）：新版提示词生成的正文不应命中；历史周报（旧版提示词）的
+ * 叙述文本可能已把内部统计/评级写进正文，结构性剥离（source/category/统计行）无法覆盖，
+ * 发布前向 CSM 提示人工复核。只查客户版正文可见的 summary 与各条目 text，不查 source。
+ */
+const WEEKLY_INTERNAL_EVIDENCE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /hemory/i, label: 'Hemory' },
+  { pattern: /crm\s*跟进/i, label: 'CRM 跟进' },
+  { pattern: /行动事项/, label: '行动事项' },
+  { pattern: /风险评级|风险评分|健康度|评分\s*\d+/, label: '内部风险评级/评分' },
+  { pattern: /工时\s*[\d.]+\s*(?:小时|h)/i, label: '内部工时统计' },
+  { pattern: /沟通\s*\d+\s*场/, label: '内部沟通场次统计' },
+  { pattern: /新增(?:建议|工单|运维)\s*\d+/, label: '内部工单/建议统计' },
+  { pattern: /\bunknown\b/i, label: 'unknown 占位词' },
+  { pattern: /客户(?:不满|抱怨|担忧|焦虑)/, label: '客户情绪内部记录' },
+  { pattern: /有坑/, label: '内部记录式表达「有坑」' },
+];
+
+export function weeklyContentWarnings(content: WeeklyReportContent): string[] {
+  const textsByKey: Record<keyof WeeklyReportContent, string[]> = {
+    summary: [String(content.summary ?? '')],
+    accomplishments: (content.accomplishments ?? []).map((item) => String(item.text ?? '')),
+    next_week_plan: (content.next_week_plan ?? []).map((item) => String(item.text ?? '')),
+    risks: (content.risks ?? []).map((item) => String(item.text ?? '')),
+  };
+  const warnings: string[] = [];
+  for (const { pattern, label } of WEEKLY_INTERNAL_EVIDENCE_PATTERNS) {
+    const hits = WEEKLY_REPORT_SECTIONS
+      .filter((section) => (textsByKey[section.key] ?? []).some((text) => pattern.test(text)))
+      .map((section) => section.label);
+    if (hits.length) warnings.push(`客户版正文检出内部信息「${label}」（${hits.join('、')}），请确认已转换为面向客户的表达后再发布`);
+  }
+  return warnings;
 }
 
 export class WeeklyReportService {
@@ -280,6 +334,14 @@ export class WeeklyReportService {
 
   get(reportId: string): WeeklyReport | undefined {
     return this.db.getWeeklyReport(reportId);
+  }
+
+  /** 详情出口：附服务端权威渲染的客户版 Markdown 与内部证据残留警告（Web 复制/CLI 默认输出共用）。 */
+  detailWithMarkdown(reportId: string): { report: WeeklyReport; markdown: string; warnings: string[] } | undefined {
+    const report = this.db.getWeeklyReport(reportId);
+    if (!report) return undefined;
+    const customer = this.db.getCustomer(report.customerId);
+    return { report, markdown: renderWeeklyMarkdown(report, customer?.name), warnings: weeklyContentWarnings(report.content) };
   }
 
   /**
@@ -386,14 +448,15 @@ export class WeeklyReportService {
     return this.db.updateWeeklyReport(reportId, expectedVersion, content);
   }
 
-  publishPreview(reportId: string, parentPageID: string): { report: WeeklyReport; tool: string; args: Record<string, unknown>; approvalHash: string } {
+  publishPreview(reportId: string, parentPageID: string): { report: WeeklyReport; tool: string; args: Record<string, unknown>; approvalHash: string; warnings: string[] } {
     const report = this.db.getWeeklyReport(reportId);
     if (!report || report.status !== 'draft') throw new Error('周报不可发布（不存在或已发布）');
     if (!parentPageID.trim()) throw new Error('缺少 ONES Wiki 父页面 ID');
     const customer = this.db.getCustomer(report.customerId);
     const tool = 'mcp__ones__create_page';
-    const args = { parentPageID, title: `${customer?.name ?? '客户'} 实施周报（${report.weekStart} ~ ${report.weekEnd}）`, content: renderWeeklyMarkdown(report, customer?.name) };
-    return { report, tool, args, approvalHash: argumentsHash({ reportId, version: report.version, tool, args }) };
+    const args = { parentPageID, title: `${customer?.name ?? '客户'} ONES 项目实施周报（${report.weekStart} ~ ${report.weekEnd}）`, content: renderWeeklyMarkdown(report, customer?.name) };
+    // warnings 是非阻断提示（历史周报正文可能残留内部信息），不参与 approvalHash——哈希只锚定发布参数。
+    return { report, tool, args, approvalHash: argumentsHash({ reportId, version: report.version, tool, args }), warnings: weeklyContentWarnings(report.content) };
   }
 
   async publish(reportId: string, version: number, parentPageID: string, approvalHash: string): Promise<WeeklyReport> {

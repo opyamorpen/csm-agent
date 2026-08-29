@@ -2204,12 +2204,12 @@
   }
 
   function editWeeklyReport(customer, report, onUpdated) {
-    openWorkbenchModal('编辑实施周报');
+    openWorkbenchModal('编辑实施周报（客户版）');
     const content = report.content || {};
-    const summary = inputField('① 本周执行摘要', content.summary, 'textarea');
-    const accomplishments = inputField('② 本周完成情况（每行一项：分类|日期|内容|来源，竖线分隔，可省略后两项）', (content.accomplishments || []).map((item) => [item.category, item.date, item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
-    const plan = inputField('③ 下周工作计划（每行一项：内容|来源，可省略来源）', (content.next_week_plan || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
-    const risks = inputField('④ 问题风险与阻塞（每行一项：内容|来源，可省略来源）', (content.risks || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const summary = inputField('① 本周工作概览（客户可见正文：2~4 句，项目阶段、推进重点与已确认结论，不含内部统计）', content.summary, 'textarea');
+    const accomplishments = inputField('② 本周关键进展（每行一项：主题|日期|内容|内部依据，竖线分隔，可省略后两项；主题如 需求调研/方案与设计/部署与实施/联调与验证/培训与赋能/计划与协调/问题与支持/其他）', (content.accomplishments || []).map((item) => [item.category, item.date, item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const plan = inputField('③ 下周工作计划（每行一项：内容|内部依据，可省略依据；面向客户的计划，含时间节点与责任方）', (content.next_week_plan || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
+    const risks = inputField('④ 风险与待协调事项（每行一项：内容|内部依据；条目以【风险】【阻塞】【待确认】开头，客观、可行动、不隐藏真实风险）', (content.risks || []).map((item) => [item.text, item.source].filter(Boolean).join('|')).join('\n'), 'textarea');
     const actions = el('div', 'row-actions');
     const save = el('button', 'primary-command', '保存周报');
     withLoading(save, '保存中…', async () => {
@@ -2310,25 +2310,38 @@
     const card = el('article', 'weekly-report-card');
     const head = el('div', 'weekly-report-head');
     const statusBadge = report.status === 'published' ? badge('已发布', 'success') : badge(`草稿 v${report.version}`, 'warning');
-    head.append(el('strong', null, `${report.weekStart} ~ ${report.weekEnd} 实施周报`), statusBadge);
+    head.append(el('strong', null, `${report.weekStart} ~ ${report.weekEnd} 实施周报（客户版）`), statusBadge);
     card.append(head);
-    if (statsLine) card.append(el('div', 'weekly-stats', statsLine));
-    card.append(sectionBlock('① 本周执行摘要', el('p', 'weekly-section', report.content.summary || '（空）')));
+    if (statsLine) card.append(el('div', 'weekly-stats', `内部统计（不随客户版内容复制或发布）：${statsLine}`));
+    card.append(sectionBlock('① 本周工作概览', el('p', 'weekly-section', report.content.summary || '（空）')));
     const accomplishments = el('ul', 'weekly-list');
     for (const item of report.content.accomplishments || []) {
-      const li = el('li', null, `${item.date ? `${item.date} ` : ''}[${item.category}] ${item.text}${item.source ? `（${item.source}）` : ''}`);
+      const li = el('li', 'weekly-item');
+      li.append(el('span', 'weekly-item-text', item.text));
+      const meta = [item.date, item.category, item.source].filter(Boolean).join(' · ');
+      if (meta) li.append(el('span', 'weekly-evidence', `（内部依据：${meta}）`));
       accomplishments.append(li);
     }
     if (!(report.content.accomplishments || []).length) accomplishments.append(el('li', null, '（无条目）'));
-    card.append(sectionBlock('② 本周完成情况', accomplishments));
+    card.append(sectionBlock('② 本周关键进展', accomplishments));
     const plan = el('ol', 'weekly-list');
-    for (const item of report.content.next_week_plan || []) plan.append(el('li', null, `${item.text}${item.source ? `（${item.source}）` : ''}`));
+    for (const item of report.content.next_week_plan || []) {
+      const li = el('li', 'weekly-item');
+      li.append(el('span', 'weekly-item-text', item.text));
+      if (item.source) li.append(el('span', 'weekly-evidence', `（内部依据：${item.source}）`));
+      plan.append(li);
+    }
     if (!(report.content.next_week_plan || []).length) plan.append(el('li', null, '（无条目）'));
     card.append(sectionBlock('③ 下周工作计划', plan));
     const risks = el('ul', 'weekly-list');
-    for (const item of report.content.risks || []) risks.append(el('li', null, `${item.text}${item.source ? `（${item.source}）` : ''}`));
+    for (const item of report.content.risks || []) {
+      const li = el('li', 'weekly-item');
+      li.append(el('span', 'weekly-item-text', item.text));
+      if (item.source) li.append(el('span', 'weekly-evidence', `（内部依据：${item.source}）`));
+      risks.append(li);
+    }
     if (!(report.content.risks || []).length) risks.append(el('li', null, '（无条目）'));
-    card.append(sectionBlock('④ 问题风险与阻塞', risks));
+    card.append(sectionBlock('④ 风险与待协调事项', risks));
     if (report.publishedPageId) card.append(el('div', 'cell-sub', `已发布到 ONES Wiki 页面 ${report.publishedPageId}`));
     const buttons = el('div', 'row-actions');
     if (report.status === 'draft') {
@@ -2338,17 +2351,14 @@
     }
     const copy = el('button', 'quiet-command small', '复制 Markdown');
     copy.onclick = async () => {
-      const lines = [`# ${customer.name} 实施周报（${report.weekStart} ~ ${report.weekEnd}）`, '',
-        '## 一、本周执行摘要', '', report.content.summary || '', '',
-        statsLine ? `> ${statsLine}` : '', '',
-        '## 二、本周完成情况', '',
-        ...(report.content.accomplishments || []).map((item) => `- [${item.category}]${item.date ? ` ${item.date}` : ''} ${item.text}${item.source ? `（${item.source}）` : ''}`), '',
-        '## 三、下周工作计划', '',
-        ...(report.content.next_week_plan || []).map((item, index) => `${index + 1}. ${item.text}${item.source ? `（${item.source}）` : ''}`), '',
-        '## 四、问题风险与阻塞', '',
-        ...(report.content.risks || []).map((item) => `- ${item.text}${item.source ? `（${item.source}）` : ''}`)];
-      try { await navigator.clipboard.writeText(lines.join('\n')); copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 Markdown'; }, 1500); }
-      catch (error) { await alertDialog(`复制失败：${error.message}`); }
+      try {
+        // 复制内容 = 服务端 renderWeeklyMarkdown 权威渲染的客户版正文（与 Wiki 发布正文同源），
+        // 前端不再自行拼装第二份 Markdown；copyText 带 WKWebView execCommand 兜底。
+        const detail = await api(`/api/weekly-reports/${report.id}`);
+        const ok = await copyText(detail.markdown || '');
+        if (!ok) throw new Error('剪贴板不可用');
+        copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 Markdown'; }, 1500);
+      } catch (error) { await alertDialog(`复制失败：${error.message}`); }
     };
     if (report.status === 'draft') {
       const publish = el('button', 'primary-command small', '发布到 Wiki');
@@ -2357,7 +2367,8 @@
           const target = await pickWikiPage();
           if (!target) return;
           const preview = await api(`/api/weekly-reports/${report.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID: target.pageID }) });
-          if (!await confirmDialog(`确认将 ${report.weekStart} 周报发布到 ONES Wiki「${target.title}」下？\n\n${preview.args.content.slice(0, 800)}`)) return;
+          const warningText = (preview.warnings || []).length ? `⚠️ 内部信息提示（请先修正再发布）：\n${preview.warnings.join('\n')}\n\n` : '';
+          if (!await confirmDialog(`确认将 ${report.weekStart} 周报发布到 ONES Wiki「${target.title}」下？\n\n${warningText}${preview.args.content.slice(0, 800)}`)) return;
           await api(`/api/weekly-reports/${report.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: report.version, parentPageID: target.pageID, approvalHash: preview.approvalHash }) });
           await refreshWeeklyPanel(panel, customer, weekStart);
         } catch (error) { await alertDialog(error.message); }
