@@ -687,6 +687,14 @@ export class HemoryDraftService {
     return batch;
   }
 
+  /** 忽略单条草稿：逐条软删除（Web 单卡忽略 / 浮动条批量忽略共用），审计对齐批次忽略。 */
+  dismissItem(itemId: string): DraftItem {
+    const item = this.db.dismissDraftItem(itemId);
+    if (!item) throw new Error('draft item not found');
+    this.db.audit('csm', 'dismiss_draft_item', 'draft_item', itemId, { customerId: item.customerId, batchId: item.batchId });
+    return item;
+  }
+
   /**
    * 片段级强制重生成：选中片段只用于确定要重建哪些「客户 + 上海自然日」，各天重取该客户
    * 当天全部已确认活跃片段（与 enqueue/regenerate 同一引擎，不是片段子集生成）。无效片段逐条列明原因。

@@ -1038,6 +1038,30 @@ test('workbench: dismissing a batch soft-deletes unwritten items and keeps writt
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: dismissing a single item soft-deletes only that item and rejects written ones', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-d', name: '客户笛' });
+    const frag = segment(db, 'crm-d', 'rd:a', 'rd', '话题', '2026-08-25T05:00:00Z', '沟通了上线');
+    const service = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued = service.enqueue('crm-d', [frag.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch = db.listDraftBatches('crm-d')[0];
+    const [followup, workhour] = batch.items!;
+    // 一条已写入、一条待处理：单条忽略只软删除目标项，同批已写入项不受影响。
+    db.setDraftItemExecution(workhour.id, 'written', { result: { ok: true } });
+    const dismissed = service.dismissItem(followup.id);
+    assert.equal(dismissed.status, 'dismissed');
+    assert.equal(db.getDraftItem(workhour.id)?.status, 'written');
+    // 已写入项拒绝忽略（防止误删审计轨迹）；不存在的条目同样报错。
+    assert.throws(() => service.dismissItem(workhour.id), /已写入/);
+    assert.throws(() => service.dismissItem('not-exist'), /draft item not found/);
+    // 全部项进入终态（written/dismissed）后批次不再有待处理项，与 Web 已忽略 tab / actionableItemCount 口径一致。
+    assert.equal(db.getDraftBatch(batch.id)!.items!.every((item) => ['written', 'dismissed', 'stale'].includes(item.status)), true);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 async function waitForFailed(db: WorkbenchDatabase, jobId: string): Promise<void> {
   for (let i = 0; i < 2000 && db.getDraftJob(jobId)?.status !== 'failed'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(db.getDraftJob(jobId)?.status, 'failed');

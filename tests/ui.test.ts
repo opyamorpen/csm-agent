@@ -150,7 +150,8 @@ test('draft cards toggle selection from the whole card and enlarge the checkbox'
   assert.match(renderer, /retry\.type = 'button';/);
   assert.match(renderer, /open\.type = 'button';/);
   const guardedHandlers = renderer.match(/event\.preventDefault\(\); event\.stopPropagation\(\);/g) || [];
-  assert.strictEqual(guardedHandlers.length, 3);
+  // 单卡确认/忽略按钮加入后守卫句柄共 5 处（确认/编辑/忽略/重试/打开待办）。
+  assert.strictEqual(guardedHandlers.length, 5);
 
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   assert.match(styles, /\.draft-item \{[^}]*cursor: pointer/);
@@ -212,10 +213,47 @@ test('app dialogs replace native confirm/alert/prompt for WKWebView compatibilit
   assert.match(source, /const confirmDialog = \(message\) => showAppDialog/);
   assert.match(source, /const alertDialog = \(message\) => showAppDialog/);
   assert.match(source, /const promptDialog = \(message, defaultValue = ''\) => showAppDialog/);
-  assert.match(source, /await confirmDialog\(`确认逐项执行 \$\{preview\.items\.length\} 份草稿/);
+  // 单份与多份确认各自有文案；多份模板保留原措辞（逐项执行 + 不回滚语义）。
+  assert.match(source, /'确认写入该草稿\？'/);
+  assert.match(source, /确认逐项执行 \$\{preview\.items\.length\} 份草稿/);
   // 对话框 DOM 与输入框都在 index.html 内静态存在。
   assert.match(html, /id="appDialog"/);
   assert.match(html, /id="appDialogInput"/);
+});
+
+test('draft cards expose per-card confirm/ignore and a sticky selection bar with confirm-first ignore toggle', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 单卡确认/忽略：不必回到批次头部，也不必先勾选；确认复用批次 preview/confirm 链路（单份 itemIds）。
+  assert.match(source, /async function confirmDraftItems\(batchId, itemIds, \{ skipConfirm \} = \{\}\)/);
+  assert.match(source, /confirmDraftItems\(batch\.id, \[item\.id\]\)/);
+  assert.match(source, /async function ignoreDraftItem\(item\)/);
+  assert.match(source, /\/api\/draft-items\/\$\{item\.id\}\/dismiss/);
+  // 浮动条静态节点：计数 + 模式切换 + 主按钮。
+  assert.match(html, /id="draftSelectionBar"/);
+  assert.match(html, /id="draftSelectedCount"/);
+  assert.match(html, /id="draftBarModeToggle"/);
+  assert.match(html, /id="draftBarPrimary"/);
+  assert.match(html, />批量忽略…</);
+  assert.match(html, />确认所选草稿</);
+  // 勾选框带 batchId：跨批次勾选时按批次分组确认（确认 API 是批次级）。
+  assert.match(source, /selector\.dataset\.batchId = batch\.id;/);
+  assert.match(source, /function selectedDraftsByBatch\(\)/);
+  // 委托监听勾选变化：条显隐随勾选实时联动；重渲染后隐藏并复位确认模式。
+  assert.match(source, /draftBatchList\.addEventListener\('change', updateDraftSelectionBar\)/);
+  assert.match(source, /function updateDraftSelectionBar\(\)/);
+  assert.match(source, /draftBarIgnoreMode = false/);
+  // 忽略与确认不平级：默认主按钮是批量确认，须手动切换一次才进入忽略模式（红色警示态）。
+  assert.match(source, /function applyDraftBarMode\(\)/);
+  assert.match(source, /draftBarPrimary\.textContent = '忽略所选草稿';/);
+  assert.match(source, /draftBarPrimary\.classList\.add\('danger'\);/);
+  assert.match(source, /忽略所选 \$\{total\} 份草稿/);
+  assert.match(source, /confirmDraftItems\(batchId, itemIds, \{ skipConfirm: true \}\)/);
+  // 样式：sticky 钉底浮动条 + 忽略模式红色主按钮。
+  assert.match(styles, /\.draft-selection-bar \{[^}]*position: sticky; bottom: 0/);
+  assert.match(styles, /\.primary-command\.danger \{/);
 });
 
 test('weekly actions view exposes bulk accept and bulk complete with selection toolbar', () => {

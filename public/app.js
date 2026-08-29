@@ -72,6 +72,12 @@
   const draftFailedJobs = document.getElementById('draftFailedJobs');
   const draftGenerationNotice = document.getElementById('draftGenerationNotice');
   const draftGenerationText = document.getElementById('draftGenerationText');
+  // 底部浮动操作条：勾选草稿后钉在可视区底部，免于滚回批次头部；默认批量确认，手动切换才进入忽略模式。
+  const draftSelectionBar = document.getElementById('draftSelectionBar');
+  const draftSelectedCount = document.getElementById('draftSelectedCount');
+  const draftBarPrimary = document.getElementById('draftBarPrimary');
+  const draftBarModeToggle = document.getElementById('draftBarModeToggle');
+  let draftBarIgnoreMode = false;
   const globalSync = document.getElementById('globalSync');
   const customerSearch = document.getElementById('customerSearch');
   const customerSort = document.getElementById('customerSort');
@@ -1348,19 +1354,66 @@
     workbenchModalBody.append(title.field, summary.field, fields.field, tool.field, args.field, unknowns.field, save);
   }
 
+  /** 确认执行一组同批次草稿（单卡确认与批量确认共用）：preview → 校验 → 对话框 → confirm。 */
+  async function confirmDraftItems(batchId, itemIds, { skipConfirm } = {}) {
+    try {
+      const preview = await api(`/api/draft-batches/${batchId}/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemIds }) });
+      const invalid = preview.items.filter((item) => item.validationErrors?.length);
+      if (invalid.length) return alertDialog(invalid.map((item) => `${item.id}: ${item.validationErrors.join('；')}`).join('\n'));
+      const message = preview.items.length === 1 ? '确认写入该草稿？'
+        : `确认逐项执行 ${preview.items.length} 份草稿？成功项不会因其他项失败而回滚。`;
+      if (!skipConfirm && !await confirmDialog(message)) return;
+      await api(`/api/draft-batches/${batchId}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        items: preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })),
+      }) });
+      return true;
+    } catch (error) { alertDialog(error.message); }
+  }
+
   async function confirmDraftBatch(batch, container) {
     const itemIds = [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.itemId);
     if (!itemIds.length) return alertDialog('请选择要确认的草稿');
-    try {
-      const preview = await api(`/api/draft-batches/${batch.id}/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemIds }) });
-      const invalid = preview.items.filter((item) => item.validationErrors?.length);
-      if (invalid.length) return alertDialog(invalid.map((item) => `${item.id}: ${item.validationErrors.join('；')}`).join('\n'));
-      if (!await confirmDialog(`确认逐项执行 ${preview.items.length} 份草稿？成功项不会因其他项失败而回滚。`)) return;
-      await api(`/api/draft-batches/${batch.id}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        items: preview.items.map(({ id, version, approvalHash }) => ({ id, version, approvalHash })),
-      }) });
-      await Promise.all([loadDraftBatches(), loadActions()]);
-    } catch (error) { alertDialog(error.message); }
+    if (await confirmDraftItems(batch.id, itemIds)) await Promise.all([loadDraftBatches(), loadActions()]);
+  }
+
+  /** 忽略单条草稿（单卡忽略与浮动条批量忽略共用）：确认后软删除，批次状态由服务端刷新。 */
+  async function ignoreDraftItem(item) {
+    if (!await confirmDialog(`忽略草稿「${item.title}」？忽略后不再出现在待处理列表（已写入项不受影响）。`)) return false;
+    try { await api(`/api/draft-items/${item.id}/dismiss`, { method: 'POST' }); return true; }
+    catch (error) { await alertDialog(error.message); return false; }
+  }
+
+  /** 勾选草稿按批次分组（确认 API 是批次级，跨批次勾选须逐批执行）。 */
+  function selectedDraftsByBatch() {
+    const groups = new Map();
+    for (const input of draftBatchList.querySelectorAll('input[type="checkbox"]:checked')) {
+      const batchId = input.dataset.batchId;
+      if (!batchId) continue;
+      if (!groups.has(batchId)) groups.set(batchId, []);
+      groups.get(batchId).push(input.dataset.itemId);
+    }
+    return [...groups].map(([batchId, itemIds]) => ({ batchId, itemIds }));
+  }
+
+  /** 浮动条模式渲染：默认批量确认（主按钮蓝）；手动切换后才进入忽略模式（主按钮红）。 */
+  function applyDraftBarMode() {
+    if (draftBarIgnoreMode) {
+      draftBarPrimary.textContent = '忽略所选草稿';
+      draftBarPrimary.classList.add('danger');
+      draftBarModeToggle.textContent = '切回确认';
+    } else {
+      draftBarPrimary.textContent = '确认所选草稿';
+      draftBarPrimary.classList.remove('danger');
+      draftBarModeToggle.textContent = '批量忽略…';
+    }
+  }
+
+  function updateDraftSelectionBar() {
+    const count = draftBatchList.querySelectorAll('input[type="checkbox"]:checked').length;
+    draftSelectedCount.textContent = count ? `已选 ${count} 份草稿` : '';
+    draftSelectionBar.classList.toggle('hidden', !count);
+    // 勾选清零即退出忽略模式：忽略是刻意操作，不留跨会话的模式残留。
+    if (!count && draftBarIgnoreMode) { draftBarIgnoreMode = false; applyDraftBarMode(); }
   }
 
   async function loadDraftBatches() {
@@ -1371,6 +1424,8 @@
     updateAgentNavCount();
     await renderDraftFailedJobs();
     draftBatchList.innerHTML = '';
+    // 重渲染后勾选清零：浮动条随之隐藏并复位确认模式（忽略模式是临时态）。
+    if (!draftSelectionBar.classList.contains('hidden')) { draftSelectionBar.classList.add('hidden'); if (draftBarIgnoreMode) { draftBarIgnoreMode = false; applyDraftBarMode(); } }
     // 纯已作废/已忽略批次（actionableItemCount=0）与待处理批次分列两个 tab，互不混排：
     // 这些卡片 checkbox 被禁用且不再需要处理，留在待处理列表只会让「选不中」像故障。
     const actionable = batches.filter((batch) => (batch.actionableItemCount ?? batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length) > 0);
@@ -1426,7 +1481,7 @@
       for (const item of batch.items || []) {
         // 卡片整体是 label：点击任意位置即切换勾选；禁用态（written/dismissed/stale/writing）点击无效，仅去掉手型提示。
         const row = el('label', 'draft-item');
-        const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id;
+        const selector = document.createElement('input'); selector.type = 'checkbox'; selector.dataset.itemId = item.id; selector.dataset.batchId = batch.id;
         selector.disabled = ['written', 'dismissed', 'stale', 'writing'].includes(item.status);
         if (selector.disabled) row.classList.add('draft-item-disabled');
         const body = el('div', 'draft-item-body');
@@ -1445,9 +1500,22 @@
         const actions = el('div', 'row-actions');
         // 卡片是 label，按钮须 type=button 并阻断默认勾选与冒泡，避免点按钮误切换选择。
         if (!['written', 'dismissed', 'stale', 'writing'].includes(item.status)) {
+          // 单卡确认/忽略：不必回到批次头部，也不必先勾选再滚动到操作条。
+          const confirmOne = el('button', 'primary-command small', '确认'); confirmOne.type = 'button';
+          confirmOne.onclick = async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            if (await confirmDraftItems(batch.id, [item.id])) await Promise.all([loadDraftBatches(), loadActions()]);
+          };
+          actions.append(confirmOne);
           const edit = el('button', 'quiet-command small', '编辑'); edit.type = 'button';
           edit.onclick = (event) => { event.preventDefault(); event.stopPropagation(); editableDraft(item); };
           actions.append(edit);
+          const ignoreOne = el('button', 'quiet-command small', '忽略'); ignoreOne.type = 'button';
+          ignoreOne.onclick = async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            if (await ignoreDraftItem(item)) await loadDraftBatches();
+          };
+          actions.append(ignoreOne);
         }
         if (item.status === 'failed') {
           const retry = el('button', 'quiet-command small', '重试'); retry.type = 'button';
@@ -1583,6 +1651,34 @@
     finally { setAssignBarBusy(false); }
   };
   document.getElementById('refreshDrafts').onclick = () => void loadDraftBatches();
+  // 浮动操作条：勾选变化实时联动；忽略与确认平级但默认收敛在确认，须手动切换一次才可批量忽略（防误触写操作的反向操作）。
+  draftBatchList.addEventListener('change', updateDraftSelectionBar);
+  draftBarModeToggle.onclick = () => { draftBarIgnoreMode = !draftBarIgnoreMode; applyDraftBarMode(); };
+  draftBarPrimary.onclick = async () => {
+    const groups = selectedDraftsByBatch();
+    if (!groups.length) return;
+    if (draftBarIgnoreMode) {
+      const total = groups.reduce((sum, group) => sum + group.itemIds.length, 0);
+      if (!await confirmDialog(`忽略所选 ${total} 份草稿？忽略后不再出现在待处理列表（已写入项不受影响）。`)) return;
+      const failures = [];
+      for (const { itemIds } of groups) {
+        for (const itemId of itemIds) {
+          try { await api(`/api/draft-items/${itemId}/dismiss`, { method: 'POST' }); }
+          catch (error) { failures.push(`${itemId}: ${error.message}`); }
+        }
+      }
+      if (failures.length) await alertDialog(failures.join('\n'));
+      await loadDraftBatches();
+      return;
+    }
+    const total = groups.reduce((sum, group) => sum + group.itemIds.length, 0);
+    if (!await confirmDialog(`确认逐项执行 ${total} 份草稿？成功项不会因其他项失败而回滚。`)) return;
+    for (const { batchId, itemIds } of groups) {
+      // 某批校验失败即中止后续批次（ alertDialog 已逐条列明），避免半执行后继续放大。
+      if (!await confirmDraftItems(batchId, itemIds, { skipConfirm: true })) break;
+    }
+    await Promise.all([loadDraftBatches(), loadActions()]);
+  };
   document.getElementById('hemorySync').onclick = async () => {
     // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日（取已应用筛选的日期）。
     try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryFilter.date || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }

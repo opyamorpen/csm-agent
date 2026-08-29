@@ -43,6 +43,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/resegment')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
+  assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-items/:id/dismiss')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-jobs')));
   assert.ok(capabilities.some((item) => item.workflow === 'runtime-config' && item.api.includes('PUT /api/config/llm')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
@@ -74,6 +75,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent hemory resegment --all/);
   assert.match(help.stdout, /csm-agent hemory inbox \[YYYY-MM-DD\] \[--days N\] \[--from HH:MM\] \[--to HH:MM\]/);
   assert.match(help.stdout, /csm-agent draft review/);
+  assert.match(help.stdout, /csm-agent draft ignore <草稿ID>/);
   assert.match(help.stdout, /csm-agent draft regenerate/);
   assert.match(help.stdout, /csm-agent service install/);
   assert.match(help.stdout, /csm-agent sessions \[list\] \[--all\] \[--json\]/);

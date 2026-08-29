@@ -142,6 +142,14 @@
           <button id="draftTabArchived" class="draft-subtab" data-draft-tab="archived" type="button">已忽略/已作废</button>
         </div>
         <div id="draftBatchList" class="draft-batch-list"></div>
+        <!-- 底部浮动操作条：勾选草稿后钉在可视区底部，免于滚回批次头部确认；默认批量确认，手动切换一次才进入忽略模式。 -->
+        <div id="draftSelectionBar" class="draft-selection-bar hidden">
+          <span id="draftSelectedCount"></span>
+          <div class="row-actions">
+            <button id="draftBarModeToggle" class="quiet-command small" type="button">批量忽略…</button>
+            <button id="draftBarPrimary" class="primary-command small" type="button">确认所选草稿</button>
+          </div>
+        </div>
       </section>
     </main>
 

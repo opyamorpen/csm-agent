@@ -62,7 +62,7 @@ const CLI_CAPABILITIES = [
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory'] },
-  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry'] },
+  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
@@ -164,6 +164,8 @@ function help(): void {
      与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图）
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
+  csm-agent draft ignore <草稿ID>
+    （忽略单条草稿：软删除为已忽略，同批其他草稿不受影响；已写入项拒绝）
   csm-agent draft regenerate <批次ID>
   csm-agent draft dismiss <批次ID>
     （忽略批次：未写入草稿软删除为已忽略，已写入项不受影响）
@@ -871,6 +873,11 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!id) throw new Error('draft retry 缺少草稿 ID');
     return print(await request(`/api/draft-items/${encodeURIComponent(id)}/retry`, { method: 'POST' }));
   }
+  if (subcommand === 'ignore') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error('draft ignore 缺少草稿 ID');
+    return print(await request(`/api/draft-items/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }));
+  }
   if (subcommand === 'regenerate') {
     const id = values.shift() ?? '';
     if (!id) throw new Error('draft regenerate 缺少批次 ID');
@@ -904,7 +911,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!ids.length) console.log('重试：csm-agent hemory regenerate <片段ID...>（按天重建）');
     return;
   }
-  throw new Error('draft 子命令只允许 review/retry/regenerate/dismiss/jobs');
+  throw new Error('draft 子命令只允许 review/retry/ignore/regenerate/dismiss/jobs');
 }
 
 async function serviceCommand(subcommand: string, values: string[]): Promise<void> {

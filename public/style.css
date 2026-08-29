@@ -717,6 +717,13 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .draft-generation-notice { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid #8ba8de; border-radius: 6px; background: #eaf0fa; color: #174a9d; font-size: 13px; }
 .draft-generation-notice .spinner { flex: none; width: 14px; height: 14px; border: 2px solid #8ba8de; border-top-color: transparent; border-radius: 50%; animation: draft-spin 0.8s linear infinite; }
 @keyframes draft-spin { to { transform: rotate(360deg); } }
+/* 底部浮动操作条：勾选草稿后钉在滚动区底部，长列表不必滚回批次头部；配色对齐生成横幅。
+   默认批量确认；忽略与确认不平级，须先点一次「批量忽略…」切换，主按钮才变红。 */
+.draft-selection-bar { position: sticky; bottom: 0; z-index: 9; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; padding: 9px 12px; border: 1px solid #8ba8de; border-radius: 6px; background: #eaf0fa; color: #174a9d; }
+.draft-selection-bar #draftSelectedCount { font-size: 13px; font-weight: 600; }
+/* 忽略模式主按钮：红色警示态，对齐 draft-errors 的错误色系。 */
+.primary-command.danger { background: #c64b45; border-color: #a93a35; }
+.primary-command.danger:hover { background: #b13f39; border-color: #8f2f2b; }
 
 /* ── 实施周报 tab ── */
 .weekly-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -795,4 +802,6 @@ footer { background: #fff; }
   .hemory-assign-bar { top: 49px; flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
   .hemory-customer-box { flex: 1 1 100%; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
+  /* 页脚在移动端 sticky 钉底，浮动条上移避让，不遮住页脚内容。 */
+  .draft-selection-bar { bottom: 46px; }
 }

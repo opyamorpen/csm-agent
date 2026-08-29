@@ -615,6 +615,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           try { return json(res, 200, decorateDraftItem(await workbench.drafts.retry(itemId))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
+        if (req.method === 'POST' && sub === '/dismiss') {
+          try { return json(res, 200, decorateDraftItem(workbench.drafts.dismissItem(itemId))); }
+          catch (error) { return json(res, 400, { error: (error as Error).message }); }
+        }
       }
       if (req.method === 'POST' && path === '/api/case-drafts') {
         const body = await readBody(req);

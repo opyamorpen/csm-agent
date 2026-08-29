@@ -1228,6 +1228,16 @@ export class WorkbenchDatabase {
     return this.getDraftBatch(batchId);
   }
 
+  /** 忽略单条草稿：与批次忽略同语义的逐条软删除；written/writing 项与不存在的条目拒绝。 */
+  dismissDraftItem(itemId: string): DraftItem | undefined {
+    const item = this.getDraftItem(itemId);
+    if (!item) return undefined;
+    if (['written', 'writing'].includes(item.status)) throw new Error('已写入或写入中的草稿不能忽略');
+    this.db.prepare("UPDATE draft_items SET status='dismissed',updated_at=? WHERE id=?").run(nowIso(), itemId);
+    this.refreshDraftBatchStatus(item.batchId);
+    return this.getDraftItem(itemId);
+  }
+
   updateDraftJob(id: string, status: DraftGenerationJob['status'], error?: string | null, note?: string | null): DraftGenerationJob | undefined {
     this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,note=COALESCE(?,note),updated_at=? WHERE id=?`)
       .run(status, status, error ?? null, note ?? null, nowIso(), id);
