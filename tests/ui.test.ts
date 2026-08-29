@@ -788,18 +788,37 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(panel, /weekMondayOf/);
   assert.match(panel, /'生成周报'/);
   assert.match(panel, /\/weekly-reports`/);
+  // 首次生成同样有 busyWeek 防重入 + 进度条重建（notice 被移除后不再静默）。
+  assert.match(panel, /isWeeklyBusy\(panel, weekStart\)\) \{ await alertDialog\('该周周报正在生成中/);
+  assert.match(panel, /ensureWeeklyNotice\(panel/);
 
-  // 生成轮询：draft-jobs 复用 + 进行中提示条；失败 → 错误卡片 + 弹窗 + 再次生成（force）。
+  // 生成轮询：进度条确保在场（ensureWeeklyNotice 重建）+ 周界文案；终态清 busyWeek；
+  // 仅当用户仍查看该周时刷新/展示失败卡片（生成期间切周不打扰）。
   const poller = source.match(/async function pollWeeklyJob[\s\S]*?\n  \}\n\n  function renderWeeklyFailure/)?.[0];
   assert.ok(poller, 'pollWeeklyJob source was not found');
   assert.match(poller, /\/api\/draft-jobs\?ids=/);
+  assert.match(poller, /ensureWeeklyNotice\(panel/);
   assert.match(poller, /周报生成中/);
+  assert.match(poller, /weeklyViewWeek\(panel\) === weekStart/);
+  assert.match(poller, /delete panel\.dataset\.busyWeek/);
   assert.match(poller, /job\.status === 'failed'/);
   assert.match(poller, /周报生成失败/);
   const failure = source.match(/function renderWeeklyFailure[\s\S]*?\n  \}\n\n  async function refreshWeeklyPanel/)?.[0];
   assert.ok(failure, 'renderWeeklyFailure source was not found');
   assert.match(failure, /'再次生成'/);
   assert.match(failure, /force: true/);
+  assert.match(failure, /panel\.dataset\.busyWeek = weekStart/);
+  // 重新生成失败时旧版本仍在库——「查看当前周报」一键回去看。
+  assert.match(failure, /'查看当前周报'/);
+
+  // 周下拉切换：有周报的周倒序列出，选择即切换并同步顶部日期选择器。
+  const weekSelect = source.match(/function buildWeeklyWeekSelect[\s\S]*?\n  \}\n\n  async function renderWeeklyReport/)?.[0];
+  assert.ok(weekSelect, 'buildWeeklyWeekSelect source was not found');
+  assert.match(weekSelect, /b\.weekStart\.localeCompare\(a\.weekStart\)/);
+  assert.match(weekSelect, /草稿 v\$\{item\.version\}/);
+  assert.match(weekSelect, /'已发布'/);
+  assert.match(weekSelect, /weekInput\.value = select\.value/);
+  assert.match(weekSelect, /renderWeeklyBody\(panel, customer, select\.value\)/);
 
   // 展示四章节（客户版）+ 内部统计标记 + 内部依据弱化 + 操作（编辑/复制 Markdown/发布到 Wiki/重新生成）。
   const renderer = source.match(/async function renderWeeklyReport[\s\S]*?\n  \}\n\n  function renderWeeklyBody/)?.[0];
@@ -811,6 +830,16 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.doesNotMatch(renderer, /[①②③④]/);
   assert.ok((renderer.match(/el\('ol', 'weekly-list'\)/g) ?? []).length >= 3, '三个条目章节必须都是有序列表');
   assert.doesNotMatch(renderer, /el\('ul', 'weekly-list'\)/);
+  // 重新生成中状态：徽标 + 全部按钮禁用 + 卡片提示；首次生成在途时空态显示生成中文案。
+  assert.match(renderer, /buildWeeklyWeekSelect\(panel, customer, reports, weekStart\)/);
+  assert.match(renderer, /isWeeklyBusy\(panel, weekStart\)/);
+  assert.match(renderer, /badge\('重新生成中', 'warning'\)/);
+  assert.match(renderer, /正在重新生成本周周报，完成后自动刷新…/);
+  assert.match(renderer, /周报生成中…（完成后将自动展示）/);
+  assert.match(renderer, /for \(const button of buttons\.querySelectorAll\('button'\)\) button\.disabled = true/);
+  // 重新生成按钮：busyWeek 防重入 + 状态先行（重渲染出带标记卡片，loading 不再依赖会被销毁的按钮）。
+  assert.match(renderer, /isWeeklyBusy\(panel, weekStart\)\) \{ await alertDialog\('该周周报正在重新生成中/);
+  assert.match(renderer, /panel\.dataset\.busyWeek = weekStart/);
   assert.match(renderer, /weeklyStatsLine/);
   assert.match(renderer, /内部统计（不随客户版内容复制或发布）/);
   assert.match(renderer, /内部依据：/);
@@ -844,11 +873,12 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(editor, /内部依据，可省略/);
   assert.match(editor, /【风险】【阻塞】【待确认】/);
 
-  // 周报样式：统计条、错误卡片、周选择工具条、内部依据弱化。
+  // 周报样式：统计条、错误卡片、周选择工具条、周下拉、内部依据弱化。
   assert.match(styles, /\.weekly-report-card \{/);
   assert.match(styles, /\.weekly-stats \{/);
   assert.match(styles, /\.weekly-failure \{/);
   assert.match(styles, /\.weekly-toolbar \{/);
+  assert.match(styles, /\.weekly-week-select \{/);
   assert.match(styles, /\.weekly-evidence \{/);
 });
 

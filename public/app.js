@@ -2353,6 +2353,29 @@
     return `沟通 ${stats.communications} 场 · 新增建议 ${stats.newSuggestions}（解决 ${stats.resolvedSuggestions ?? 'unknown'}）· 新增工单 ${stats.newTickets}（解决 ${stats.resolvedTickets ?? 'unknown'}）· 新增运维 ${stats.newOperations}（解决 ${stats.resolvedOperations ?? 'unknown'}）· 工时 ${workhours}`;
   }
 
+  /** 周报生成进度条：确保存在且可见（上次生成完成后 notice 会被移除，重新生成时必须重建）。 */
+  function ensureWeeklyNotice(panel, text) {
+    let notice = panel.querySelector('.weekly-notice');
+    if (!notice) {
+      notice = el('div', 'weekly-notice');
+      panel.insertBefore(notice, panel.querySelector('.weekly-body'));
+    }
+    notice.classList.remove('hidden');
+    if (text != null) notice.textContent = text;
+    return notice;
+  }
+
+  /** 该周是否有生成任务在途（busyWeek 状态源：重新生成中标记/按钮禁用/防重入共用）。 */
+  function isWeeklyBusy(panel, weekStart) {
+    return panel.dataset.busyWeek === weekStart;
+  }
+
+  /** 当前面板正在查看的周（顶部日期选择器对齐周一；用于判断轮询终态时用户是否还在看该周）。 */
+  function weeklyViewWeek(panel) {
+    const input = panel.querySelector('.weekly-toolbar input[type="date"]');
+    return weekMondayOf(input?.value || new Date().toISOString()) || weekMondayOf(new Date().toISOString());
+  }
+
   function editWeeklyReport(customer, report, onUpdated) {
     openWorkbenchModal('编辑实施周报（客户版）');
     const content = report.content || {};
@@ -2391,30 +2414,37 @@
   }
 
   /**
-   * 轮询周报生成任务到终态。成功后刷新面板；失败展示错误卡片 + alertDialog + 「再次生成」入口。
+   * 轮询周报生成任务到终态。进度条带周界文案；终态先清 busyWeek（「重新生成中」标记随之消失）
+   * 再刷新；仅当用户仍查看该周时才动当前视图（生成期间切走不打扰、不拉回）。
    * 返回最终 job（超时返回 null）。
    */
   async function pollWeeklyJob(panel, customer, weekStart, jobId) {
-    const notice = panel.querySelector('.weekly-notice');
+    const notice = ensureWeeklyNotice(panel, `${weekStart.slice(5)} 周报生成中…（排队中）`);
     for (let attempt = 0; attempt < 90; attempt++) {
       const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
       const job = (data.jobs || [])[0];
       if (!job) throw new Error('生成任务不存在');
-      if (notice) notice.textContent = `周报生成中…（${job.status === 'running' ? '模型撰写中' : '排队中'}）`;
+      notice.textContent = `${weekStart.slice(5)} 周报生成中…（${job.status === 'running' ? '模型撰写中' : '排队中'}）`;
+      const stillViewing = weeklyViewWeek(panel) === weekStart;
       if (job.status === 'succeeded') {
-        if (notice) notice.remove();
-        await refreshWeeklyPanel(panel, customer, weekStart);
+        notice.remove();
+        delete panel.dataset.busyWeek;
+        if (stillViewing) await refreshWeeklyPanel(panel, customer, weekStart);
         return job;
       }
       if (job.status === 'failed') {
-        if (notice) notice.remove();
-        renderWeeklyFailure(panel, customer, weekStart, job);
-        await alertDialog(`周报生成失败：${job.error || '未知原因'}\n\n可点击「再次生成」重试。`);
+        notice.remove();
+        delete panel.dataset.busyWeek;
+        if (stillViewing) {
+          renderWeeklyFailure(panel, customer, weekStart, job);
+          await alertDialog(`周报生成失败：${job.error || '未知原因'}\n\n可点击「再次生成」重试。`);
+        }
         return job;
       }
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
-    if (notice) notice.textContent = '生成超时，任务仍在后台运行；稍后切换周可查看结果。';
+    notice.textContent = '生成超时，任务仍在后台运行；稍后切换周可查看结果。';
+    delete panel.dataset.busyWeek;
     return null;
   }
 
@@ -2422,20 +2452,28 @@
     const host = panel.querySelector('.weekly-body');
     host.innerHTML = '';
     const card = el('div', 'weekly-failure');
-    card.append(el('strong', null, `周报生成失败（${formatDateTime(job.updatedAt)}）`));
+    card.append(el('strong', null, `${weekStart.slice(5)} 周报生成失败（${formatDateTime(job.updatedAt)}）`));
     card.append(el('p', null, job.error || '未知原因'));
+    const buttons = el('div', 'row-actions');
     const retry = el('button', 'primary-command small', '再次生成');
     withLoading(retry, '重新生成中…', async () => {
       try {
+        panel.dataset.busyWeek = weekStart;
         const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart, force: true }) });
-        if (!result.jobId) { await refreshWeeklyPanel(panel, customer, weekStart); return; }
+        if (!result.jobId) { delete panel.dataset.busyWeek; await refreshWeeklyPanel(panel, customer, weekStart); return; }
         renderWeeklyBody(panel, customer, weekStart);
-        const notice = panel.querySelector('.weekly-notice');
-        if (notice) notice.textContent = '周报生成中…（排队中）';
         await pollWeeklyJob(panel, customer, weekStart, result.jobId);
-      } catch (error) { await alertDialog(error.message); }
+      } catch (error) {
+        delete panel.dataset.busyWeek;
+        await alertDialog(error.message);
+      }
     });
-    card.append(retry);
+    buttons.append(retry);
+    // 重新生成失败时旧版本周报仍在库里——一键回去看当前版本。
+    const viewCurrent = el('button', 'quiet-command small', '查看当前周报');
+    viewCurrent.onclick = () => refreshWeeklyPanel(panel, customer, weekStart);
+    buttons.append(viewCurrent);
+    card.append(buttons);
     host.append(card);
   }
 
@@ -2447,19 +2485,49 @@
     catch (error) { host.innerHTML = ''; host.append(el('div', 'workspace-empty', error.message)); }
   }
 
+  /** 周下拉选择器：有周报的周倒序列出，选择即切换查看（并同步顶部日期选择器，两入口永远一致）。 */
+  function buildWeeklyWeekSelect(panel, customer, reports, currentWeek) {
+    const wrap = el('div', 'weekly-week-select');
+    wrap.append(el('span', 'weekly-week-label', '切换周'));
+    const select = document.createElement('select');
+    for (const item of [...reports].sort((a, b) => b.weekStart.localeCompare(a.weekStart))) {
+      const option = document.createElement('option');
+      option.value = item.weekStart;
+      const status = item.status === 'published' ? '已发布' : `草稿 v${item.version}`;
+      option.textContent = `${item.weekStart} 周（${item.weekStart.slice(5)} ~ ${item.weekEnd.slice(5)}）· ${status}`;
+      if (item.weekStart === currentWeek) option.selected = true;
+      select.append(option);
+    }
+    select.onchange = () => {
+      const weekInput = panel.querySelector('.weekly-toolbar input[type="date"]');
+      if (weekInput) weekInput.value = select.value;
+      renderWeeklyBody(panel, customer, select.value);
+    };
+    wrap.append(select);
+    return wrap;
+  }
+
   async function renderWeeklyReport(panel, customer, weekStart) {
     const data = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`);
-    const report = (data.reports || []).find((item) => item.weekStart === weekStart);
+    const reports = data.reports || [];
+    const report = reports.find((item) => item.weekStart === weekStart);
     const host = panel.querySelector('.weekly-body');
     host.innerHTML = '';
+    if (reports.length) host.append(buildWeeklyWeekSelect(panel, customer, reports, weekStart));
+    const regenerating = isWeeklyBusy(panel, weekStart);
     if (!report) {
-      host.append(el('div', 'workspace-empty', `${weekStart} 这一周尚未生成周报；点击「生成周报」基于该客户本周全部数据创建。`));
+      // 首次生成在途时不能显示误导性的「尚未生成周报」——生成完成后会自动刷新展示。
+      host.append(el('div', 'workspace-empty', regenerating
+        ? `${weekStart} 周报生成中…（完成后将自动展示）`
+        : `${weekStart} 这一周尚未生成周报；点击「生成周报」基于该客户本周全部数据创建。`));
       return;
     }
     const statsLine = weeklyStatsLine(report.stats);
     const card = el('article', 'weekly-report-card');
     const head = el('div', 'weekly-report-head');
-    const statusBadge = report.status === 'published' ? badge('已发布', 'success') : badge(`草稿 v${report.version}`, 'warning');
+    const statusBadge = regenerating
+      ? badge('重新生成中', 'warning')
+      : report.status === 'published' ? badge('已发布', 'success') : badge(`草稿 v${report.version}`, 'warning');
     head.append(el('strong', null, `${report.weekStart} ~ ${report.weekEnd} 实施周报（客户版）`), statusBadge);
     card.append(head);
     if (statsLine) card.append(el('div', 'weekly-stats', `内部统计（不随客户版内容复制或发布）：${statsLine}`));
@@ -2526,18 +2594,28 @@
       buttons.append(publish);
       const regenerate = el('button', 'quiet-command small', '重新生成');
       withLoading(regenerate, '重新生成中…', async () => {
+        if (isWeeklyBusy(panel, weekStart)) { await alertDialog('该周周报正在重新生成中，请稍候…'); return; }
         try {
+          // busyWeek 先行：立即重渲染出「重新生成中」卡片（旧内容保留、全部按钮禁用），
+          // loading 由持久进度条 + 卡片状态承载，不再依赖会被重渲染销毁的按钮置灰。
+          panel.dataset.busyWeek = weekStart;
           const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart, force: true }) });
           renderWeeklyBody(panel, customer, weekStart);
-          const notice = panel.querySelector('.weekly-notice');
-          if (notice) notice.textContent = '周报生成中…（排队中）';
           if (result.jobId) await pollWeeklyJob(panel, customer, weekStart, result.jobId);
-        } catch (error) { await alertDialog(error.message); }
+          else { delete panel.dataset.busyWeek; await refreshWeeklyPanel(panel, customer, weekStart); }
+        } catch (error) {
+          delete panel.dataset.busyWeek;
+          await alertDialog(error.message);
+        }
       });
       buttons.append(regenerate);
     }
     buttons.append(copy);
     card.append(buttons);
+    if (regenerating) {
+      card.append(el('div', 'cell-sub', '正在重新生成本周周报，完成后自动刷新…'));
+      for (const button of buttons.querySelectorAll('button')) button.disabled = true;
+    }
     host.append(card);
   }
 
@@ -2572,21 +2650,23 @@
     weekInput.onchange = () => renderWeeklyBody(panel, customer, currentWeek());
     withLoading(generate, '生成中…', async () => {
       const weekStart = currentWeek();
+      if (isWeeklyBusy(panel, weekStart)) { await alertDialog('该周周报正在生成中，请稍候…'); return; }
       try {
-        notice.classList.remove('hidden');
-        notice.textContent = '周报生成中…（排队中）';
+        panel.dataset.busyWeek = weekStart;
+        ensureWeeklyNotice(panel, `${weekStart.slice(5)} 周报生成中…（排队中）`);
         const result = await api(`/api/customers/${encodeURIComponent(customer.id)}/weekly-reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weekStart }) });
         if (!result.jobId) {
-          notice.classList.add('hidden');
+          delete panel.dataset.busyWeek;
+          (panel.querySelector('.weekly-notice') || {}).remove?.();
           await refreshWeeklyPanel(panel, customer, weekStart);
           return;
         }
         renderWeeklyBody(panel, customer, weekStart);
-        notice.classList.remove('hidden');
-        notice.textContent = '周报生成中…（排队中）';
         await pollWeeklyJob(panel, customer, weekStart, result.jobId);
       } catch (error) {
-        notice.classList.add('hidden');
+        delete panel.dataset.busyWeek;
+        const notice = panel.querySelector('.weekly-notice');
+        if (notice) notice.remove();
         await alertDialog(error.message);
       }
     });
