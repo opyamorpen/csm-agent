@@ -57,7 +57,7 @@ export function isLostAfterSalesStage(value: string | null | undefined): boolean
 export interface SourceEventInput {
   id?: string;
   customerId?: string | null;
-  sourceSystem: 'crm' | 'ones' | 'hemory' | 'wecom' | string;
+  sourceSystem: 'crm' | 'ones' | 'hemory' | string;
   sourceType: string;
   externalId: string;
   displayId?: string | null;
@@ -140,7 +140,6 @@ export interface ActionItemInput {
   title: string;
   whyNow: string;
   owner?: string | null;
-  ownerWecomUserid?: string | null;
   dueAt?: string | null;
   expectedOutcome?: string | null;
   evidenceRefs?: string[];
@@ -154,7 +153,6 @@ export interface ActionItem extends ActionItemInput {
   outcome?: string | null;
   createdAt: string;
   updatedAt: string;
-  wecomTodoId?: string | null;
 }
 
 export interface ActionBulkResult {

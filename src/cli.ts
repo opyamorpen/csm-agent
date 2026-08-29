@@ -49,13 +49,13 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
-  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/wecom/status', '/api/version'] },
+  { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
-  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/:id/wecom-todo-intents', '/api/action-items/bulk-accept', '/api/action-items/bulk-complete'] },
+  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-accept', '/api/action-items/bulk-complete'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
@@ -67,7 +67,6 @@ const CLI_CAPABILITIES = [
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
-  { command: 'wecom', workflow: 'wecom-todo', access: 'read', api: ['/api/wecom/status'] },
   { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
   { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
@@ -127,7 +126,6 @@ function help(): void {
     （批量完成：仅已接受/进行中状态生效，其余跳过；单项失败不影响其他项；
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
-  csm-agent action wecom <行动ID>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称>
   csm-agent case update <草稿ID> <版本> <JSON>
@@ -184,7 +182,6 @@ function help(): void {
     （ONES Desk 建议/工单/运维工单必填字段契约：选项 UUID 表、兜底值、
      实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
      --verify 经 get_issue_fields 实时核对选项 UUID 漂移）
-  csm-agent wecom
   csm-agent agent <客户ID或名称> <指令>
     （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
@@ -373,10 +370,7 @@ function parseObject(input: string, label: string): Record<string, unknown> {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome: values.join(' ') }),
       }));
     }
-    if (subcommand === 'wecom') {
-      return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/wecom-todo-intents`, { method: 'POST' }));
-    }
-    throw new Error('action 子命令只允许 list/update/accept/complete/wecom');
+    throw new Error('action 子命令只允许 list/update/accept/complete');
   }
 
 async function caseCommand(subcommand: string, values: string[]): Promise<void> {
@@ -1087,7 +1081,7 @@ async function sessionsCommand(subcommand: string, values: string[], rawArgs: st
 }
 
 async function doctor(): Promise<void> {
-  const [list, wecom, llm, search] = await Promise.all([customers(), request('/api/wecom/status'), request('/api/config/llm'), request('/api/config/search')]);
+  const [list, llm, search] = await Promise.all([customers(), request('/api/config/llm'), request('/api/config/search')]);
   const sample = list[0];
   const overview = sample ? await request<any>(`/api/customers/${encodeURIComponent(sample.id)}/overview`) : null;
   // 旧进程探测：服务端 buildId 与本地 dist 构建比对——分裂（新 UI + 旧 API）在 doctor 层可见。
@@ -1105,7 +1099,7 @@ async function doctor(): Promise<void> {
     build = { error: (error as Error).message, hint: '服务进程无 /api/version 端点（版本过旧），请重启服务' };
   }
   print({ baseUrl, api: 'ok', build, customers: list.length, sampleCustomer: sample?.id ?? null,
-    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search, wecom });
+    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search });
 }
 
 async function main(): Promise<void> {
@@ -1142,7 +1136,6 @@ async function main(): Promise<void> {
     if (sub === 'fields') return showOnesDeskFields(rawArgs.includes('--verify'));
     throw new Error('ones 子命令只允许 fields');
   }
-  if (command === 'wecom') return print(await request('/api/wecom/status'));
   if (command === 'agent') {
     const customer = args.shift() ?? '';
     const prompt = args.join(' ').trim();

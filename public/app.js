@@ -1935,17 +1935,9 @@
     }
     const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editAction(action); buttons.append(edit);
     if (['accepted', 'in_progress'].includes(action.status)) {
-      const wecom = el('button', 'quiet-command small', action.wecomTodoId ? '已关联企微' : '同步企微待办');
-      wecom.disabled = !!action.wecomTodoId;
-      wecom.onclick = async () => {
-        try {
-          const intent = await api(`/api/action-items/${action.id}/wecom-todo-intents`, { method: 'POST' });
-          window.open(intent.url, '_blank', 'noopener');
-        } catch (error) { await alertDialog(error.message); }
-      };
       const complete = el('button', 'quiet-command small', '完成');
       complete.onclick = async () => { const outcome = (await promptDialog('记录实际结果：', '')) ?? ''; await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }) }); customerMode ? openCustomer(action.customerId) : loadActions(); };
-      buttons.append(wecom, complete);
+      buttons.append(complete);
     }
     card.append(buttons);
     return card;
@@ -1966,19 +1958,18 @@
     const title = inputField('行动内容', action.title);
     const why = inputField('为什么现在做', action.whyNow, 'textarea');
     const owner = inputField('负责人', action.owner);
-    const wecom = inputField('企业微信 UserId', action.ownerWecomUserid);
     const due = inputField('截止时间', action.dueAt ? new Date(action.dueAt).toISOString().slice(0, 16) : '', 'datetime-local');
     const outcome = inputField('预期结果', action.expectedOutcome, 'textarea');
     const save = el('button', 'primary-command', '保存');
     save.onclick = async () => {
       await api(`/api/action-items/${action.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        title: title.input.value.trim(), whyNow: why.input.value.trim(), owner: owner.input.value.trim(), ownerWecomUserid: wecom.input.value.trim(),
+        title: title.input.value.trim(), whyNow: why.input.value.trim(), owner: owner.input.value.trim(),
         dueAt: due.input.value ? new Date(due.input.value).toISOString() : null, expectedOutcome: outcome.input.value.trim(),
       }) });
       closeWorkbenchModal();
       activeCustomerId ? openCustomer(activeCustomerId) : loadActions();
     };
-    workbenchModalBody.append(title.field, why.field, owner.field, wecom.field, due.field, outcome.field, save);
+    workbenchModalBody.append(title.field, why.field, owner.field, due.field, outcome.field, save);
   }
 
   /**

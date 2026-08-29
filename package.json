@@ -1,7 +1,7 @@
 {
   "name": "csm-agent",
   "version": "0.2.0",
-  "description": "Customer-centered CSM workbench with CRM-authoritative identities, ONES/Hemory evidence, renewal and expansion analysis, case publishing, and approved WeCom todo handoff.",
+  "description": "Customer-centered CSM workbench with CRM-authoritative identities, ONES/Hemory evidence, renewal and expansion analysis, and case publishing.",
   "type": "module",
   "private": true,
   "license": "UNLICENSED",

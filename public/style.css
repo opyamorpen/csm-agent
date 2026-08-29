@@ -635,16 +635,6 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .form-field textarea.json-editor { min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .form-field input:focus, .form-field textarea:focus { outline: 2px solid #b9cdf8; border-color: #507edc; }
 
-.wecom-page { min-height: 100vh; height: auto; display: block; padding: 24px; background: #f3f5f7; }
-.wecom-shell { width: min(560px, 100%); margin: 10vh auto 0; padding: 22px; background: #fff; border: 1px solid var(--border); }
-.wecom-shell h1 { margin: 3px 0 18px; font-size: 22px; }
-.eyebrow { color: #2457c5; font-size: 12px; font-weight: 650; }
-.todo-preview { min-height: 88px; padding: 13px; background: #f5f7f9; border: 1px solid #dfe3e7; }
-.todo-meta { margin-top: 7px; color: var(--muted); font-size: 12px; }
-.form-status { min-height: 42px; padding: 10px 0; color: var(--muted); }
-.form-status.error { color: var(--danger); }
-.form-status.success { color: var(--ok); }
-
 .agent-mode-tabs { position: sticky; top: -14px; z-index: 8; display: flex; gap: 2px; margin: -14px -18px 16px; padding: 8px 18px 0; border-bottom: 1px solid var(--border); background: #fff; }
 .agent-mode-tab { min-height: 40px; padding: 0 13px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: #5c6673; cursor: pointer; font: inherit; }
 .agent-mode-tab.active { border-bottom-color: #2457c5; color: #174a9d; font-weight: 650; }

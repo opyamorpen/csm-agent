@@ -724,3 +724,17 @@ test('hemory inbox shows consumption badges for fragments written to business sy
   assert.match(renderer, /const typeLabels = \{ internal_todo: '行动', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' \}/);
   assert.match(renderer, /已写入·\$\{label\}/);
 });
+
+test('action cards no longer offer WeCom todo sync', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 显示契约：行动卡片只保留 接受/编辑/完成，「同步企微待办」入口与编辑表单的企微 UserId 字段整体移除。
+  assert.doesNotMatch(app, /同步企微待办|已关联企微|wecom-todo-intents|ownerWecomUserid/);
+  const editor = app.match(/function editAction[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 客户详情的 Hemory 片段 tab/)?.[0];
+  assert.ok(editor, 'editAction source was not found');
+  assert.match(editor, /inputField\('负责人', action\.owner\)/);
+  assert.doesNotMatch(editor, /企业微信 UserId/);
+  // H5 确认页专用样式同步移除。
+  assert.doesNotMatch(styles, /wecom-page|wecom-shell|todo-preview|todo-meta|form-status/);
+});

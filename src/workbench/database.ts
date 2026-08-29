@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -144,7 +144,6 @@ function actionFromRow(row: Row): ActionItem {
     title: String(row.title),
     whyNow: String(row.why_now),
     owner: row.owner as string | null,
-    ownerWecomUserid: row.owner_wecom_userid as string | null,
     dueAt: row.due_at as string | null,
     expectedOutcome: row.expected_outcome as string | null,
     evidenceRefs: parseJson<string[]>(row.evidence_refs_json, []),
@@ -154,7 +153,6 @@ function actionFromRow(row: Row): ActionItem {
     outcome: row.outcome as string | null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
-    wecomTodoId: row.wecom_todo_id as string | null,
   };
 }
 
@@ -353,7 +351,6 @@ export class WorkbenchDatabase {
         title TEXT NOT NULL,
         why_now TEXT NOT NULL,
         owner TEXT,
-        owner_wecom_userid TEXT,
         due_at TEXT,
         expected_outcome TEXT,
         evidence_refs_json TEXT NOT NULL,
@@ -365,27 +362,6 @@ export class WorkbenchDatabase {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_action_status_due ON action_items(status, due_at);
-
-      CREATE TABLE IF NOT EXISTS wecom_todo_links (
-        action_item_id TEXT PRIMARY KEY REFERENCES action_items(id) ON DELETE CASCADE,
-        todo_id TEXT NOT NULL UNIQUE,
-        creator_userid TEXT,
-        status INTEGER NOT NULL DEFAULT 1,
-        attendees_json TEXT NOT NULL DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        last_synced_at TEXT NOT NULL,
-        replaced_by_todo_id TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS todo_intents (
-        id TEXT PRIMARY KEY,
-        token_hash TEXT NOT NULL UNIQUE,
-        action_item_id TEXT NOT NULL REFERENCES action_items(id) ON DELETE CASCADE,
-        status TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        consumed_at TEXT
-      );
 
       CREATE TABLE IF NOT EXISTS sync_runs (
         id TEXT PRIMARY KEY,
@@ -1082,20 +1058,20 @@ export class WorkbenchDatabase {
   createAction(input: ActionItemInput): ActionItem {
     const id = input.id ?? randomUUID();
     const now = nowIso();
-    this.db.prepare(`INSERT OR IGNORE INTO action_items(id,customer_id,title,why_now,owner,owner_wecom_userid,due_at,expected_outcome,evidence_refs_json,source_meeting_id,confidence,status,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.customerId, input.title, input.whyNow, input.owner ?? null, input.ownerWecomUserid ?? null,
+    this.db.prepare(`INSERT OR IGNORE INTO action_items(id,customer_id,title,why_now,owner,due_at,expected_outcome,evidence_refs_json,source_meeting_id,confidence,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.customerId, input.title, input.whyNow, input.owner ?? null,
       input.dueAt ?? null, input.expectedOutcome ?? null, json(input.evidenceRefs ?? []), input.sourceMeetingId ?? null, input.confidence ?? 0, 'new', now, now);
     return this.getAction(id)!;
   }
 
   getAction(id: string): ActionItem | undefined {
-    const row = this.db.prepare(`SELECT a.*,w.todo_id AS wecom_todo_id FROM action_items a LEFT JOIN wecom_todo_links w ON w.action_item_id=a.id WHERE a.id=?`).get(id) as Row | undefined;
+    const row = this.db.prepare('SELECT * FROM action_items WHERE id=?').get(id) as Row | undefined;
     return row ? actionFromRow(row) : undefined;
   }
 
   listActions(customerId?: string): ActionItem[] {
-    const sql = `SELECT a.*,w.todo_id AS wecom_todo_id FROM action_items a LEFT JOIN wecom_todo_links w ON w.action_item_id=a.id ${customerId ? 'WHERE a.customer_id=?' : ''}
-      ORDER BY CASE a.status WHEN 'new' THEN 0 WHEN 'accepted' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'snoozed' THEN 3 ELSE 4 END, COALESCE(a.due_at,'9999')`;
+    const sql = `SELECT * FROM action_items ${customerId ? 'WHERE customer_id=?' : ''}
+      ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'accepted' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'snoozed' THEN 3 ELSE 4 END, COALESCE(due_at,'9999')`;
     const rows = (customerId ? this.db.prepare(sql).all(customerId) : this.db.prepare(sql).all()) as Row[];
     return rows.map(actionFromRow);
   }
@@ -1103,9 +1079,9 @@ export class WorkbenchDatabase {
   updateAction(id: string, patch: Partial<ActionItemInput> & { status?: ActionStatus; outcome?: string | null }): ActionItem | null {
     const current = this.getAction(id);
     if (!current) return null;
-    this.db.prepare(`UPDATE action_items SET title=?,why_now=?,owner=?,owner_wecom_userid=?,due_at=?,expected_outcome=?,evidence_refs_json=?,status=?,outcome=?,updated_at=? WHERE id=?`)
+    this.db.prepare(`UPDATE action_items SET title=?,why_now=?,owner=?,due_at=?,expected_outcome=?,evidence_refs_json=?,status=?,outcome=?,updated_at=? WHERE id=?`)
       .run(patch.title ?? current.title, patch.whyNow ?? current.whyNow, patch.owner ?? current.owner ?? null,
-        patch.ownerWecomUserid ?? current.ownerWecomUserid ?? null, patch.dueAt ?? current.dueAt ?? null,
+        patch.dueAt ?? current.dueAt ?? null,
         patch.expectedOutcome ?? current.expectedOutcome ?? null, json(patch.evidenceRefs ?? current.evidenceRefs ?? []),
         patch.status ?? current.status, patch.outcome ?? current.outcome ?? null, nowIso(), id);
     return this.getAction(id)!;
@@ -1131,6 +1107,33 @@ export class WorkbenchDatabase {
     return results;
   }
 
+  completeAction(id: string, outcome?: string, actor = 'csm'): ActionItem | null {
+    const action = this.getAction(id);
+    if (!action) return null;
+    const updated = this.updateAction(id, { status: 'completed', outcome: outcome ?? 'CSM 在工作台确认完成' })!;
+    this.audit(actor, 'complete_action', 'action_item', id, { outcome });
+    return updated;
+  }
+
+  /** 批量完成：逐项处理互不影响——不存在 failed、非已接受/进行中 skipped、其余置 completed 并逐条审计。 */
+  bulkCompleteActions(ids: string[], outcome?: string, actor = 'csm'): ActionBulkResult[] {
+    const results: ActionBulkResult[] = [];
+    for (const id of [...new Set(ids)]) {
+      const action = this.getAction(id);
+      if (!action) {
+        results.push({ id, title: null, result: 'failed', error: '行动不存在' });
+        continue;
+      }
+      if (!['accepted', 'in_progress'].includes(action.status)) {
+        results.push({ id, title: action.title, result: 'skipped', reason: `当前状态 ${action.status}，仅已接受/进行中可完成` });
+        continue;
+      }
+      this.completeAction(id, outcome, actor);
+      results.push({ id, title: action.title, result: 'completed' });
+    }
+    return results;
+  }
+
   createSyncRun(scope: string, customerId?: string | null): SyncRun {
     const run: SyncRun = { id: randomUUID(), scope, customerId, status: 'running', startedAt: nowIso(), sourceStatus: {} };
     this.db.prepare('INSERT INTO sync_runs(id,scope,customer_id,status,started_at,source_status_json) VALUES(?,?,?,?,?,?)')
@@ -1151,50 +1154,6 @@ export class WorkbenchDatabase {
 
   hasSuccessfulSyncScope(scope: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM sync_runs WHERE scope=? AND status='succeeded' LIMIT 1").get(scope);
-  }
-
-  createTodoIntent(actionItemId: string, ttlMinutes = 10): { id: string; token: string; expiresAt: string } {
-    const id = randomUUID();
-    const token = randomBytes(32).toString('base64url');
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000).toISOString();
-    this.db.prepare('INSERT INTO todo_intents(id,token_hash,action_item_id,status,expires_at,created_at) VALUES(?,?,?,?,?,?)')
-      .run(id, tokenHash, actionItemId, 'pending', expiresAt, nowIso());
-    return { id, token, expiresAt };
-  }
-
-  consumeTodoIntent(id: string, token: string): { actionItemId: string } | null {
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const row = this.db.prepare(`SELECT * FROM todo_intents WHERE id=? AND token_hash=? AND status='pending' AND expires_at>?`).get(id, tokenHash, nowIso()) as Row | undefined;
-    if (!row) return null;
-    this.db.prepare("UPDATE todo_intents SET status='consumed',consumed_at=? WHERE id=?").run(nowIso(), id);
-    return { actionItemId: String(row.action_item_id) };
-  }
-
-  peekTodoIntent(id: string, token: string): { actionItemId: string } | null {
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const row = this.db.prepare(`SELECT action_item_id FROM todo_intents WHERE id=? AND token_hash=? AND status='pending' AND expires_at>?`).get(id, tokenHash, nowIso()) as Row | undefined;
-    return row ? { actionItemId: String(row.action_item_id) } : null;
-  }
-
-  linkWecomTodo(actionItemId: string, todoId: string, creatorUserid?: string, attendees: string[] = []): void {
-    const now = nowIso();
-    this.db.prepare(`INSERT INTO wecom_todo_links(action_item_id,todo_id,creator_userid,status,attendees_json,created_at,last_synced_at)
-      VALUES(?,?,?,?,?,?,?) ON CONFLICT(action_item_id) DO UPDATE SET todo_id=excluded.todo_id,creator_userid=excluded.creator_userid,status=excluded.status,
-      attendees_json=excluded.attendees_json,last_synced_at=excluded.last_synced_at`).run(actionItemId, todoId, creatorUserid ?? null, 1, json(attendees), now, now);
-  }
-
-  getWecomTodoLink(actionItemId: string): Row | null {
-    return (this.db.prepare('SELECT * FROM wecom_todo_links WHERE action_item_id=?').get(actionItemId) as Row | undefined) ?? null;
-  }
-
-  listActiveWecomTodoLinks(): Row[] {
-    return this.db.prepare('SELECT * FROM wecom_todo_links WHERE status=1').all() as Row[];
-  }
-
-  updateWecomTodoStatus(actionItemId: string, status: number, attendees: unknown[] = []): void {
-    this.db.prepare('UPDATE wecom_todo_links SET status=?,attendees_json=?,last_synced_at=? WHERE action_item_id=?').run(status, json(attendees), nowIso(), actionItemId);
-    if (status === 0) this.updateAction(actionItemId, { status: 'completed', outcome: '已在企业微信待办中完成' });
   }
 
   createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob {

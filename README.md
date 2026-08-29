@@ -9,8 +9,7 @@
 - 风险判断：确定性规则负责分数和等级；缺失数据保持 `unknown`，不转换为风险分。
 - 增购机会：只在非高风险客户中展示至少两个独立证据支持的假设。
 - 客户案例：固定模板成稿，CSM 编辑并确认后写入 ONES Wiki。
-- 企业微信待办：CSM 确认行动后生成一次性 H5 意图，在企业微信原生面板完成平台确认并保存 `todoId`。
-- 行动批量处理：「本周行动」页支持勾选（全选 + 已选计数）后批量接受 / 批量完成；批量完成弹一次共用「实际结果」输入（留空记「CSM 在工作台确认完成」）。逐项处理互不影响——仅待处理状态可被接受、仅已接受/进行中可被完成，其余跳过，单项失败（如企微待办回写失败）不回滚其他项，结果按 项数 汇总提示。CLI 同款：`csm-agent action accept <行动ID...>`、`csm-agent action complete <行动ID...> [--outcome]`。
+- 行动批量处理：「本周行动」页支持勾选（全选 + 已选计数）后批量接受 / 批量完成；批量完成弹一次共用「实际结果」输入（留空记「CSM 在工作台确认完成」）。逐项处理互不影响——仅待处理状态可被接受、仅已接受/进行中可被完成，其余跳过，单项失败不回滚其他项，结果按 项数 汇总提示。CLI 同款：`csm-agent action accept <行动ID...>`、`csm-agent action complete <行动ID...> [--outcome]`。
 - Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_profile` / `get_customer_events` 直接读工作台已同步数据（本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。会话支持「分享」（一键复制全文：标题、客户绑定、时间范围与完整对话；Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
 - 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看；建议/工单/运维三个 ONES 工作项列表只展示语义化 ID（`display_id`）、标题、状态、创建时间，标题可点击进入工作项详情，并默认按创建时间倒序。工时页同时展示总工时和登记明细（登记人、工时日期、登记小时、工时描述），明细默认按工时日期倒序。
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
@@ -94,7 +93,6 @@ csm-agent actions [CRM客户ID]
 csm-agent action accept <行动ID...> # 批量接受：仅待处理状态生效，其余跳过
 csm-agent action complete <行动ID...> --outcome "已与客户确认下一步" # 批量完成，--outcome 支持空格或=传值
 csm-agent action update <行动ID> '{"status":"in_progress"}'
-csm-agent action wecom <行动ID>
 csm-agent cases [CRM客户ID]
 csm-agent case generate <CRM客户ID>
 csm-agent case update <草稿ID> <版本> '{"title":"案例标题","fields":{}}'
@@ -169,27 +167,15 @@ ONES Desk 三类工作项（建议和反馈/工单/运维工单）的人工必�
 
 模型查询接口不返回 API Key。MCP 设置页会在本地展示当前连接参数，因此当前定位为单用户本地工具；团队托管前需要增加登录、租户隔离和集中密钥管理。
 
-## 企业微信
+## ONES 环境变量
 
-Hemory 自动草稿中的待办只创建为 CSM Agent 本地行动事项，不自动创建企业微信待办。以下能力保留给已有的手动企业微信流程，不属于本期 Hemory 验收范围。
-
-原生待办需要全员可见的企业微信自建应用、可信 HTTPS 域名和以下环境变量：
+ONES 当前租户已有默认值；迁移租户时覆盖：
 
 ```dotenv
-WECOM_CORP_ID=
-WECOM_AGENT_ID=
-WECOM_SECRET=
-WECOM_H5_BASE_URL=https://csm.example.com
-# 可选；默认使用兼容版企业微信 JS-SDK
-WECOM_JS_SDK_URL=https://res.wx.qq.com/open/js/jweixin-1.2.0.js
-
-# ONES 当前租户已有默认值；迁移租户时覆盖
 ONES_CUSTOMER_FIELD_ID=JrvswW8P
 ONES_WEB_BASE_URL=https://our.ones.pro
 ONES_TEAM_ID=RDjYMhKq
 ```
-
-企业微信官方创建接口只调起原生创建面板，不能后台静默创建。CSM 不需要重复填写内容、参与人和截止时间，但必须在企业微信中完成最后一次平台确认。第三方应用和代开发应用不支持该能力。
 
 ## 关键接口
 
@@ -202,7 +188,6 @@ ONES_TEAM_ID=RDjYMhKq
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`、`GET /api/draft-jobs?ids=`（生成任务状态；归属/重生成响应返回 jobId，失败任务不创建批次只能在此查询）
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
 - `POST /api/action-items/bulk-accept`、`POST /api/action-items/bulk-complete`（body `{ids}`，完成可带 `outcome`；逐项处理互不影响，返回 `{items:[{id,title,result,reason?,error?}]}`）
-- `POST /api/action-items/:id/wecom-todo-intents`、`POST /api/wecom/todo-created`
 - `POST /api/case-drafts`、`PATCH /api/case-drafts/:id`、`POST /api/case-drafts/:id/publish`
 - `GET /api/sessions`（默认剔除已归档；`?include=archived` 返回全量）、`PATCH /api/sessions/:id`（重命名 / 归档切换）、`GET /api/sessions/:id/export`（会话全文文本）
 
@@ -223,9 +208,8 @@ ONES_TEAM_ID=RDjYMhKq
 - ONES 案例发布需要 `ONES_CASE_PARENT_PAGE_ID`，或由 CSM 在发布预览时提供父页面 ID。
 - 实施周报（客户详情「实施周报」tab）：按周一~周日自然周（上海时区）基于该客户本周全部信息（Hemory 片段、建议/工单/运维工单、私有云实例、工时、CRM 跟进、行动事项、风险评级）生成四章节（本周执行摘要/本周完成情况/下周工作计划/问题风险与阻塞）；③④ 章以本周沟通片段中的约定/承诺与问题/风险信号为主要证据，逐条标注来源，无证据不杜撰。计数类统计由代码确定性计算：沟通次数按录音场数计（一场长会的多个话题片段只算一次）；工作项按「本周有更新」聚合去重（不限创建时间，上周创建本周解决/推进的也进周报），「新增」按创建时间在本周、「解决」按当前状态快照与更新时间近似判定（周报中标注）。生成失败任务显式报错并支持一键再次生成（不受指纹幂等短路）。发布到 ONES Wiki 走 `preview → 确认 → publish` 参数哈希审批门，父页面通过页面组→页面树层级选择器选取（案例发布同款选择器，手填页面 ID 保留为兜底）。
 - ONES Wiki 只读浏览（`csm-agent wiki` / `GET /api/ones-wiki/*`）经 ONES MCP `search_for_spaces` / `get_list_of_space_pages` 实现，结果缓存 5 分钟。
-- 企业微信状态轮询每 15 分钟执行一次，只读取和更新本应用创建的待办。
 - 当前 ONES MCP 没有 Desk 专用工具，Desk 数据通过 ONESQL 按项目、工作项类型和「客户信息」字段读取。
-- Mac `.app` 仍是本地 WKWebView 壳；企业微信 H5 必须部署到可被企业微信访问的 HTTPS 域名。页面内所有确认/提示/输入对话框（草稿确认、重新生成、忽略归属、案例发布等）使用自绘 modal，不依赖原生 `confirm()/alert()/prompt()`（WKWebView 未实现 JS 对话框面板时它们会静默失败）。
+- Mac `.app` 仍是本地 WKWebView 壳。页面内所有确认/提示/输入对话框（草稿确认、重新生成、忽略归属、案例发布等）使用自绘 modal，不依赖原生 `confirm()/alert()/prompt()`（WKWebView 未实现 JS 对话框面板时它们会静默失败）。
 
 ## 验证
 
@@ -238,7 +222,7 @@ csm-agent drafts --json
 csm-agent service status
 ```
 
-验收以指向当前构建的全局 `csm-agent` 为统一入口：先运行 `npm run verify`，再对运行中的服务执行与改动匹配的 CLI 命令。纯 UI 改动需要自动化检查覆盖展示合同；浏览器验收仅在用户明确要求时执行。真实交付边界还包括三套 MCP 同步、ONES Wiki 实际发布、企业微信桌面端/移动端待办创建与状态回写；这些边界必须使用真实权限与凭据验证，不能由本地配置存在代替。
+验收以指向当前构建的全局 `csm-agent` 为统一入口：先运行 `npm run verify`，再对运行中的服务执行与改动匹配的 CLI 命令。纯 UI 改动需要自动化检查覆盖展示合同；浏览器验收仅在用户明确要求时执行。真实交付边界还包括三套 MCP 同步与 ONES Wiki 实际发布；这些边界必须使用真实权限与凭据验证，不能由本地配置存在代替。
 
 ## Git 交付约定
 

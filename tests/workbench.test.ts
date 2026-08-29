@@ -8,7 +8,6 @@ import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
-import { WecomTodoService } from '../src/workbench/wecom.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-workbench-'));
@@ -210,17 +209,18 @@ test('workbench: ONES manhour parser normalizes detail records and pagination', 
   assert.equal(page.endCursor, 'next-page');
 });
 
-test('workbench: todo intents are one-time and action completion is persisted', () => withDb((db) => {
+test('workbench: action completion is persisted with default and explicit outcomes', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-4', name: '客户丁' });
-  const action = db.createAction({ customerId: 'crm-4', title: '确认续约预算', whyNow: '进入续约窗口', ownerWecomUserid: 'bo' });
+  const action = db.createAction({ customerId: 'crm-4', title: '确认续约预算', whyNow: '进入续约窗口' });
   db.updateAction(action.id, { status: 'accepted' });
-  const intent = db.createTodoIntent(action.id, 10);
-  assert.deepEqual(db.peekTodoIntent(intent.id, intent.token), { actionItemId: action.id });
-  assert.deepEqual(db.consumeTodoIntent(intent.id, intent.token), { actionItemId: action.id });
-  assert.equal(db.consumeTodoIntent(intent.id, intent.token), null);
-  db.linkWecomTodo(action.id, 'todo-1', 'bo', ['bo']);
-  db.updateWecomTodoStatus(action.id, 0);
-  assert.equal(db.getAction(action.id)?.status, 'completed');
+  const completed = db.completeAction(action.id);
+  assert.equal(completed?.status, 'completed');
+  assert.equal(completed?.outcome, 'CSM 在工作台确认完成');
+  const explicit = db.createAction({ customerId: 'crm-4', title: '指定结果', whyNow: '进入续约窗口' });
+  db.updateAction(explicit.id, { status: 'accepted' });
+  db.completeAction(explicit.id, '已同步上线');
+  assert.equal(db.getAction(explicit.id)?.outcome, '已同步上线');
+  assert.equal(db.completeAction('missing-id'), null);
 }));
 
 test('workbench: bulk accept applies per item with skipped/failed and per-item audit', () => withDb((db) => {
@@ -246,30 +246,27 @@ test('workbench: bulk accept applies per item with skipped/failed and per-item a
   assert.equal(auditedAgain.n, 2);
 }));
 
-test('workbench: bulk complete degrades only failing item and keeps default outcome', async () => withDb(async (db) => {
+test('workbench: bulk complete degrades only failing item and keeps default outcome', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-b2', name: '完成客户' });
   const ok = db.createAction({ customerId: 'crm-b2', title: '普通行动', whyNow: '原因' });
   db.updateAction(ok.id, { status: 'accepted' });
-  const linked = db.createAction({ customerId: 'crm-b2', title: '带企微待办', whyNow: '原因', ownerWecomUserid: 'bo' });
+  const linked = db.createAction({ customerId: 'crm-b2', title: '进行中行动', whyNow: '原因' });
   db.updateAction(linked.id, { status: 'in_progress' });
-  db.linkWecomTodo(linked.id, 'todo-x', 'bo', ['bo']);
   const fresh = db.createAction({ customerId: 'crm-b2', title: '未接受行动', whyNow: '原因' });
-  // 未配置企微（无 corpId 等 env）时 updateTodo 必抛：链接项 failed，其余照常完成，验证部分失败不回滚。
-  const service = new WecomTodoService(db);
-  const results = await service.bulkComplete([ok.id, linked.id, fresh.id, 'missing-id']);
-  assert.deepEqual(results.map((item) => item.result), ['completed', 'failed', 'skipped', 'failed']);
-  assert.match(results[1].error ?? '', /企业微信未配置/);
+  const results = db.bulkCompleteActions([ok.id, linked.id, fresh.id, 'missing-id']);
+  assert.deepEqual(results.map((item) => item.result), ['completed', 'completed', 'skipped', 'failed']);
   assert.equal(results[2].reason, '当前状态 new，仅已接受/进行中可完成');
+  assert.equal(results[3].title, null);
   assert.equal(db.getAction(ok.id)?.status, 'completed');
   assert.equal(db.getAction(ok.id)?.outcome, 'CSM 在工作台确认完成');
-  assert.equal(db.getAction(linked.id)?.status, 'in_progress');
+  assert.equal(db.getAction(linked.id)?.status, 'completed');
   assert.equal(db.getAction(fresh.id)?.status, 'new');
   const completed = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='complete_action' AND entity_id=?").get(ok.id) as { n: number };
   assert.equal(completed.n, 1);
   // 显式 outcome 传播到完成项。
   const next = db.createAction({ customerId: 'crm-b2', title: '指定结果行动', whyNow: '原因' });
   db.updateAction(next.id, { status: 'accepted' });
-  const withOutcome = await service.bulkComplete([next.id], '已同步上线');
+  const withOutcome = db.bulkCompleteActions([next.id], '已同步上线');
   assert.equal(withOutcome[0].result, 'completed');
   assert.equal(db.getAction(next.id)?.outcome, '已同步上线');
 }));

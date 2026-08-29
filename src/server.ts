@@ -19,7 +19,6 @@ import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { CaseService } from './workbench/cases.js';
-import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
@@ -158,7 +157,6 @@ interface WorkbenchServices {
   db: WorkbenchDatabase;
   sync: PortfolioSyncService;
   cases: CaseService;
-  wecom: WecomTodoService;
   drafts: HemoryDraftService;
   weekly: WeeklyReportService;
   wiki: WikiService;
@@ -364,7 +362,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(await readFile(join(publicDir, 'index.html'), 'utf8'));
       }
-      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/wecom-todo.html', '/wecom-todo.js', '/build-info.js'].includes(path)) {
+      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/build-info.js'].includes(path)) {
         const file = path.slice(1);
         const type = path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
           : path.endsWith('.svg') ? 'image/svg+xml; charset=utf-8' : 'text/html; charset=utf-8';
@@ -479,7 +477,6 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const customerId = decodeURIComponent(customerMatch[1]);
         const sub = customerMatch[2] ?? '';
         if (req.method === 'GET' && sub === '/overview') {
-          void workbench.wecom.syncActive();
           const overview = workbench.db.overview(customerId);
           return overview ? json(res, 200, overview) : json(res, 404, { error: 'customer not found' });
         }
@@ -525,7 +522,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
         if (!ids.length) return json(res, 400, { error: 'ids 不能为空' });
         const outcome = typeof body.outcome === 'string' && body.outcome.trim() ? body.outcome.trim() : undefined;
-        return json(res, 200, { items: await workbench.wecom.bulkComplete(ids, outcome) });
+        return json(res, 200, { items: workbench.db.bulkCompleteActions(ids, outcome) });
       }
       const actionMatch = path.match(/^\/api\/action-items\/([0-9A-Za-z_-]+)(\/.*)?$/);
       if (actionMatch) {
@@ -540,45 +537,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
         if (req.method === 'POST' && sub === '/complete') {
           const body = await readBody(req);
-          try {
-            await workbench.wecom.complete(actionId, typeof body.outcome === 'string' ? body.outcome : undefined);
-            return json(res, 200, workbench.db.getAction(actionId));
-          } catch (error) {
-            return json(res, 400, { error: (error as Error).message });
-          }
-        }
-        if (req.method === 'POST' && sub === '/wecom-todo-intents') {
-          try {
-            return json(res, 201, workbench.wecom.createIntent(actionId));
-          } catch (error) {
-            return json(res, 400, { error: (error as Error).message, wecom: workbench.wecom.client.status() });
-          }
-        }
-      }
-
-      const todoIntentMatch = path.match(/^\/api\/wecom\/todo-intents\/([0-9a-f-]+)$/);
-      if (req.method === 'GET' && todoIntentMatch) {
-        const intent = workbench.wecom.getIntent(todoIntentMatch[1], url.searchParams.get('token') ?? '');
-        return intent ? json(res, 200, intent) : json(res, 404, { error: '待办意图无效、已使用或已过期' });
-      }
-      if (req.method === 'GET' && path === '/api/wecom/status') {
-        return json(res, 200, workbench.wecom.client.status());
-      }
-      if (req.method === 'GET' && path === '/api/wecom/js-sdk-config') {
-        try {
-          return json(res, 200, await workbench.wecom.client.jsSdkConfig(url.searchParams.get('url') ?? ''));
-        } catch (error) {
-          return json(res, 400, { error: (error as Error).message });
-        }
-      }
-      if (req.method === 'POST' && path === '/api/wecom/todo-created') {
-        const body = await readBody(req);
-        try {
-          workbench.wecom.todoCreated(String(body.intent ?? ''), String(body.token ?? ''), String(body.todoId ?? ''),
-            typeof body.creatorUserid === 'string' ? body.creatorUserid : undefined);
-          return json(res, 200, { ok: true });
-        } catch (error) {
-          return json(res, 400, { error: (error as Error).message });
+          const action = workbench.db.completeAction(actionId, typeof body.outcome === 'string' ? body.outcome : undefined);
+          return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });
         }
       }
 
@@ -1157,17 +1117,15 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     const data = await sync.listCustomerWorkhours(customerId);
     return { records: data.records.map((record) => ({ startTime: record.startTime, hours: record.hours, description: record.description, owner: record.owner?.name ?? undefined })) };
   });
-  const wecom = new WecomTodoService(db);
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
-  const stopWecom = scheduleWecomSync(wecom);
   const resumeTimer = setTimeout(() => {
     hemorySegments.resumePending();
     drafts.resumePending();
     weekly.resumePending();
   }, 5_000);
   resumeTimer.unref();
-  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, wecom, drafts, weekly, wiki }));
+  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki }));
   // 旧进程检测的锚点：进程启动时加载的构建 + 受监管时的磁盘变化自检。
   loadedBuildInfo = readBuildInfo();
   serverStartedAt = new Date().toISOString();
@@ -1188,7 +1146,6 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   server.on('close', () => {
     stopPortfolio();
     stopHemory();
-    stopWecom();
     clearTimeout(resumeTimer);
     if (staleTimer) clearInterval(staleTimer);
     db.close();
