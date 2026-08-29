@@ -1013,3 +1013,46 @@ test('customer overview data section renders count-only stat cards with status-c
   assert.match(styles, /\.stat-bar \{/);
   assert.match(styles, /\.stat-bar i \{/);
 });
+
+test('agent composer exposes a stop button wired to the session stop endpoint', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 停止按钮必须 type=button（form 内缺省 type=submit 会误触发表单提交）。
+  assert.match(html, /<button id="stop" type="button" class="hidden">停止<\/button>/);
+  const handler = app.match(/stopEl\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(handler, 'stop click handler was not found');
+  assert.match(handler, /\/api\/sessions\/\$\{sessionId\}\/stop/);
+  // turn_start 显示、turn_end 隐藏：SSE 回放历史事件后刷新页面也能恢复出正确状态。
+  assert.match(app, /startStreaming\(\); setStopVisible\(true\)/);
+  assert.match(app, /setStopVisible\(false\)/);
+  // 停止后旧确认卡按钮禁用（服务端已按拒绝处理）。
+  assert.match(app, /disablePendingConfirmCards\(\)/);
+  // 停止按钮样式仅用主题 token（双主题契约）。
+  assert.match(css, /#stop \{/);
+  assert.match(css, /background: var\(--danger-btn\)/);
+  assert.match(css, /#stop:hover \{ background: var\(--danger-btn-hover\); \}/);
+});
+
+test('agent replies stream as deltas and thinking collapses into a fold', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  const dispatch = app.match(/function handleEvent[\s\S]*?\n  \}\n\n  \/\*\* 停止后禁用/)?.[0];
+  assert.ok(dispatch, 'handleEvent source was not found');
+  assert.match(dispatch, /case 'text_delta': appendTextDelta\(e\.delta\)/);
+  assert.match(dispatch, /case 'thinking_delta': appendThinkingDelta\(e\.delta\)/);
+  assert.match(dispatch, /case 'text': endStreaming\(\); addMessage\('assistant', e\.text\)/);
+  assert.match(dispatch, /case 'turn_end':[\s\S]*?addTokenUsage\(e\.usage\)/);
+  const streaming = app.match(/function startStreaming[\s\S]*?\n  function setStopVisible/)?.[0];
+  assert.ok(streaming, 'streaming helpers were not found');
+  assert.match(streaming, /function appendTextDelta/);
+  assert.match(streaming, /function appendThinkingDelta/);
+  assert.match(streaming, /已深度思考（\$\{text\.length\} 字）`;/);
+  assert.match(streaming, /本轮 tokens：输入 \$\{usage\.input\} · 输出 \$\{usage\.output\}（本会话累计 \$\{sessionTokens\}\）/);
+  // 思考折叠面板样式只引用既有 token。
+  assert.match(css, /\.think-block \{/);
+  assert.match(css, /\.think-block\.open \.think-body \{ display: block; \}/);
+  assert.match(css, /\.think-block\.open \.think-head::before \{ content: '▾ '; \}/);
+});

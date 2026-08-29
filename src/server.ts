@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
 import { loadMcpServers, saveMcpServers, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
 import { CUSTOM_PROVIDER_ID, testCustomEndpoint } from './custom-llm.js';
-import { AgentSession, type AgentEvent } from './agent.js';
+import { AgentSession, AgentAbortedError, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
 import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToolHandlers } from './tools/workbench.js';
@@ -47,6 +47,10 @@ interface Session {
   clients: Set<http.ServerResponse>;
   pending: PendingConfirm | null;
   busy: boolean;
+  /** 单调 seq 计数器：持久事件与瞬态 delta 共用，重连/刷新后去重才可靠。 */
+  seqCounter: number;
+  /** 当前 turn 的中止开关；仅在 busy 期间存在。 */
+  abort: AbortController | null;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -57,6 +61,9 @@ interface Session {
   /** archived sessions stay loadable but are hidden from the default list */
   archived: boolean;
 }
+
+/** 事件帧 seq 判断：text_delta/thinking_delta 只流给在线客户端，不落盘不回放。 */
+const TRANSIENT_EVENT_TYPES = new Set(['text_delta', 'thinking_delta']);
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
@@ -312,10 +319,18 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   }
 
   function broadcast(session: Session, event: DisplayEvent): void {
-    session.events.push({ seq: session.events.length + 1, event });
+    if (TRANSIENT_EVENT_TYPES.has(event.type as string)) {
+      // 瞬态帧：分配 seq 但只发给在线客户端——落盘/回放仍是整段事件，刷新重连不重播碎片。
+      const seq = ++session.seqCounter;
+      const payload = `data: ${JSON.stringify({ seq, event })}\n\n`;
+      for (const client of session.clients) client.write(payload);
+      return;
+    }
+    const seq = ++session.seqCounter;
+    session.events.push({ seq, event });
     session.updatedAt = Date.now();
     persist(session);
-    const payload = `data: ${JSON.stringify({ seq: session.events.length, event })}\n\n`;
+    const payload = `data: ${JSON.stringify({ seq, event })}\n\n`;
     for (const client of session.clients) {
       client.write(payload);
     }
@@ -347,6 +362,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       clients: new Set(),
       pending: null,
       busy: false,
+      seqCounter: (stored.events ?? []).reduce((max, e) => Math.max(max, e.seq), 0),
+      abort: null,
       title: stored.title || '新对话',
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt,
@@ -891,14 +908,16 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           summary: boundCustomer.nextAction ?? undefined,
         } : null;
         const now = Date.now();
-        const session: Session = {
-          id: randomUUID(),
-          agent: null as unknown as AgentSession,
-          events: [],
-          clients: new Set(),
-          pending: null,
-          busy: false,
-          title: boundCustomer ? `${boundCustomer.name} · Agent 草稿` : '新对话',
+      const session: Session = {
+        id: randomUUID(),
+        agent: null as unknown as AgentSession,
+        events: [],
+        clients: new Set(),
+        pending: null,
+        busy: false,
+        seqCounter: 0,
+        abort: null,
+        title: boundCustomer ? `${boundCustomer.name} · Agent 草稿` : '新对话',
           createdAt: now,
           updatedAt: now,
           lastRecordId: null,
@@ -1006,10 +1025,14 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           }
 
           session.busy = true;
+          session.abort = new AbortController();
+          const signal = session.abort.signal;
           broadcast(session, { type: 'user', text });
           broadcast(session, { type: 'turn_start' });
 
           void (async () => {
+            let turnUsage: { input: number; output: number; total: number } | undefined;
+            let stopped = false;
             try {
               await session.agent.send(text, {
                 onEvent: (e) => {
@@ -1034,23 +1057,51 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
                       }
                     }
                   }
+                  if (e.type === 'done' && e.usage) turnUsage = e.usage;
                   broadcast(session, e as unknown as DisplayEvent);
                 },
                 requestConfirm: (draft) =>
                   new Promise<boolean | ConfirmDraft>((resolve) => {
                     session.pending = { draft, resolve };
                   }),
-              });
+              }, signal);
             } catch (err) {
-              broadcast(session, { type: 'text', text: `运行出错: ${(err as Error).message}` });
+              const aborted = err instanceof AgentAbortedError || signal.aborted || (err as Error).name === 'AbortError';
+              if (aborted) {
+                // 停止通知走 assistant text 事件：SSE、会话落盘、分享导出三端一致，天然审计留痕。
+                broadcast(session, { type: 'text', text: '（对话已手动停止）' });
+                stopped = true;
+              } else {
+                broadcast(session, { type: 'text', text: `运行出错: ${(err as Error).message}` });
+              }
             } finally {
               session.pending = null;
+              session.abort = null;
               session.busy = false;
-              broadcast(session, { type: 'turn_end' });
+              broadcast(session, { type: 'turn_end', usage: turnUsage, stopped: stopped || undefined });
             }
           })();
 
           return json(res, 202, { ok: true });
+        }
+
+        // stop the running turn（挂起中的 confirm_write 草稿自动按拒绝处理——停止即不写）
+        if (req.method === 'POST' && sub === '/stop') {
+          if (!session.busy) return json(res, 409, { error: '当前没有进行中的对话' });
+          if (session.pending) {
+            const pending = session.pending;
+            session.pending = null;
+            pending.resolve(false);
+            const rec = session.lastRecordId ? store.records.find((r) => r.id === session.lastRecordId) : undefined;
+            if (rec) {
+              rec.status = 'rejected';
+              rec.updatedAt = Date.now();
+              store.persistRecords();
+              session.lastRecordId = null;
+            }
+          }
+          session.abort?.abort();
+          return json(res, 200, { ok: true });
         }
 
         // confirm / reject a pending draft

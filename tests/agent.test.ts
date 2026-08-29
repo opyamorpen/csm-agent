@@ -5,9 +5,10 @@ import {
   fauxProvider,
   fauxAssistantMessage,
   fauxToolCall,
+  fauxThinking,
   Type,
 } from '@earendil-works/pi-ai';
-import { runAgent, AgentSession, type McpGateway } from '../src/agent.js';
+import { runAgent, AgentSession, AgentAbortedError, type McpGateway } from '../src/agent.js';
 import { confirmWriteTool, type ConfirmDraft } from '../src/tools/confirm.js';
 
 const WRITE_TOOL_NAME = 'mcp__crm__create_followup';
@@ -227,4 +228,173 @@ test('runAgent: unknown tool error lists connected servers and warns against inv
   assert.ok(results[0].includes('未知工具'), '应标明未知工具');
   assert.ok(results[0].includes('crm、ones、hemory'), '应列出已连接服务器');
   assert.ok(results[0].includes('不要臆造工具名'), '应提示不要臆造工具名');
+});
+
+// ── 停止 / 流式 / thinking / usage ──────────────────────────────────────────
+
+test('runAgent: text_delta events arrive before the full text event', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+  faux.setResponses([fauxAssistantMessage('流式回复内容')]);
+  const order: string[] = [];
+  await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '你好',
+    hooks: {
+      onEvent(e) {
+        if (e.type === 'text_delta' && e.delta) order.push('delta:' + e.delta);
+        if (e.type === 'text' && e.text) order.push('text:' + e.text);
+      },
+      requestConfirm: async () => false,
+    },
+  });
+  assert.ok(order.some((item) => item.startsWith('delta:')), '应收到 text_delta 流式事件');
+  const firstText = order.findIndex((item) => item.startsWith('text:'));
+  const lastDelta = order.map((item) => item.startsWith('delta:')).lastIndexOf(true);
+  assert.ok(lastDelta >= 0 && lastDelta < firstText, '全部 delta 应先于整段 text 事件');
+});
+
+test('runAgent: thinking blocks are surfaced as thinking event and deltas stream', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+  faux.setResponses([fauxAssistantMessage([fauxThinking('先分析一下'), { type: 'text', text: '答案' }])]);
+  const thinkingEvents: string[] = [];
+  const thinkingDeltas: string[] = [];
+  await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '想一下',
+    hooks: {
+      onEvent(e) {
+        if (e.type === 'thinking' && e.text) thinkingEvents.push(e.text);
+        if (e.type === 'thinking_delta' && e.delta) thinkingDeltas.push(e.delta);
+      },
+      requestConfirm: async () => false,
+    },
+  });
+  assert.ok(thinkingDeltas.length > 0, 'thinking_delta 应流式到达');
+  assert.equal(thinkingEvents.join(''), '先分析一下', '整段 thinking 事件应携带完整思考文本');
+});
+
+test('runAgent: done event carries accumulated token usage', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+  faux.setResponses([fauxAssistantMessage('第一段'), fauxAssistantMessage('第二段')]);
+  let usage: { input: number; output: number; total: number } | undefined;
+  await runAgent({
+    models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '你好',
+    hooks: {
+      onEvent(e) { if (e.type === 'done') usage = e.usage; },
+      requestConfirm: async () => false,
+    },
+  });
+  assert.ok(usage, 'done 事件应携带 usage');
+  assert.ok(usage!.input > 0, 'input tokens 应大于 0（faux 估算）');
+  assert.ok(usage!.output > 0, 'output tokens 应大于 0');
+  assert.ok(usage!.total >= usage!.input + usage!.output, 'total 应聚合所有调用');
+});
+
+test('runAgent: pre-aborted signal makes zero LLM calls and throws AgentAbortedError', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+  faux.setResponses([fauxAssistantMessage('不应被调用')]);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    runAgent({
+      models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '你好',
+      hooks: { onEvent() {}, requestConfirm: async () => false },
+      signal: controller.signal,
+    }),
+    AgentAbortedError,
+  );
+  assert.equal(faux.state.callCount, 0, '预中止时不应发起任何 LLM 调用');
+});
+
+test('runAgent: aborted message is not pushed into context (no dangling toolCall)', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw } = makeGateway();
+  const controller = new AbortController();
+  // 用自定义 Models 包装：第一次调用正常回复，流式期间 abort 使 provider 返回 aborted 消息。
+  const wrapped: typeof models = {
+    ...models,
+    stream: (m: any, ctx: any, options: any) => {
+      const s = models.stream(m, ctx, options);
+      const origResult = s.result.bind(s);
+      void origResult().then((msg) => {
+        if (msg.stopReason !== 'aborted' && controller.signal.aborted) {
+          // 手工把已返回的消息改造成 aborted 语义，模拟 provider 中止行为。
+          (msg as any).stopReason = 'aborted';
+        }
+      });
+      return s as any;
+    },
+  } as any;
+  faux.setResponses([fauxAssistantMessage('进行中的回复')]);
+  controller.abort();
+  await assert.rejects(
+    runAgent({
+      models: wrapped, model, mcp: gw, tools, systemPrompt: 'test', userInput: '你好',
+      hooks: { onEvent() {}, requestConfirm: async () => false },
+      signal: controller.signal,
+    }),
+    AgentAbortedError,
+  );
+});
+
+test('runAgent: abort while confirm_write is pending rejects cleanly with paired toolResult', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+  const controller = new AbortController();
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('confirm_write', draft)]),
+    fauxAssistantMessage([fauxToolCall(WRITE_TOOL_NAME, {})]),
+  ]);
+  // 挂起中的 confirm 由 abort 解除（服务端 stop 端点：resolve(false) 后 abort）。
+  const requestConfirm = () => new Promise<boolean>((resolve) => {
+    controller.signal.addEventListener('abort', () => resolve(false), { once: true });
+    setTimeout(() => controller.abort(), 0);
+  });
+  await assert.rejects(
+    runAgent({
+      models, model, mcp: gw, tools, systemPrompt: 'test', userInput: '写入',
+      hooks: { onEvent() {}, requestConfirm },
+      signal: controller.signal,
+    }),
+    AgentAbortedError,
+  );
+  assert.equal(writeCalls(), 0, '挂起中被停止的草稿不得写入');
+});
+
+test('AgentSession.send: abort mid-batch skips the rest and keeps toolResult pairing', async () => {
+  const { faux, models, model } = buildContext();
+  const controller = new AbortController();
+  let calls = 0;
+  const gw: McpGateway = {
+    resolve: () => ({ server: 'crm', rawName: 'read_tool' }),
+    isWrite: () => false,
+    async call() {
+      calls++;
+      if (calls === 1) controller.abort(); // 第一个工具执行中停止
+      return { text: 'read-ok', isError: false };
+    },
+  };
+  // 第一轮返回两个读工具调用；第一个执行完后 abort，第二个应被跳过并合成 toolResult。
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall('read_tool', {}, { id: 'call-1' }),
+      fauxToolCall('read_tool', {}, { id: 'call-2' }),
+    ]),
+    fauxAssistantMessage('unused'),
+  ]);
+  const session = new AgentSession({ models, model, mcp: gw, tools: [], systemPrompt: 'test' });
+  await assert.rejects(
+    session.send('读取', { onEvent() {}, requestConfirm: async () => false }, controller.signal),
+    AgentAbortedError,
+  );
+  const msgs = session.context.messages;
+  const toolCalls = msgs.filter((m) => m.role === 'assistant').flatMap((m: any) => m.content.filter((b: any) => b.type === 'toolCall'));
+  const toolResults = msgs.filter((m) => m.role === 'toolResult');
+  assert.equal(toolCalls.length, 2);
+  assert.equal(toolResults.length, 2, '每个 toolCall 都必须配对 toolResult（跳过的合成结果）');
+  assert.equal(calls, 1, '停止后批内剩余调用不应真实执行');
+  assert.equal(toolResults[1].content[0]?.text, '（对话已停止，本调用未执行）',
+    '被跳过的调用应合成停止说明 toolResult');
 });

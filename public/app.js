@@ -2,6 +2,7 @@
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendEl = document.getElementById('send');
+  const stopEl = document.getElementById('stop');
   const statusEl = document.getElementById('status');
   const form = document.getElementById('composer');
   const sessionListEl = document.getElementById('sessionList');
@@ -536,13 +537,74 @@
     }
   }
 
+  // ── streaming turn state ────────────────────────────────────────
+  // 活动回复占位：delta 流入临时 div，收到整段持久 text 事件后整段重渲（顺序保证不重复）。
+  let activeMsgEl = null;
+  let activeThinkEl = null;
+  let sessionTokens = 0;
+
+  function startStreaming() {
+    activeMsgEl = el('div', 'msg assistant streaming');
+    activeThinkEl = null;
+  }
+
+  function endStreaming() {
+    if (activeMsgEl) { activeMsgEl.remove(); activeMsgEl = null; }
+    if (activeThinkEl) { activeThinkEl.remove(); activeThinkEl = null; }
+  }
+
+  function appendTextDelta(delta) {
+    if (!activeMsgEl) startStreaming();
+    if (!activeMsgEl.parentNode) messagesEl.appendChild(activeMsgEl);
+    activeMsgEl.append(delta);
+    scrollDown();
+  }
+
+  function appendThinkingDelta(delta) {
+    if (!activeThinkEl) {
+      activeThinkEl = el('div', 'think-block open');
+      const head = el('div', 'think-head', '思考中…');
+      const body = el('div', 'think-body');
+      head.onclick = () => activeThinkEl && activeThinkEl.classList.toggle('open');
+      activeThinkEl.append(head, body);
+    }
+    if (!activeThinkEl.parentNode) messagesEl.insertBefore(activeThinkEl, activeMsgEl && activeMsgEl.parentNode ? activeMsgEl : null);
+    activeThinkEl.querySelector('.think-body').append(delta);
+    scrollDown();
+  }
+
+  /** 折叠思考面板为一行摘要（本轮 thinking 流结束后调用）。 */
+  function settleThinking() {
+    if (!activeThinkEl) return;
+    const text = activeThinkEl.querySelector('.think-body').textContent || '';
+    const head = activeThinkEl.querySelector('.think-head');
+    head.textContent = `已深度思考（${text.length} 字）`;
+    activeThinkEl.classList.remove('open');
+  }
+
+  function addTokenUsage(usage) {
+    if (!usage || typeof usage.total !== 'number') return;
+    sessionTokens += usage.total;
+    const line = el('div', 'msg system', `本轮 tokens：输入 ${usage.input} · 输出 ${usage.output}（本会话累计 ${sessionTokens}）`);
+    messagesEl.appendChild(line);
+    scrollDown();
+  }
+
+  function setStopVisible(on) {
+    stopEl.classList.toggle('hidden', !on);
+    stopEl.disabled = false;
+  }
+
   function handleEvent(e) {
     if (!e) return;
     switch (e.type) {
       case 'user': addMessage('user', e.text); break;
-      case 'turn_start': busy = true; setThinking(true); break;
-      case 'text': addMessage('assistant', e.text); break;
-      case 'tool_call': addToolLine(e.name, e.arguments); break;
+      case 'turn_start': busy = true; setThinking(true); startStreaming(); setStopVisible(true); break;
+      case 'text_delta': appendTextDelta(e.delta); break;
+      case 'thinking_delta': appendThinkingDelta(e.delta); break;
+      case 'thinking': settleThinking(); break;
+      case 'text': endStreaming(); addMessage('assistant', e.text); break;
+      case 'tool_call': endStreaming(); settleThinking(); addToolLine(e.name, e.arguments); break;
       case 'tool_result':
         if (e.name !== 'confirm_write') {
           messagesEl.appendChild(el('div', 'tool', '← ' + e.name + ': ' + (e.result || '').slice(0, 220)));
@@ -554,12 +616,24 @@
       case 'turn_end':
         busy = false;
         setThinking(false);
+        endStreaming();
+        setStopVisible(false);
         sendEl.disabled = false;
         inputEl.disabled = false;
         inputEl.focus();
+        // 停止会把挂起中的草稿自动按拒绝处理，旧确认卡不允许再交互。
+        if (e.stopped === true) disablePendingConfirmCards();
+        addTokenUsage(e.usage);
         loadSessions();
         loadRecords();
         break;
+    }
+  }
+
+  /** 停止后禁用消息流里仍未决策的确认卡按钮。 */
+  function disablePendingConfirmCards() {
+    for (const card of messagesEl.querySelectorAll('.card')) {
+      for (const btn of card.querySelectorAll('button')) btn.disabled = true;
     }
   }
 
@@ -2835,6 +2909,7 @@
     sendEl.disabled = true;
     inputEl.disabled = true;
     setThinking(true);
+    setStopVisible(true);
     try {
       await fetch(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
@@ -2846,7 +2921,21 @@
       sendEl.disabled = false;
       inputEl.disabled = false;
       setThinking(false);
+      setStopVisible(false);
       addMessage('assistant', '发送失败: ' + err.message);
+    }
+  });
+
+  stopEl.addEventListener('click', async () => {
+    if (!busy || !sessionId) return;
+    stopEl.disabled = true;
+    try {
+      await api(`/api/sessions/${sessionId}/stop`, { method: 'POST' });
+      setStatus('', '正在停止对话…');
+    } catch (error) {
+      stopEl.disabled = false;
+      // 仍处于 busy 说明停止未生效（如恰好已 turn_end），等事件流自然复位即可。
+      if (busy) await alertDialog(error.message);
     }
   });
 

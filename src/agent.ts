@@ -12,14 +12,33 @@ export interface McpGateway {
   serverNames?(): string[];
 }
 
+/** Token usage of one turn, accumulated across all LLM calls in the loop. */
+export interface TurnUsage {
+  input: number;
+  output: number;
+  total: number;
+}
+
 export interface AgentEvent {
-  type: 'text' | 'tool_call' | 'confirm' | 'tool_result' | 'customer_context' | 'done';
+  type: 'text' | 'text_delta' | 'thinking' | 'thinking_delta' | 'tool_call' | 'confirm' | 'tool_result' | 'customer_context' | 'done';
   text?: string;
+  /** Incremental fragment carried by text_delta / thinking_delta events. */
+  delta?: string;
   name?: string;
   arguments?: Record<string, unknown>;
   draft?: ConfirmDraft;
   result?: string;
   context?: CustomerContext;
+  /** Token usage carried by the final `done` event of a turn. */
+  usage?: TurnUsage;
+}
+
+/** Thrown when a running turn is aborted through its AbortSignal. */
+export class AgentAbortedError extends Error {
+  constructor() {
+    super('对话已停止');
+    this.name = 'AgentAbortedError';
+  }
 }
 
 export interface AgentHooks {
@@ -42,6 +61,14 @@ export function extractText(content: readonly { type: string }[]): string {
     .trim();
 }
 
+export function extractThinking(content: readonly { type: string }[]): string {
+  return content
+    .filter((b): b is { type: 'thinking'; thinking: string } => b.type === 'thinking' && typeof (b as { thinking?: unknown }).thinking === 'string')
+    .map((b) => b.thinking)
+    .join('\n')
+    .trim();
+}
+
 export interface LoopParams {
   models: Models;
   model: Model<any>;
@@ -50,6 +77,28 @@ export interface LoopParams {
   hooks: AgentHooks;
   localTools?: Record<string, LocalToolHandler>;
   maxIterations?: number;
+  /** Aborting stops the loop between/inside iterations (LLM calls are aborted in-flight). */
+  signal?: AbortSignal;
+}
+
+/**
+ * Stream one assistant message, forwarding text/thinking deltas to hooks as
+ * they arrive. Returns the final AssistantMessage; provider failures arrive
+ * as stopReason 'error'/'aborted' on the message instead of a thrown error.
+ */
+async function completeStreaming(
+  models: Models,
+  model: Model<any>,
+  context: Context,
+  hooks: AgentHooks,
+  signal?: AbortSignal,
+): Promise<AssistantMessage> {
+  const stream = models.stream(model, context, signal ? { signal } : undefined);
+  for await (const ev of stream) {
+    if (ev.type === 'text_delta' && ev.delta) hooks.onEvent({ type: 'text_delta', delta: ev.delta });
+    else if (ev.type === 'thinking_delta' && ev.delta) hooks.onEvent({ type: 'thinking_delta', delta: ev.delta });
+  }
+  return stream.result();
 }
 
 /**
@@ -57,17 +106,28 @@ export interface LoopParams {
  * Returns the final assistant text.
  */
 export async function runLoop(params: LoopParams): Promise<string> {
-  const { models, model, mcp, context, hooks, localTools = {}, maxIterations = 20 } = params;
+  const { models, model, mcp, context, hooks, localTools = {}, maxIterations = 20, signal } = params;
 
   let approvedWrite: { tool: string; argsHash: string } | null = null;
   let lastText = '';
+  const usage: TurnUsage = { input: 0, output: 0, total: 0 };
 
   for (let i = 0; i < maxIterations; i++) {
-    const msg: AssistantMessage = await models.complete(model, context);
+    if (signal?.aborted) throw new AgentAbortedError();
+
+    const msg: AssistantMessage = await completeStreaming(models, model, context, hooks, signal);
+    // 半截的中止消息不入 context：悬挂的 toolCall 没有配对 toolResult，会破坏下一轮请求。
+    if (msg.stopReason === 'aborted') throw new AgentAbortedError();
     context.messages.push(msg);
     if (msg.stopReason === 'error') {
       throw new Error((msg as AssistantMessage & { errorMessage?: string }).errorMessage || '模型调用失败');
     }
+    usage.input += msg.usage?.input ?? 0;
+    usage.output += msg.usage?.output ?? 0;
+    usage.total += msg.usage?.totalTokens ?? 0;
+
+    const thinking = extractThinking(msg.content);
+    if (thinking) hooks.onEvent({ type: 'thinking', text: thinking });
 
     const text = extractText(msg.content);
     if (text) {
@@ -77,7 +137,7 @@ export async function runLoop(params: LoopParams): Promise<string> {
 
     const calls = msg.content.filter((b): b is ToolCall => b.type === 'toolCall');
     if (calls.length === 0) {
-      hooks.onEvent({ type: 'done', text: lastText });
+      hooks.onEvent({ type: 'done', text: lastText, usage });
       return lastText || '(未得到最终答复)';
     }
 
@@ -87,7 +147,11 @@ export async function runLoop(params: LoopParams): Promise<string> {
       let resultText: string;
       let isError = false;
 
-      if (call.name === CONFIRM_TOOL_NAME) {
+      if (signal?.aborted) {
+        // 停止后跳过真实执行；toolCall 必须配对 toolResult，否则下一轮请求会被 API 拒绝。
+        resultText = '（对话已停止，本调用未执行）';
+        isError = true;
+      } else if (call.name === CONFIRM_TOOL_NAME) {
         const draft = call.arguments as unknown as ConfirmDraft;
         hooks.onEvent({ type: 'confirm', draft });
         const decision = await hooks.requestConfirm(draft);
@@ -159,9 +223,11 @@ export async function runLoop(params: LoopParams): Promise<string> {
         timestamp: Date.now(),
       });
     }
+
+    if (signal?.aborted) throw new AgentAbortedError();
   }
 
-  hooks.onEvent({ type: 'done', text: lastText });
+  hooks.onEvent({ type: 'done', text: lastText, usage });
   return lastText || '（达到最大迭代次数，仍未得到最终答复）';
 }
 
@@ -198,14 +264,14 @@ export class AgentSession {
   }
 
   /** Append a user message and run the loop. Returns the final assistant text. */
-  async send(userInput: string, hooks: AgentHooks): Promise<string> {
+  async send(userInput: string, hooks: AgentHooks, signal?: AbortSignal): Promise<string> {
     if (this.cfg.live) {
       this.context.systemPrompt = this.cfg.live.getSystemPrompt();
       this.context.tools = this.cfg.live.getTools();
       this.cfg.model = this.cfg.live.getModel();
     }
     this.context.messages.push({ role: 'user', content: userInput, timestamp: Date.now() });
-    return runLoop({ ...this.cfg, context: this.context, hooks });
+    return runLoop({ ...this.cfg, context: this.context, hooks, signal });
   }
 
   /** Restore conversation history (used when resuming a persisted session). */
@@ -217,11 +283,13 @@ export class AgentSession {
 export interface RunParams extends SessionConfig {
   userInput: string;
   hooks: AgentHooks;
+  /** Aborting stops the loop (see LoopParams.signal). */
+  signal?: AbortSignal;
 }
 
 /** One-shot convenience wrapper (used by the CLI and tests). */
 export async function runAgent(params: RunParams): Promise<string> {
-  const { userInput, hooks, ...cfg } = params;
+  const { userInput, hooks, signal, ...cfg } = params;
   const session = new AgentSession(cfg);
-  return session.send(userInput, hooks);
+  return session.send(userInput, hooks, signal);
 }

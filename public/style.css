@@ -516,9 +516,50 @@ footer { padding: 12px 18px; border-top: 1px solid var(--border); background: va
 }
 #send:hover { filter: brightness(1.07); }
 #send:disabled { opacity: 0.5; cursor: not-allowed; }
+#stop {
+  padding: 10px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--danger-btn-border);
+  background: var(--danger-btn);
+  color: var(--on-accent);
+  font-size: 15px;
+  cursor: pointer;
+}
+#stop:hover { background: var(--danger-btn-hover); }
+#stop:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .thinking { align-self: flex-start; color: var(--muted); font-size: 13px; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.4; } }
+
+/* 思考过程折叠面板（流式 delta 实时填充，完成后折叠成一行摘要） */
+.think-block {
+  align-self: stretch;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.think-head {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.think-head::before { content: '▸ '; }
+.think-block.open .think-head::before { content: '▾ '; }
+.think-body {
+  display: none;
+  padding: 0 12px 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px dashed var(--border-soft);
+}
+.think-block.open .think-body { display: block; }
+.msg.streaming { opacity: 0.92; }
 
 /* settings modal */
 .modal {

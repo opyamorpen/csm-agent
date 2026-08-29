@@ -50,6 +50,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'runtime-config' && item.api.includes('PUT /api/config/llm')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/export')));
+  assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/stop')));
   assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/customers/:id/weekly-reports')));
   assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/weekly-reports/:id/publish-preview')));
   assert.ok(capabilities.some((item) => item.workflow === 'weekly-reports' && item.api.includes('/api/weekly-reports/:id/publish')));
@@ -87,6 +88,8 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent sessions \[list\] \[--all\] \[--json\]/);
   assert.match(help.stdout, /csm-agent sessions show <会话ID>/);
   assert.match(help.stdout, /csm-agent sessions archive\|unarchive <会话ID>/);
+  assert.match(help.stdout, /csm-agent sessions stop <会话ID>/);
+  assert.match(help.stdout, /挂起中的确认草稿按拒绝处理/);
 
   const version = runCli('--version');
   assert.equal(version.status, 0, version.stderr);
@@ -251,7 +254,7 @@ test('sessions CLI hides archived sessions by default and --all restores the ful
   assert.match(listing, /include=archived/);
   assert.match(listing, /没有活跃会话/);
   assert.ok(handler, 'sessionsCommand source was not found');
-  assert.match(handler, /sessions 子命令只允许 list\/show\/archive\/unarchive/);
+  assert.match(handler, /sessions 子命令只允许 list\/show\/archive\/unarchive\/stop/);
   assert.match(handler, /subcommand === 'archive' \|\| subcommand === 'unarchive'/);
   assert.ok(setter, 'setSessionArchived source was not found');
   assert.match(setter, /JSON\.stringify\(\{ archived \}\)/);
@@ -259,6 +262,27 @@ test('sessions CLI hides archived sessions by default and --all restores the ful
   assert.match(server, /include'\) === 'archived'/);
   assert.match(server, /s\.archived !== true/);
   assert.match(server, /会话已归档，请先恢复/);
+});
+
+test('agent conversation can be stopped from CLI and server auto-rejects pending drafts', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const stopper = source.match(/async function stopSession[\s\S]*?\n}\n\nasync function sessionsCommand/)?.[0];
+  const agentRun = source.match(/async function runCustomerAgent[\s\S]*?\n}\n\nasync function main/)?.[0];
+
+  // CLI 契约：sessions stop 显式命令 + agent 运行中 Ctrl+C 等效停止。
+  assert.ok(stopper, 'stopSession source was not found');
+  assert.match(stopper, /\/api\/sessions\/\$\{id\}\/stop/);
+  assert.match(agentRun ?? '', /process\.on\('SIGINT', onSigint\)/);
+  assert.match(agentRun ?? '', /request\(`\/api\/sessions\/\$\{session\.id\}\/stop`/);
+
+  // 服务端契约：stop 端点只在 busy 时可用；挂起中的确认草稿按拒绝处理（停止即不写）。
+  assert.match(server, /sub === '\/stop'/);
+  assert.match(server, /当前没有进行中的对话/);
+  assert.match(server, /pending\.resolve\(false\)/);
+  assert.match(server, /session\.abort\?\.abort\(\)/);
+  // 停止通知以 assistant 文本事件落盘（分享导出可见），turn_end 恢复会话可用。
+  assert.match(server, /（对话已手动停止）/);
 });
 
 test('customer portfolio display contract exposes the supported sort controls', () => {

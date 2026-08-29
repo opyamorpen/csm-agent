@@ -67,8 +67,8 @@ const CLI_CAPABILITIES = [
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
-  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
-  { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export'] },
+  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
+  { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export', '/api/sessions/:id/stop'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
 
@@ -197,6 +197,9 @@ function help(): void {
     （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）
   csm-agent sessions archive|unarchive <会话ID>
     （归档后会话从列表隐藏；--all 或网页「已归档」区可查看并恢复）
+  csm-agent sessions stop <会话ID>
+    （停止该会话当前进行中的对话：中断模型调用与后续工具执行，
+     挂起中的确认草稿按拒绝处理；agent 命令运行中按 Ctrl+C 同效）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
   csm-agent capabilities [--json]
   csm-agent version
@@ -1046,6 +1049,9 @@ async function streamAgent(sessionId: string): Promise<void> {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // 流式输出防重：text_delta 已实时打印的内容，跳过其后整段 text 事件。
+  const streamedTexts = new Set<string>();
+  let thinkingOpen = false;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1058,11 +1064,31 @@ async function streamAgent(sessionId: string): Promise<void> {
       if (!line) continue;
       const payload = JSON.parse(line.slice(6));
       const event = payload.event ?? {};
-      if (event.type === 'text') console.log(`\n[Agent] ${event.text}`);
-      else if (event.type === 'tool_call') console.log(`\n[工具调用] ${event.name} ${JSON.stringify(event.arguments)}`);
-      else if (event.type === 'tool_result' && event.name !== 'confirm_write') console.log(`[工具结果] ${event.name}: ${String(event.result ?? '').slice(0, 800)}`);
-      else if (event.type === 'confirm') await confirmDraft(sessionId, event.draft);
-      else if (event.type === 'turn_end') {
+      if (event.type === 'text_delta') {
+        if (thinkingOpen) { console.log(); thinkingOpen = false; }
+        const delta = event.delta ?? '';
+        process.stdout.write(delta);
+        streamedTexts.add((streamedTexts.size ? '\n' : '') + delta);
+      } else if (event.type === 'thinking_delta') {
+        if (!thinkingOpen) { process.stdout.write('\n〔思考〕'); thinkingOpen = true; }
+        process.stdout.write(event.delta ?? '');
+      } else if (event.type === 'text') {
+        if (thinkingOpen) { console.log(); thinkingOpen = false; }
+        const streamed = [...streamedTexts].join('');
+        const remaining = event.text && streamed.includes(event.text) ? '' : event.text;
+        if (remaining) console.log(`\n[Agent] ${remaining}`);
+        streamedTexts.clear();
+      } else if (event.type === 'tool_call') {
+        console.log(`\n[工具调用] ${event.name} ${JSON.stringify(event.arguments)}`);
+      } else if (event.type === 'tool_result' && event.name !== 'confirm_write') {
+        console.log(`[工具结果] ${event.name}: ${String(event.result ?? '').slice(0, 800)}`);
+      } else if (event.type === 'confirm') {
+        await confirmDraft(sessionId, event.draft);
+      } else if (event.type === 'turn_end') {
+        if (event.usage && typeof event.usage.total === 'number') {
+          console.log(`\n[Token] 本轮输入 ${event.usage.input} · 输出 ${event.usage.output} · 共 ${event.usage.total}`);
+        }
+        if (event.stopped === true) console.log('[已停止] 本轮对话已手动停止');
         await reader.cancel();
         return;
       }
@@ -1078,13 +1104,26 @@ async function runCustomerAgent(customerInput: string, prompt: string): Promise<
     body: JSON.stringify({ customerId: customer.id }),
   });
   console.log(`Agent 会话 ${session.id}，已绑定 ${session.customer.customer_name} / CRM ${session.customer.crm_customer_id} / ONES option ${session.customer.ones_customer_option_id ?? 'unknown'}`);
-  const stream = streamAgent(session.id);
-  await request(`/api/sessions/${session.id}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: prompt }),
-  });
-  await stream;
+  let interrupted = false;
+  // Ctrl+C 先通知服务端真正停止本轮（挂起中的确认草稿按拒绝处理），再退出。
+  const onSigint = () => {
+    interrupted = true;
+    console.log('\n正在停止对话…');
+    request(`/api/sessions/${session.id}/stop`, { method: 'POST' }).catch(() => {});
+  };
+  process.on('SIGINT', onSigint);
+  try {
+    const stream = streamAgent(session.id);
+    await request(`/api/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: prompt }),
+    });
+    await stream;
+    if (interrupted) process.exitCode = 130;
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
 }
 
 async function showSessions(rawArgs: string[]): Promise<void> {
@@ -1148,6 +1187,13 @@ async function showOnesDeskFields(verify: boolean): Promise<void> {
   if (!verify) console.log('\n（加 --verify 经 get_issue_fields 实时核对选项 UUID 漂移）');
 }
 
+async function stopSession(id: string): Promise<void> {
+  if (!id) throw new Error('sessions stop 缺少会话 ID');
+  const result = await request(`/api/sessions/${id}/stop`, { method: 'POST' });
+  print(result);
+  console.log('已请求停止该会话当前进行中的对话（挂起中的确认草稿按拒绝处理）。');
+}
+
 async function sessionsCommand(subcommand: string, values: string[], rawArgs: string[]): Promise<void> {
   if (subcommand === 'list') return showSessions(rawArgs);
   if (subcommand === 'show') {
@@ -1160,7 +1206,8 @@ async function sessionsCommand(subcommand: string, values: string[], rawArgs: st
     if (!id) throw new Error(`sessions ${subcommand} 缺少会话 ID`);
     return setSessionArchived(id, subcommand === 'archive');
   }
-  throw new Error('sessions 子命令只允许 list/show/archive/unarchive');
+  if (subcommand === 'stop') return stopSession(values.shift() ?? '');
+  throw new Error('sessions 子命令只允许 list/show/archive/unarchive/stop');
 }
 
 async function doctor(): Promise<void> {
