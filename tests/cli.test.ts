@@ -250,3 +250,23 @@ test('fragment consumption ledger is visible across CLI and API contracts', () =
   // usage 说明消费语义。
   assert.match(cli, /已写入草稿消费过的片段不再被[\s\S]*?同类型重复提案/);
 });
+
+test('CLI draft edit exposes the structured editing workflow in help and capabilities', () => {
+  const help = runCli('help');
+  assert.match(help.stdout, /csm-agent draft edit <草稿ID> \[--set 键=值 \.\.\.\]/);
+  assert.match(help.stdout, /结构化编辑草稿/);
+
+  const capabilities = runCli('capabilities', '--json');
+  assert.equal(capabilities.status, 0, capabilities.stderr);
+  const entries = JSON.parse(capabilities.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
+  const draft = entries.find((item) => item.command === 'draft')!;
+  assert.ok(draft, 'draft capability missing');
+  // 结构化编辑走 PATCH edits 分支（与 Web 编辑弹窗同一契约/合并 API）。
+  assert.ok(draft.api.some((api) => api.includes('PATCH edits 结构化编辑')));
+  assert.ok(draft.api.includes('/api/draft-items/:id'));
+
+  // 子命令白名单报错文案包含 edit。
+  const bad = runCli('draft', 'wrong-subcommand');
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr + bad.stdout, /review\/edit\/retry/);
+});

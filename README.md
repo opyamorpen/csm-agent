@@ -116,6 +116,7 @@ csm-agent hemory ignore <片段ID...>
 csm-agent hemory regenerate <片段ID...> [--wait] # 按天强制重生成草稿：片段决定重建的「客户+上海日」，各天全部已确认片段参与，旧批次作废；已写入草稿消费过的片段不再被同类型重复提案
 csm-agent drafts [客户ID或名称] [--archived|--all] # 默认只列待处理批次；--archived 只看纯已忽略/已作废批次；--all 含已写入的全量视图
 csm-agent draft review <批次ID>
+csm-agent draft edit <草稿ID> [--set 键=值 ...] # 结构化编辑草稿（--set 可用中文标签如 优先级=P1，选项字段可填中文选项名；无 --set 进入逐字段交互）；与 Web「编辑」弹窗同一契约
 csm-agent draft retry <草稿ID>
 csm-agent draft ignore <草稿ID> # 忽略单条草稿：软删除为已忽略，同批其他草稿不受影响；已写入项拒绝
 csm-agent draft regenerate <批次ID>
@@ -152,6 +153,8 @@ ONES 当前租户按以下字段契约同步：
 五类工作项统一使用「客户信息」字段 `JrvswW8P`。客户主名称是 CRM「客户名称」引用字段（`field_n1qN0__c__r`，客户全称），「售后客户名称」（`field_83f4l__c`，常为简称）作为次级名称；同步按两个名称分别精确唯一解析该字段的 option ID，仍歧义或缺失的保持未归属，标题模糊匹配不作为自动归属依据。
 
 Hemory 草稿确认视图按最小必填项结构化展示（服务端 `displayFields`，Web 与 CLI 共用）：ONES 需求/工单/运维工单草稿展示所属项目、工作项类型、标题、客户信息（含 ONES 选项名）、必填项（含 所属模块/所属产品 等，选项 UUID 反解为名称）、描述（Hemory 摘要）；`draft review` 默认逐行结构化输出，`--json` 保留原始 JSON。
+
+草稿编辑是结构化表单（服务端 `editContract`，Web 草稿箱「编辑」弹窗、Agent 会话确认卡与 `csm-agent draft edit` 三端共用同一契约）：文本字段（标题/描述/跟进内容/工时与开始时间等）直接输入，选项字段（优先级/所属模块/建议类型/环境类型/所属产品/服务类目等）是中文下拉（CLI 侧填中文选项名或 UUID）；锁定项与系统自动填写项（客户绑定/所属项目/工作项类型/目标工作项/目标工具）只读展示，实例部署类型按 CRM 使用版本锁定不可改。编辑只提交「字段键→新值」，由服务端按类型契约合并回原参数 JSON（`PATCH /api/draft-items/:id` 的 `edits` 分支；会话确认走 `POST /api/sessions/:id/confirm` 的 `edits` 分支）——结构化部分不经手，不可能被改坏；选项值非法（未知选项名/非正数工时等）在合并时报错并给出合法选项。编辑后 version 递增、批准哈希清空，须重新预览确认。无契约类型（客户案例/客户档案）保留原始 JSON 编辑器；`draft review` 的 `[e]` 原始 JSON 编辑保留为诊断/高级路径。
 
 ONES Desk 三类工作项（建议和反馈/工单/运维工单）的人工必填字段契约内置在 `src/workbench/drafts.ts`（`ONES_DESK_FIELD_SPECS`，2026-08-27 经 ONES 实测核验）：除标题/项目/类型/客户信息/描述外的全部规格字段（建议的所属模块、工单的所属产品、实例部署类型、优先级等）都会自动填入 fieldValues——证据不足时用兜底值（所属模块→功能扩展、所属产品→Core 基础平台能力、优先级→P2 等），草稿不出现必填项缺失。实例部署类型按 CRM「使用版本」（`field_Q2L6p__c`）确定性判定：公有云版→公有云，其余（含未同步）→私有云，模型提案不参与。交互式 Agent 会话用本地工具 `get_ones_desk_required_fields` 获取同一契约（`get_issue_fields` 的选项列表被截断且部分 UUID 无效，不能用于枚举选项），批准门校验规格字段齐备与部署类型一致。内置规则只读可见：`GET /api/ones-desk-fields` 与 `csm-agent ones fields [--verify]`（`--verify` 经 `get_issue_fields` 实时核对选项 UUID 漂移）。
 

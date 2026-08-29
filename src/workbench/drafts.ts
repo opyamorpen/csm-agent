@@ -5,7 +5,8 @@ import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
 import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
 import { WorkbenchDatabase } from './database.js';
-import type { Customer, DraftBatch, DraftItem, DraftItemType, SourceEvent } from './types.js';
+import type { Customer, DraftBatch, DraftEditContract, DraftEditField, DraftItem, DraftItemType, SourceEvent } from './types.js';
+import type { ConfirmDraft } from '../tools/confirm.js';
 
 export const DRAFT_GENERATION_VERSION = 'hemory-drafts-v4-ones-asr-aliases';
 const ONES_CUSTOMER_FIELD_ID = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
@@ -458,6 +459,294 @@ export function draftDisplayFields(db: WorkbenchDatabase, item: DraftItem, custo
 
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+// ── 草稿结构化编辑契约：把 targetArguments 翻译成中文表单字段，CSM 不再面对原始 JSON ──
+// 契约（draftEditContract / confirmDraftEditContract）描述「哪些字段可编辑、长什么样」；
+// 合并（applyDraftEdits / applyConfirmDraftEdits）是服务端权威：客户端只提交 字段键→新值，
+// 由这里合并回原参数 JSON，结构化部分（客户绑定/项目/类型/目标工具）不暴露、不可能被改坏。
+
+function deskFieldValues(args: Record<string, unknown>): Array<Record<string, unknown>> {
+  return Array.isArray(args.fieldValues) ? args.fieldValues as Array<Record<string, unknown>> : [];
+}
+
+function deskValueOf(args: Record<string, unknown>, fieldID: string): unknown {
+  return deskFieldValues(args).find((value) => value.fieldID === fieldID)?.value;
+}
+
+/** 选项 UUID → 中文标签（规格表反解；成员/未知值原样返回）。 */
+function optionLabelOf(spec: OnesDeskFieldSpec, raw: unknown): string {
+  if (raw == null) return '';
+  return Object.entries(spec.options ?? {}).find(([, uuid]) => uuid === raw)?.[0] ?? String(raw);
+}
+
+/** 上海墙钟（datetime-local 输入值）：YYYY-MM-DDTHH:mm。 */
+function shanghaiWallClock(value: unknown): string {
+  if (value == null || value === '') return '';
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Date(date.getTime() + 8 * 3600_000).toISOString().slice(0, 16);
+}
+
+function dateInputValue(value: unknown): string {
+  return value == null ? '' : String(value).slice(0, 10);
+}
+
+/**
+ * 编辑输入的时间解析：无时区输入（datetime-local 提交值）按上海时间解释，带偏移/Z 的原样解析。
+ * 工时草稿要求 startTime 为带时区偏移的 ISO 8601，CRM 跟进要求 UTC ISO，均由调用方决定输出格式。
+ */
+function editDateTime(value: string): Date | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const naive = trimmed.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::(\d{2}))?)?$/);
+  const date = naive ? new Date(`${naive[1]}T${naive[2] ?? '00:00'}:${naive[3] ?? '00'}+08:00`) : new Date(trimmed);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** ONES 工作项类草稿（建议/工单/运维工单；会话侧另有 private_cloud_instance）的编辑契约。 */
+function deskEditContract(deskType: OnesDeskDraftType | 'private_cloud_instance', args: Record<string, unknown>, ctx: { customer: string; tool: string | null; usageVersion?: string | null }): DraftEditContract {
+  const fields: DraftEditField[] = [
+    { key: 'title', label: '标题', type: 'text', value: String(args.title ?? ''), required: true },
+  ];
+  const locked: DraftEditContract['locked'] = [];
+  const readonly: DraftEditContract['readonly'] = [
+    { label: '所属项目', value: `${deskType === 'private_cloud_instance' ? '私有云实例管理' : ONES_DESK_PROJECT_LABEL}（${String(args.projectID ?? '')}）` },
+    { label: '工作项类型', value: `${deskType === 'private_cloud_instance' ? '私有云实例' : ONES_DESK_TYPE_LABELS[deskType]}（${String(args.issueTypeID ?? '')}）` },
+  ];
+  if (deskType !== 'private_cloud_instance') {
+    for (const spec of ONES_DESK_FIELD_SPECS[deskType]) {
+      // 实例部署类型是 CRM 使用版本的确定性判定结果，表单锁定展示（合并时按 CRM 重置）。
+      if (spec.uuid === ONES_DESK_DEPLOYMENT_FIELD_ID) continue;
+      const raw = String(deskValueOf(args, spec.uuid) ?? '');
+      if (spec.member) {
+        fields.push({ key: `field:${spec.uuid}`, label: spec.label, type: 'text', value: raw,
+          hint: raw ? `当前：${optionLabelOf(spec, raw)}（可填成员名或 8 位用户 UUID）` : '可填成员名或 8 位用户 UUID' });
+        continue;
+      }
+      fields.push({ key: `field:${spec.uuid}`, label: spec.label, type: 'select', value: raw,
+        options: Object.entries(spec.options ?? {}).map(([label, uuid]) => ({ label, value: uuid })) });
+    }
+    if (deskType === 'suggestion' || deskType === 'ticket') {
+      const spec = ONES_DESK_FIELD_SPECS[deskType].find((item) => item.uuid === ONES_DESK_DEPLOYMENT_FIELD_ID)!;
+      // 锁定展示以 CRM 使用版本的解析结果为准（合并时也按它重置）：现值漂移时用户看到的是「将以什么写入」。
+      locked.push({ label: spec.label, value: resolveDeploymentType(ctx.usageVersion),
+        reason: '按 CRM 使用版本自动判定（公有云版→公有云，其余→私有云），不可修改' });
+    }
+    // field016（描述）在运维工单上是必填，其余类型选填但保持一致。
+    fields.push({ key: 'desc', label: '描述', type: 'textarea', value: String(deskValueOf(args, ONES_DESK_DESC_FIELD_ID) ?? ''), required: deskType === 'operations' });
+  }
+  readonly.push({ label: '客户信息', value: ctx.customer });
+  if (ctx.tool) readonly.push({ label: '目标工具', value: ctx.tool });
+  return { fields, locked, readonly };
+}
+
+function workhourEditContract(title: string, tool: string | null, args: Record<string, unknown>): DraftEditContract {
+  return {
+    fields: [
+      { key: 'title', label: '标题', type: 'text', value: title },
+      { key: 'hours', label: '工时时长（小时）', type: 'number', value: args.hours == null ? '' : String(args.hours), required: true, hint: '真实沟通跨度不足 3 分钟时按最小 0.1 小时计' },
+      { key: 'startTime', label: '开始时间', type: 'datetime', value: shanghaiWallClock(args.startTime), required: true, hint: '按上海时间填写' },
+      { key: 'description', label: '描述', type: 'textarea', value: String(args.description ?? '') },
+    ],
+    locked: [],
+    readonly: [
+      { label: '目标工作项', value: `客户工时管理 / 售后客户${args.issueID ? `（${String(args.issueID)}）` : '（未绑定）'}` },
+      ...(tool ? [{ label: '目标工具', value: tool }] : []),
+    ],
+  };
+}
+
+/** CRM 跟进记录草稿的编辑契约；参数结构不是 ActiveRecordObj object_data 形状时返回 null（JSON 兜底）。 */
+function followupEditContract(title: string, tool: string | null, args: Record<string, unknown>): DraftEditContract | null {
+  const objectData = recordOf(args.object_data);
+  if (!args.object_data || typeof objectData.active_record_content !== 'string') return null;
+  const related = Array.isArray(objectData.related_object_data) ? objectData.related_object_data as Array<Record<string, unknown>> : [];
+  const bound = related.find((entry) => entry?.describe_api_name === CRM_AFTER_SALES_OBJECT);
+  return {
+    fields: [
+      { key: 'title', label: '标题', type: 'text', value: title, hint: '仅用于草稿箱展示；写入 CRM 的正文是「跟进内容」' },
+      { key: 'content', label: '跟进内容', type: 'textarea', value: String(objectData.active_record_content), required: true },
+      { key: 'next_steps', label: '下一步计划', type: 'textarea', value: objectData.field_9qb16__c == null ? '' : String(objectData.field_9qb16__c) },
+      { key: 'start', label: '服务开始时间', type: 'datetime', value: shanghaiWallClock(objectData.field_oUaZx__c) },
+      { key: 'end', label: '服务结束时间', type: 'datetime', value: shanghaiWallClock(objectData.field_wYlhw__c) },
+    ],
+    locked: [],
+    readonly: [
+      { label: '目标对象', value: 'CRM / 销售记录（跟进）' },
+      { label: '关联客户', value: bound ? String(bound.name ?? '') : '未绑定 CRM 售后客户' },
+      { label: '渠道', value: '线上' },
+      ...(tool ? [{ label: '目标工具', value: tool }] : []),
+    ],
+  };
+}
+
+function todoEditContract(title: string, tool: string | null, args: Record<string, unknown>): DraftEditContract {
+  return {
+    fields: [
+      { key: 'title', label: '标题', type: 'text', value: String(args.title ?? title), required: true },
+      { key: 'whyNow', label: '待办背景', type: 'textarea', value: String(args.whyNow ?? '') },
+      { key: 'owner', label: '负责人', type: 'text', value: args.owner == null ? '' : String(args.owner) },
+      { key: 'dueAt', label: '截止时间', type: 'date', value: dateInputValue(args.dueAt) },
+      { key: 'expectedOutcome', label: '预期成果', type: 'textarea', value: args.expectedOutcome == null ? '' : String(args.expectedOutcome) },
+    ],
+    locked: [],
+    readonly: [{ label: '目标', value: 'CSM Agent / 待办（确认后创建本工作台行动事项）' }, ...(tool ? [{ label: '目标工具', value: tool }] : [])],
+  };
+}
+
+/** Hemory 草稿（DraftItem）的结构化编辑契约；无契约的类型返回 null（前端回退原始 JSON 编辑）。 */
+export function draftEditContract(db: WorkbenchDatabase, item: DraftItem, customer: Customer): DraftEditContract | null {
+  const args = item.targetArguments;
+  const deskType = onesDeskTypeId(item.type);
+  if (deskType) {
+    const option = resolveOnesOption(db, customer);
+    const customerInfo = option
+      ? (option.label && option.label !== customer.name ? `${customer.name} → ${option.label}` : (option.label || customer.name))
+      : `${customer.name}（ONES 客户信息未解析）`;
+    return deskEditContract(deskType, args, { customer: customerInfo, tool: item.targetTool, usageVersion: customer.usageVersion });
+  }
+  if (item.type === 'workhour') return workhourEditContract(item.title, item.targetTool, args);
+  if (item.type === 'followup') return followupEditContract(item.title, item.targetTool, args);
+  if (item.type === 'internal_todo') return todoEditContract(item.title, item.targetTool, args);
+  return null;
+}
+
+/** 交互式会话确认草稿（ConfirmDraft）的结构化编辑契约；case/profile 等返回 null（JSON 兜底）。 */
+export function confirmDraftEditContract(draft: ConfirmDraft, usageVersion?: string | null): DraftEditContract | null {
+  const args = draft.target_arguments ?? {};
+  const deskType = onesDeskTypeId(draft.record_type as DraftItemType);
+  if (deskType || draft.record_type === 'private_cloud_instance') {
+    return deskEditContract(deskType ?? 'private_cloud_instance', args, {
+      customer: String(draft.fields?.customer_name ?? ''), tool: draft.target_tool, usageVersion });
+  }
+  if (draft.record_type === 'workhour') return workhourEditContract(draft.title, draft.target_tool, args);
+  if (draft.record_type === 'followup') return followupEditContract(draft.title, draft.target_tool, args);
+  if (draft.record_type === 'internal_todo') return todoEditContract(draft.title, draft.target_tool, args);
+  return null;
+}
+
+/**
+ * 编辑合并核心：把「字段键 → 新值」合并进 args 副本（调用方传入浅拷贝）。
+ * select 值接受中文标签或选项 UUID（逐级放宽，与生成期 resolveOptionLabel 同规则）；
+ * 实例部署类型是确定性锁定字段，每次合并按 CRM 使用版本重置（历史/手工漂移随之自愈）。
+ * 返回 errors 非空时不产出 args；title 在编辑过标题时返回（调用方决定落到哪）。
+ */
+function mergeDraftEdits(type: string, args: Record<string, unknown>, edits: Record<string, unknown>, usageVersion?: string | null): { args?: Record<string, unknown>; title?: string; errors: string[] } {
+  const errors: string[] = [];
+  let title: string | undefined;
+  if (edits.title !== undefined && edits.title !== null) {
+    title = String(edits.title).trim();
+    if (!title) errors.push('标题不能为空');
+  }
+  const deskType = onesDeskTypeId(type as DraftItemType);
+  if (deskType || type === 'private_cloud_instance') {
+    if (title !== undefined) args.title = title;
+    if (type === 'private_cloud_instance') return errors.length ? { errors } : { args, title, errors };
+    const values = deskFieldValues(args).map((value) => ({ ...value }));
+    const setValue = (fieldID: string, value: string) => {
+      const entry = values.find((item) => item.fieldID === fieldID);
+      if (entry) entry.value = value; else values.push({ fieldID, value });
+    };
+    for (const spec of ONES_DESK_FIELD_SPECS[deskType!]) {
+      if (spec.uuid === ONES_DESK_DEPLOYMENT_FIELD_ID) continue;
+      const raw = edits[`field:${spec.uuid}`];
+      if (raw === undefined || raw === null) continue;
+      const input = String(raw).trim();
+      if (!input) { errors.push(`「${spec.label}」不能为空`); continue; }
+      const uuid = spec.options?.[input]
+        ?? (Object.values(spec.options ?? {}).includes(input) ? input : null)
+        ?? resolveOptionLabel(input, spec)
+        ?? (spec.member && /^[A-Za-z0-9]{8}$/.test(input) ? input : null);
+      if (!uuid) {
+        const names = Object.keys(spec.options ?? {});
+        errors.push(names.length <= 12
+          ? `「${spec.label}」没有「${input}」这个选项（可选：${names.join('、')}）`
+          : `「${spec.label}」没有「${input}」这个选项（共 ${names.length} 个可选项，请从表单下拉选择或填写选项全名）`);
+      } else setValue(spec.uuid, uuid);
+    }
+    const desc = edits.desc === undefined || edits.desc === null ? undefined : String(edits.desc).trim();
+    if (desc !== undefined) {
+      if (!desc && deskType === 'operations') errors.push('描述不能为空（运维工单必填）');
+      else setValue(ONES_DESK_DESC_FIELD_ID, desc);
+    }
+    for (const override of applyDeploymentTypeOverride(deskType!, usageVersion)) setValue(override.fieldID, override.value);
+    if (errors.length) return { errors };
+    args.fieldValues = values;
+    return { args, title, errors };
+  }
+  if (type === 'workhour') {
+    if (edits.hours !== undefined && edits.hours !== null) {
+      const parsed = Number(String(edits.hours).trim());
+      if (!Number.isFinite(parsed) || parsed <= 0) errors.push(`工时时长必须是正数（当前输入「${edits.hours}」）`);
+      else args.hours = parsed;
+    }
+    if (edits.startTime !== undefined && edits.startTime !== null) {
+      const date = editDateTime(String(edits.startTime));
+      if (!date) errors.push(`开始时间无法解析（${edits.startTime}），请填 YYYY-MM-DD HH:mm 或 ISO 时间`);
+      else args.startTime = shanghaiIsoOffset(date);
+    }
+    if (edits.description !== undefined && edits.description !== null) args.description = String(edits.description).trim();
+    if (errors.length) return { errors };
+    return { args, title, errors };
+  }
+  if (type === 'followup') {
+    const objectData = { ...recordOf(args.object_data) };
+    if (edits.content !== undefined && edits.content !== null) {
+      const content = String(edits.content).trim();
+      if (!content) errors.push('跟进内容不能为空');
+      else objectData.active_record_content = content;
+    }
+    if (edits.next_steps !== undefined && edits.next_steps !== null) {
+      const next = String(edits.next_steps).trim();
+      if (next) objectData.field_9qb16__c = next; else delete objectData.field_9qb16__c;
+    }
+    const timeFields: Array<[string, string, string]> = [['start', 'field_oUaZx__c', '服务开始时间'], ['end', 'field_wYlhw__c', '服务结束时间']];
+    for (const [key, fieldID, label] of timeFields) {
+      if (edits[key] === undefined || edits[key] === null) continue;
+      const date = editDateTime(String(edits[key]));
+      if (!date) errors.push(`${label}无法解析（${edits[key]}）`);
+      else objectData[fieldID] = date.toISOString();
+    }
+    if (errors.length) return { errors };
+    if (Object.keys(objectData).length) args.object_data = objectData;
+    return { args, title, errors };
+  }
+  if (type === 'internal_todo') {
+    if (title !== undefined) args.title = title;
+    for (const key of ['whyNow', 'owner', 'expectedOutcome']) {
+      if (edits[key] !== undefined && edits[key] !== null) args[key] = String(edits[key]).trim();
+    }
+    if (edits.dueAt !== undefined && edits.dueAt !== null) {
+      const due = String(edits.dueAt).trim();
+      if (!due) args.dueAt = null;
+      else {
+        const date = editDateTime(due);
+        if (!date) errors.push(`截止时间无法解析（${due}）`);
+        else args.dueAt = date.toISOString().slice(0, 10);
+      }
+    }
+    if (errors.length) return { errors };
+    return { args, title, errors };
+  }
+  return { errors: [`「${type}」类型不支持表单编辑`] };
+}
+
+/** Hemory 草稿的结构化编辑合并：返回增量 patch（title / targetArguments），由调用方走 updateDraftItem（version+1、批准哈希清空）。 */
+export function applyDraftEdits(item: DraftItem, edits: Record<string, unknown>, usageVersion?: string | null): { patch: { title?: string; targetArguments?: Record<string, unknown> }; errors: string[] } {
+  const merged = mergeDraftEdits(item.type, { ...item.targetArguments }, edits, usageVersion);
+  return { patch: { title: merged.title, targetArguments: merged.args }, errors: merged.errors };
+}
+
+/** 交互式会话确认草稿的结构化编辑合并：返回合并后的完整草稿（target_system/tool 等冻结字段原样保留）。 */
+export function applyConfirmDraftEdits(draft: ConfirmDraft, edits: Record<string, unknown>, usageVersion?: string | null): { draft: ConfirmDraft | null; errors: string[] } {
+  const merged = mergeDraftEdits(draft.record_type, { ...draft.target_arguments }, edits, usageVersion);
+  if (merged.errors.length || !merged.args) return { draft: null, errors: merged.errors };
+  return { draft: { ...draft, ...(merged.title !== undefined ? { title: merged.title } : {}), target_arguments: merged.args }, errors: [] };
 }
 
 function textOf(event: SourceEvent): string {

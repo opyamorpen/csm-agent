@@ -638,6 +638,16 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .form-field textarea.json-editor { min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .form-field input:focus, .form-field textarea:focus { outline: 2px solid #b9cdf8; border-color: #507edc; }
 
+/* 草稿结构化编辑表单：下拉与其他控件同宽；锁定/只读区块为浅底信息卡。 */
+.form-field select.draft-edit-select { width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; color: var(--text); font: inherit; }
+.form-field select.draft-edit-select:focus { outline: 2px solid #b9cdf8; border-color: #507edc; }
+.draft-edit-hint { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+.draft-edit-locked, .draft-edit-readonly { margin: 4px 0 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: #f7f8fa; }
+.draft-edit-locked { border-color: #e5c99b; background: #fdf8ee; }
+.draft-edit-section-title { margin-bottom: 6px; color: #5c6673; font-size: 12px; font-weight: 650; }
+.draft-edit-row { color: var(--text); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.draft-edit-locked-reason { color: #8a7440; font-size: 12px; line-height: 1.5; }
+
 .agent-mode-tabs { position: sticky; top: -14px; z-index: 8; display: flex; gap: 2px; margin: -14px -18px 16px; padding: 8px 18px 0; border-bottom: 1px solid var(--border); background: #fff; }
 .agent-mode-tab { min-height: 40px; padding: 0 13px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: #5c6673; cursor: pointer; font: inherit; }
 .agent-mode-tab.active { border-bottom-color: #2457c5; color: #174a9d; font-weight: 650; }

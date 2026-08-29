@@ -440,9 +440,49 @@
     scrollDown();
   }
 
-  function addConfirmCard(draft) {
+  function addConfirmCard(draft, editContract) {
     const card = el('div', 'card');
     card.append(el('h3', null, '待确认草稿'), el('div', 'meta', `目标系统: ${draft.target_system} ｜ 工具: ${draft.target_tool}`));
+    const actions = el('div', 'actions');
+    const okBtn = el('button', 'approve', '批准写入');
+    const noBtn = el('button', 'reject', '拒绝');
+    // 有结构化编辑契约的类型渲染中文表单（批准只提交字段键→新值，服务端合并）；
+    // 无契约（客户案例/客户档案等）保留原始 JSON 编辑器。
+    if (editContract) {
+      const form = renderDraftEditForm(editContract, card);
+      const decide = async (approve) => {
+        okBtn.disabled = noBtn.disabled = true;
+        try {
+          let payload = { approve: false };
+          if (approve) {
+            const collected = form.collect();
+            if (collected.error) { okBtn.disabled = noBtn.disabled = false; return alertDialog(collected.error); }
+            payload = { approve: true, edits: collected.edits };
+          }
+          const response = await fetch(`/api/sessions/${sessionId}/confirm`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || `操作失败 (${response.status})`);
+          actions.replaceWith(el('div', 'decided', approve ? '已批准，正在写入…' : '已拒绝'));
+          loadRecords();
+        } catch (err) {
+          okBtn.disabled = noBtn.disabled = false;
+          const previous = actions.querySelector('.decided');
+          if (previous) previous.remove();
+          actions.append(el('div', 'decided', '操作失败: ' + err.message));
+        }
+      };
+      okBtn.onclick = () => decide(true);
+      noBtn.onclick = () => decide(false);
+      actions.append(okBtn, noBtn);
+      card.append(actions);
+      messagesEl.appendChild(card);
+      scrollDown();
+      return;
+    }
     const title = inputField('标题', draft.title);
     const summary = inputField('摘要', draft.summary, 'textarea');
     const fields = inputField('业务字段（JSON）', JSON.stringify(draft.fields ?? {}, null, 2), 'textarea');
@@ -450,9 +490,6 @@
     fields.input.classList.add('json-editor');
     args.input.classList.add('json-editor');
     card.append(title.field, summary.field, fields.field, args.field);
-    const actions = el('div', 'actions');
-    const okBtn = el('button', 'approve', '批准写入');
-    const noBtn = el('button', 'reject', '拒绝');
     const decide = async (approve) => {
       okBtn.disabled = noBtn.disabled = true;
       try {
@@ -508,7 +545,7 @@
           scrollDown();
         }
         break;
-      case 'confirm': addConfirmCard(e.draft); loadRecords(); break;
+      case 'confirm': addConfirmCard(e.draft, e.editContract); loadRecords(); break;
       case 'customer_context': renderCustomerCard(e.context); break;
       case 'turn_end':
         busy = false;
@@ -1331,8 +1368,94 @@
     return { internal_todo: 'Agent 待办', workhour: '工时', followup: '沟通记录', suggestion: '需求', ticket: '工单', operations: '运维工单' }[type] || type;
   }
 
-  function editableDraft(item) {
+  /**
+   * 结构化编辑契约的表单渲染器：草稿箱编辑弹窗与会话确认卡共用。
+   * 按字段 type 渲染中文表单控件；锁定项与系统自动填写项只读展示；
+   * collect() 只收集契约内字段，由服务端合并回参数（用户永远不接触原始 JSON）。
+   */
+  function renderDraftEditForm(contract, container) {
+    const inputs = new Map();
+    for (const field of contract.fields || []) {
+      const span = el('span', null, field.label + (field.required ? ' *' : ''));
+      let input;
+      if (field.type === 'select') {
+        input = document.createElement('select');
+        input.className = 'draft-edit-select';
+        for (const option of field.options || []) {
+          const choice = document.createElement('option');
+          choice.value = option.value; choice.textContent = option.label;
+          if (option.value === field.value) choice.selected = true;
+          input.append(choice);
+        }
+        if (field.value && ![...input.options].some((option) => option.value === field.value)) {
+          const current = document.createElement('option');
+          current.value = field.value; current.textContent = field.value;
+          input.prepend(current); current.selected = true;
+        }
+      } else if (field.type === 'textarea') {
+        input = document.createElement('textarea');
+        input.value = field.value || '';
+      } else {
+        input = document.createElement('input');
+        input.type = field.type === 'number' ? 'number' : field.type === 'datetime' ? 'datetime-local' : field.type === 'date' ? 'date' : 'text';
+        if (field.type === 'number') { input.step = '0.1'; input.min = '0'; }
+        input.value = field.value || '';
+      }
+      const fieldEl = el('label', 'form-field');
+      fieldEl.append(span, input);
+      if (field.hint) fieldEl.append(el('span', 'draft-edit-hint', field.hint));
+      container.append(fieldEl);
+      inputs.set(field.key, { field, input });
+    }
+    if (contract.locked?.length) {
+      const locked = el('div', 'draft-edit-locked');
+      locked.append(el('div', 'draft-edit-section-title', '以下信息已锁定'));
+      for (const item of contract.locked) locked.append(el('div', 'draft-edit-row', `${item.label}：${item.value}`), el('div', 'draft-edit-locked-reason', item.reason));
+      container.append(locked);
+    }
+    if (contract.readonly?.length) {
+      const readonlyBox = el('div', 'draft-edit-readonly');
+      readonlyBox.append(el('div', 'draft-edit-section-title', '以下信息由系统自动填写'));
+      for (const item of contract.readonly) readonlyBox.append(el('div', 'draft-edit-row', `${item.label}：${item.value}`));
+      container.append(readonlyBox);
+    }
+    return {
+      /** 收集契约内字段值；必填项为空时返回错误消息（不发起请求）。 */
+      collect() {
+        const edits = {};
+        for (const { field, input } of inputs.values()) {
+          if (field.type === 'select') edits[field.key] = input.value;
+          else edits[field.key] = String(input.value ?? '').trim();
+          if (field.required && !String(edits[field.key]).trim()) return { error: `「${field.label}」为必填项` };
+        }
+        return { edits };
+      },
+    };
+  }
+
+  async function editableDraft(item) {
     openWorkbenchModal(`编辑${draftTypeLabel(item.type)}草稿`);
+    // 优先结构化编辑契约（中文表单，服务端合并）；无契约类型回退原始 JSON 编辑器（诊断兜底）。
+    let detail = null;
+    try { detail = await api(`/api/draft-items/${item.id}`); } catch (_) { /* 契约拉取失败时回退 */ }
+    if (detail?.editContract) {
+      const form = renderDraftEditForm(detail.editContract, workbenchModalBody);
+      const unknowns = inputField('待确认信息（每行一项）', (item.unknowns || []).join('\n'), 'textarea');
+      workbenchModalBody.append(unknowns.field);
+      const save = el('button', 'primary-command', '保存草稿');
+      save.onclick = async () => {
+        const collected = form.collect();
+        if (collected.error) return alertDialog(collected.error);
+        try {
+          await api(`/api/draft-items/${item.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            version: detail.version, edits: collected.edits,
+            unknowns: unknowns.input.value.split('\n').map((value) => value.trim()).filter(Boolean) }) });
+          closeWorkbenchModal(); await loadDraftBatches();
+        } catch (error) { await alertDialog(error.message); }
+      };
+      workbenchModalBody.append(save);
+      return;
+    }
     const title = inputField('标题', item.title);
     const summary = inputField('摘要', item.summary, 'textarea');
     const fields = inputField('业务字段 JSON', JSON.stringify(item.fields || {}, null, 2), 'textarea'); fields.input.classList.add('json-editor');

@@ -19,7 +19,7 @@ import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { CaseService } from './workbench/cases.js';
-import { HemoryDraftService, draftDisplayFields, shanghaiEventDate } from './workbench/drafts.js';
+import { HemoryDraftService, draftDisplayFields, shanghaiEventDate, draftEditContract, applyDraftEdits, confirmDraftEditContract, applyConfirmDraftEdits } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
@@ -177,6 +177,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
     const decorated = customer ? { ...item, displayFields: draftDisplayFields(workbench.db, item, customer) } : item;
     return { ...decorated, statusLabel: DRAFT_ITEM_STATUS_LABELS[item.status] ?? item.status };
+  }
+  // 结构化编辑契约：仍可编辑（未写入/未忽略/未作废）的草稿附带表单字段定义；其余状态不带。
+  function editContractOf(item: DraftItem) {
+    if (['written', 'writing', 'dismissed', 'stale'].includes(item.status)) return undefined;
+    const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
+    return customer ? draftEditContract(workbench.db, item, customer) : undefined;
   }
   // 失败生成任务的片段明细：客户名 + 上海日 + 逐片段摘要（截断），支撑「失败后选片段重新生成」。
   function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }> } {
@@ -594,8 +600,31 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (draftItemMatch) {
         const itemId = draftItemMatch[1];
         const sub = draftItemMatch[2] ?? '';
+        if (req.method === 'GET' && sub === '') {
+          const item = workbench.db.getDraftItem(itemId);
+          if (!item) return json(res, 404, { error: 'draft item not found' });
+          return json(res, 200, { ...decorateDraftItem(item), editContract: editContractOf(item) });
+        }
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
+          // 结构化编辑分支：只提交「字段键→新值」，服务端按类型契约合并回 targetArguments，
+          // 结构化部分（客户绑定/项目/类型/工具）不经手，杜绝编辑破坏参数结构。
+          if (isRecord(body.edits)) {
+            const item = workbench.db.getDraftItem(itemId);
+            if (!item) return json(res, 404, { error: 'draft item not found' });
+            if (['written', 'writing', 'dismissed', 'stale'].includes(item.status)) return json(res, 409, { error: '草稿已写入或已忽略，不可编辑' });
+            const customer = workbench.db.getCustomer(item.customerId) as Customer | undefined;
+            if (!customer) return json(res, 409, { error: '草稿客户不存在，不可结构化编辑' });
+            const { patch, errors } = applyDraftEdits(item, body.edits, customer.usageVersion);
+            if (errors.length) return json(res, 400, { error: errors.join('；') });
+            const updated = workbench.db.updateDraftItem(itemId, Number(body.version), {
+              title: patch.title, summary: undefined,
+              targetArguments: patch.targetArguments,
+              unknowns: Array.isArray(body.unknowns) ? body.unknowns.map(String) : undefined,
+              validationErrors: [],
+            });
+            return updated ? json(res, 200, { ...decorateDraftItem(updated), editContract: editContractOf(updated) }) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
+          }
           const item = workbench.db.updateDraftItem(itemId, Number(body.version), {
             title: typeof body.title === 'string' ? body.title : undefined, summary: typeof body.summary === 'string' ? body.summary : undefined,
             fields: isRecord(body.fields) ? body.fields : undefined, targetTool: body.targetTool === null || typeof body.targetTool === 'string' ? body.targetTool : undefined,
@@ -985,8 +1014,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
                     store.records.push(rec);
                     store.persistRecords();
                     session.lastRecordId = rec.id;
-                  } else if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
-                    const t = runtime.mcp.resolve(e.name);
+                    // 确认卡附带结构化编辑契约：有契约的类型（工单/建议/工时/跟进/待办/私有云实例）
+                    // 渲染中文表单，无契约（case/profile 等）前端回退原始 JSON 编辑。
+                    broadcast(session, { ...e, editContract: confirmDraftEditContract(e.draft, session.customer?.usage_version) } as unknown as DisplayEvent);
+                  } else if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {                    const t = runtime.mcp.resolve(e.name);
                     if (t && runtime.mcp.isWrite(t.server, t.rawName) && session.lastRecordId) {
                       const rec = store.records.find((r) => r.id === session.lastRecordId && r.status === 'approved');
                       if (rec) {
@@ -1024,8 +1055,15 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           const ok = body.approve === true;
           let approvedDraft: ConfirmDraft | null = null;
           if (ok) {
-            approvedDraft = body.draft ? editedDraft(session.pending.draft, body.draft) : session.pending.draft;
-            if (!approvedDraft) return json(res, 400, { error: '编辑后的草稿无效，目标系统和目标工具不可修改' });
+            // 结构化编辑分支：客户端只提交字段键→新值，服务端按类型契约合并；合并失败（未知选项等）报 400。
+            if (isRecord(body.edits)) {
+              const merged = applyConfirmDraftEdits(session.pending.draft, body.edits, session.customer?.usage_version);
+              if (!merged.draft) return json(res, 400, { error: `草稿编辑未通过: ${merged.errors.join('；')}` });
+              approvedDraft = merged.draft;
+            } else {
+              approvedDraft = body.draft ? editedDraft(session.pending.draft, body.draft) : session.pending.draft;
+              if (!approvedDraft) return json(res, 400, { error: '编辑后的草稿无效，目标系统和目标工具不可修改' });
+            }
             const target = runtime.mcp.resolve(approvedDraft.target_tool);
             if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {
               return json(res, 400, { error: '目标工具不是已连接的写工具' });

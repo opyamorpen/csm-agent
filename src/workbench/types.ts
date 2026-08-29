@@ -198,6 +198,34 @@ export interface DraftDisplayField {
   value: string;
 }
 
+/** 结构化编辑契约的下拉选项：中文标签 → 选项/对象 UUID。 */
+export interface DraftEditOption {
+  label: string;
+  value: string;
+}
+
+/**
+ * 结构化编辑契约里的一个可编辑字段：客户端按 type 渲染表单控件，
+ * collect 后只提交「字段键 → 新值」，由服务端合并回 targetArguments（不暴露原始 JSON）。
+ */
+export interface DraftEditField {
+  key: string;
+  label: string;
+  type: 'text' | 'textarea' | 'number' | 'select' | 'datetime' | 'date';
+  /** select 时为当前选项 UUID；datetime 为上海墙钟 YYYY-MM-DDTHH:mm；date 为 YYYY-MM-DD。 */
+  value: string;
+  options?: DraftEditOption[];
+  required?: boolean;
+  hint?: string;
+}
+
+/** 草稿结构化编辑契约：可编辑字段 + 锁定项（带原因）+ 系统自动填写的只读项。 */
+export interface DraftEditContract {
+  fields: DraftEditField[];
+  locked: Array<{ label: string; value: string; reason: string }>;
+  readonly: Array<{ label: string; value: string }>;
+}
+
 export interface DraftItem {
   id: string;
   batchId: string;

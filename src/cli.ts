@@ -62,7 +62,7 @@ const CLI_CAPABILITIES = [
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory'] },
-  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
+  { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-items/:id (PATCH edits 结构化编辑)', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
@@ -161,6 +161,10 @@ function help(): void {
     （默认只列待处理批次；--archived 只看纯已忽略/已作废批次，
      与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图）
   csm-agent draft review <批次ID>
+  csm-agent draft edit <草稿ID> [--set 键=值 ...]
+    （结构化编辑草稿：--set 可用中文标签（--set 优先级=P1 --set 描述=...）或字段键，
+     选项字段可填中文选项名；无 --set 进入逐字段交互；编辑后需重新 preview/confirm；
+     Web 草稿箱「编辑」弹窗同一契约。原始 JSON 高级编辑仍走 draft review 的 [e]）
   csm-agent draft retry <草稿ID>
   csm-agent draft ignore <草稿ID>
     （忽略单条草稿：软删除为已忽略，同批其他草稿不受影响；已写入项拒绝）
@@ -854,11 +858,75 @@ async function regenerateDraftBatch(batchId: string): Promise<void> {
   }
 }
 
+/**
+ * 草稿结构化编辑（与 Web 编辑弹窗同一契约/合并 API）：
+ * --set 可用字段键（title/desc/hours/...）或中文标签（优先级/所属模块...），选项字段值可填
+ * 中文标签或选项 UUID；无 --set 时进入交互模式逐字段提示（回车保留原值）。
+ */
+async function editDraftItem(id: string, setArgs: string[]): Promise<void> {
+  if (!id) throw new Error('draft edit 缺少草稿 ID');
+  const detail = await request<any>(`/api/draft-items/${encodeURIComponent(id)}`);
+  const contract = detail.editContract;
+  if (!contract) throw new Error('该草稿不支持表单编辑（或已写入/已忽略）；高级编辑可用 draft review 的 [e] 原始 JSON 路径');
+  const byKey = new Map<string, any>((contract.fields ?? []).map((field: any) => [field.key, field]));
+  const byLabel = new Map<string, any>((contract.fields ?? []).map((field: any) => [field.label, field]));
+  const edits: Record<string, string> = {};
+  const applySet = (name: string, rawValue: string) => {
+    const field = byKey.get(name) ?? byLabel.get(name);
+    if (!field) throw new Error(`未知字段「${name}」；可用字段: ${(contract.fields ?? []).map((item: any) => `${item.label}(${item.key})`).join('、')}`);
+    const value = rawValue.trim();
+    if (!value) throw new Error(`「${field.label}」不能为空`);
+    if (field.type === 'select') {
+      const match = (field.options ?? []).find((option: any) => option.label === value || option.value === value);
+      if (!match) throw new Error(`「${field.label}」没有「${value}」这个选项；可选: ${(field.options ?? []).map((option: any) => option.label).join('、')}`);
+      edits[field.key] = match.value;
+    } else edits[field.key] = value;
+  };
+  for (const set of setArgs) {
+    const eq = set.indexOf('=');
+    if (eq <= 0) throw new Error(`--set 需要 键=值 形式（收到「${set}」）；字段名可用中文标签，如 --set 优先级=P1`);
+    applySet(set.slice(0, eq), set.slice(eq + 1));
+  }
+  if (!setArgs.length) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      console.log(`草稿 ${id} ｜ ${draftTypeLabel(detail.type)} ｜ ${detail.title}`);
+      for (const field of contract.fields ?? []) {
+        if (field.type === 'select') {
+          const options = (field.options ?? []).map((option: any) => option.label).join('、');
+          const answer = (await rl.question(`  ${field.label}（当前 ${field.options?.find((option: any) => option.value === field.value)?.label ?? field.value}；可选 ${options}）: `)).trim();
+          if (answer) applySet(field.label, answer);
+        } else {
+          const answer = (await rl.question(`  ${field.label}（当前 ${String(field.value ?? '') || '（空）'}）: `)).trim();
+          if (answer) applySet(field.label, answer);
+        }
+      }
+    } finally { rl.close(); }
+    if (!Object.keys(edits).length) { console.log('未修改任何字段'); return; }
+  }
+  const updated = await request<any>(`/api/draft-items/${encodeURIComponent(id)}`, { method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version: detail.version, edits }) });
+  if (jsonOutput) return print(updated);
+  console.log('草稿已更新（编辑后须重新预览确认才会写入）：');
+  printDraftItems([updated]);
+}
+
 async function draftCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'review') {
     const id = values.shift() ?? '';
     if (!id) throw new Error('draft review 缺少批次 ID');
     return reviewDraftBatch(id);
+  }
+  if (subcommand === 'edit') {
+    const id = values.shift() ?? '';
+    const setArgs: string[] = [];
+    for (let i = 0; i < values.length; i++) {
+      if (values[i] === '--set') { const next = values[i + 1]; if (!next) throw new Error('--set 需要 键=值 参数'); setArgs.push(next); i++; }
+      else if (values[i].startsWith('--set=')) setArgs.push(values[i].slice('--set='.length));
+      else throw new Error(`无法识别的参数「${values[i]}」；用法: draft edit <草稿ID> [--set 优先级=P1 ...]`);
+    }
+    return editDraftItem(id, setArgs);
   }
   if (subcommand === 'retry') {
     const id = values.shift() ?? '';
@@ -903,7 +971,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     if (!ids.length) console.log('重试：csm-agent hemory regenerate <片段ID...>（按天重建）');
     return;
   }
-  throw new Error('draft 子命令只允许 review/retry/ignore/regenerate/dismiss/jobs');
+  throw new Error('draft 子命令只允许 review/edit/retry/ignore/regenerate/dismiss/jobs');
 }
 
 async function serviceCommand(subcommand: string, values: string[]): Promise<void> {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => void | Promise<void>): Promise<void> {
@@ -2824,4 +2824,177 @@ test('workbench: segmentation resume failure does not become an unhandled reject
     assert.equal(rejections, 0, 'resumePending 不得产生 unhandledRejection（会打崩服务进程）');
     process.off('unhandledRejection', onUnhandled);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 草稿结构化编辑契约与权威合并（Web 编辑弹窗 / 会话确认卡 / CLI draft edit 三端共用）──
+
+test('workbench: draft edit contract exposes Chinese form fields with locked deployment type', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-edit-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-e1', name: '客户壹', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-e1', 'ones_customer_option', 'opt-1', '客户壹', 'confirmed');
+    const event = db.upsertSourceEvent({ customerId: 'crm-e1', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r30:t1:x',
+      title: '客户反馈需求', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r30', speaker: 'CSM', transcript: '客户希望支持批量导出的需求' }, attributionStatus: 'confirmed' });
+    const service = new HemoryDraftService(db, fakeOnesMcp(), fakeModelRuntime([
+      { type: 'suggestion', title: '支持批量导出', summary: '客户希望支持批量导出的需求', evidence_refs: [event.id],
+        fields: { ones_required: { '建议类型': '新需求', '实例部署类型': '私有云', '所属模块': '导入导出', '优先级': 'P2' } } },
+    ]));
+    const queued = service.enqueue('crm-e1', [event.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const suggestion = db.listDraftBatches('crm-e1')[0].items!.find((item) => item.type === 'suggestion')!;
+    const customer = db.getCustomer('crm-e1')!;
+    const contract = draftEditContract(db, suggestion, customer)!;
+    // 可编辑字段：标题 + 规格表除部署类型外的中文下拉 + 描述；实例部署类型进 locked（CRM 确定性判定）。
+    assert.deepEqual(contract.fields.map((field) => field.label), ['标题', '建议类型', '所属模块', '优先级', '描述']);
+    const priority = contract.fields.find((field) => field.key === 'field:field012')!;
+    assert.equal(priority.type, 'select');
+    assert.ok(priority.options!.some((option) => option.label === 'P1' && option.value === '762U6awQ'));
+    assert.equal(contract.locked.length, 1);
+    assert.equal(contract.locked[0].label, '实例部署类型');
+    assert.match(contract.locked[0].reason, /CRM 使用版本/);
+    // 只读区：所属项目/工作项类型/客户信息/目标工具——结构化信息不进可编辑区。
+    assert.ok(contract.readonly.some((item) => item.label === '客户信息' && item.value.includes('客户壹')));
+    assert.ok(contract.readonly.some((item) => item.label === '目标工具' && item.value.includes('create_new_issue')));
+    // 运维工单：运维工程师是成员字段（text + hint，非下拉）；描述必填。
+    const opsEvent = db.upsertSourceEvent({ customerId: 'crm-e1', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r31:t1:x',
+      title: '运维操作', occurredAt: '2026-08-25T06:00:00Z',
+      payload: { recordingId: 'r31', speaker: 'CSM', transcript: '客户说需要数据备份与恢复，我们协助处理了' }, attributionStatus: 'confirmed' });
+    const opsService = new HemoryDraftService(db, fakeOnesMcp(), fakeModelRuntime([
+      { type: 'operations', title: '数据备份协助', summary: '帮客户做备份', evidence_refs: [opsEvent.id], fields: {} },
+    ]));
+    const opsQueued = opsService.enqueue('crm-e1', [opsEvent.id]);
+    await waitDraftJob(db, opsQueued[0].jobId);
+    const operations = db.listDraftBatches('crm-e1').find((batch) => batch.items!.some((item) => item.type === 'operations'))!.items!.find((item) => item.type === 'operations')!;
+    const opsContract = draftEditContract(db, operations, customer)!;
+    const engineer = opsContract.fields.find((field) => field.label === '运维工程师')!;
+    assert.equal(engineer.type, 'text');
+    assert.match(engineer.hint ?? '', /用户 UUID/);
+    assert.equal(opsContract.fields.find((field) => field.key === 'desc')!.required, true);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: applyDraftEdits merges field edits into targetArguments without breaking structure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-merge-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-e2', name: '客户贰', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-e2', 'ones_customer_option', 'opt-2', '客户贰', 'confirmed');
+    const event = db.upsertSourceEvent({ customerId: 'crm-e2', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r32:t1:x',
+      title: '客户反馈缺陷', occurredAt: '2026-08-25T05:00:00Z',
+      payload: { recordingId: 'r32', speaker: 'CSM', transcript: '客户希望支持批量导出的需求' }, attributionStatus: 'confirmed' });
+    const service = new HemoryDraftService(db, fakeOnesMcp(), fakeModelRuntime([
+      { type: 'suggestion', title: '支持批量导出', summary: '客户希望支持批量导出的需求', evidence_refs: [event.id],
+        fields: { ones_required: { '建议类型': '新需求', '实例部署类型': '私有云', '所属模块': '导入导出', '优先级': 'P2' } } },
+    ]));
+    const queued = service.enqueue('crm-e2', [event.id]);
+    await waitDraftJob(db, queued[0].jobId);
+    const suggestion = db.listDraftBatches('crm-e2')[0].items!.find((item) => item.type === 'suggestion')!;
+    const before = JSON.parse(JSON.stringify(suggestion.targetArguments));
+    // 中文选项标签输入 → 翻译成选项 UUID；描述/标题同步落位。
+    const { patch, errors } = applyDraftEdits(suggestion, { 'field:field012': 'P1', 'desc': '编辑后的描述', title: '新标题' }, '私有部署按年订阅版');
+    assert.deepEqual(errors, []);
+    const args = patch.targetArguments!;
+    assert.equal(args.title, '新标题');
+    assert.equal(patch.title, '新标题');
+    const values = args.fieldValues as Array<Record<string, string>>;
+    assert.ok(values.some((value) => value.fieldID === 'field012' && value.value === '762U6awQ'), '中文标签 P1 必须翻译成选项 UUID');
+    assert.ok(values.some((value) => value.fieldID === 'field016' && value.value === '编辑后的描述'));
+    // 实例部署类型每次合并按 CRM 使用版本确定性重置（本例非公有云版→私有云 UUID）。
+    assert.ok(values.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'KFewLptQ'));
+    // 结构化字段（项目/类型/客户字段/建议类型等未编辑项）原样保留。
+    assert.equal(args.projectID, before.projectID);
+    assert.equal(args.issueTypeID, before.issueTypeID);
+    const beforeCustomer = (before.fieldValues as Array<Record<string, string>>).find((value) => value.fieldID === 'JrvswW8P')!;
+    assert.ok(values.some((value) => value.fieldID === 'JrvswW8P' && value.value === beforeCustomer.value));
+    const beforeType = (before.fieldValues as Array<Record<string, string>>).find((value) => value.fieldID === 'PYbGEZmN')!;
+    assert.ok(values.some((value) => value.fieldID === 'PYbGEZmN' && value.value === beforeType.value));
+    // 未知选项必须报错并给合法选项，不产出 args。
+    const bad = applyDraftEdits(suggestion, { 'field:field012': 'P9' });
+    assert.ok(bad.errors.some((message) => message.includes('优先级') && message.includes('P0')));
+    assert.equal(bad.patch.targetArguments, undefined);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: applyDraftEdits validates workhour and preserves followup CRM structure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-edit2-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 工时：非法小时数报错；合法编辑（小时数 + 上海墙钟时间）落到参数。
+    const hoursItem = {
+      id: 'wh-1', batchId: 'b-1', customerId: 'crm-e3', version: 1, type: 'workhour' as const, status: 'ready' as const,
+      title: '工时', summary: '沟通工时', fields: {},
+      targetSystem: 'ones' as const, targetObject: '客户工时管理 / 售后客户', targetTool: 'mcp__ones__add_workhour_in_simple_mode',
+      targetArguments: { issueID: 'ISSUE-9', hours: 0.2, startTime: '2026-08-25T14:30:00+08:00', description: '沟通' },
+      evidenceRefs: [], unknowns: [], validationErrors: [], createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z',
+    };
+    const badHours = applyDraftEdits(hoursItem, { hours: 'abc' });
+    assert.ok(badHours.errors.some((message) => message.includes('正数')));
+    const badTime = applyDraftEdits(hoursItem, { startTime: '不是时间' });
+    assert.ok(badTime.errors.some((message) => message.includes('开始时间')));
+    const merged = applyDraftEdits(hoursItem, { hours: '1.5', startTime: '2026-08-26 09:05', description: '新描述' });
+    assert.deepEqual(merged.errors, []);
+    assert.equal(merged.patch.targetArguments!.hours, 1.5);
+    assert.equal(merged.patch.targetArguments!.startTime, '2026-08-26T09:05:00+08:00');
+    assert.equal(merged.patch.targetArguments!.issueID, 'ISSUE-9');
+    // 跟进：内容/下一步合并进 object_data，CRM 结构（apiName/object_api_name/客户绑定）原样保留。
+    const followupArgs = { apiName: 'CreateRecordsByData', object_api_name: 'ActiveRecordObj',
+      object_data: { active_record_content: '旧内容', field_oUaZx__c: '2026-08-25T05:00:00.000Z', field_wYlhw__c: '2026-08-25T06:00:00.000Z',
+        field_MIe19__c: 'option1', related_api_names: ['object_Umwnn__c'], active_record_type: '1cbaf4b4110c4a9d836867492e833d9e',
+        related_object_data: [{ describe_api_name: 'object_Umwnn__c', id: 'crm-e3', name: '客户叁' }] } };
+    const followupItem = {
+      id: 'fu-1', batchId: 'b-2', customerId: 'crm-e3', version: 1, type: 'followup' as const, status: 'ready' as const,
+      title: '跟进', summary: '沟通记录', fields: {},
+      targetSystem: 'crm' as const, targetObject: 'CRM / 销售记录（跟进）', targetTool: 'mcp__crm__data_record_create',
+      targetArguments: followupArgs, evidenceRefs: [], unknowns: [], validationErrors: [], createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z',
+    };
+    const mergedFollowup = applyDraftEdits(followupItem, { content: '新跟进内容', next_steps: '下周回访', end: '2026-08-25 14:00' });
+    assert.deepEqual(mergedFollowup.errors, []);
+    const args = mergedFollowup.patch.targetArguments!;
+    assert.equal(args.apiName, 'CreateRecordsByData');
+    assert.equal(args.object_api_name, 'ActiveRecordObj');
+    assert.equal(args.object_data.active_record_content, '新跟进内容');
+    assert.equal(args.object_data.field_9qb16__c, '下周回访');
+    assert.equal(args.object_data.related_object_data[0].id, 'crm-e3');
+    // datetime-local 值按上海时间解释：14:00 → 06:00Z。
+    assert.equal(args.object_data.field_wYlhw__c, '2026-08-25T06:00:00.000Z');
+    // 跟进内容清空必须报错（CRM 必填）。
+    const emptyContent = applyDraftEdits(followupItem, { content: '' });
+    assert.ok(emptyContent.errors.some((message) => message.includes('跟进内容')));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: confirm draft edit contract and merge for interactive agent drafts', () => {
+  const deskDraft = {
+    target_system: 'ones', target_object: 'ONES Desk / 工单', record_type: 'ticket', title: '导出失败',
+    summary: '导出报错', fields: { customer_id: 'crm-e4', customer_name: '客户肆' },
+    target_tool: 'mcp__ones__create_new_issue',
+    target_arguments: { projectID: 'GL3ysesFPdnAQNIU', issueTypeID: '7sxvwZMY', title: '导出失败',
+      fieldValues: [
+        { fieldID: 'JrvswW8P', value: 'opt-4' },
+        { fieldID: 'CATNfrrF', value: 'JuTTumjJ' },
+        { fieldID: 'HS5u8PNB', value: 'KFewLptQ' },
+        { fieldID: 'Su4v8xFs', value: 'SyPTtJdW' },
+        { fieldID: 'field029', value: 'KuZfE9scKYpijpKk' },
+        { fieldID: 'field016', value: '描述' },
+      ] },
+  } as any;
+  // 会话契约：字段与 Hemory 同构；部署类型锁定并显示 CRM 解析值（草稿现值漂移时也按 CRM 展示）。
+  const contract = confirmDraftEditContract(deskDraft, '公有云版')!;
+  assert.deepEqual(contract.fields.map((field) => field.label), ['标题', '环境类型', '是否稳定复现', '所属产品', '描述']);
+  assert.equal(contract.locked[0].label, '实例部署类型');
+  assert.equal(contract.locked[0].value, '公有云');
+  // 合并：中文标签翻译成 UUID，部署类型按 CRM（公有云版→公有云）重置。
+  const merged = applyConfirmDraftEdits(deskDraft, { 'field:CATNfrrF': 'UAT（用户验收环境）', 'field:field012': undefined } as any, '公有云版');
+  assert.deepEqual(merged.errors, []);
+  const values = merged.draft!.target_arguments.fieldValues as Array<Record<string, string>>;
+  assert.ok(values.some((value) => value.fieldID === 'CATNfrrF' && value.value === 'SMti68WG'));
+  assert.ok(values.some((value) => value.fieldID === 'HS5u8PNB' && value.value === 'Fzg8dBCT'), '部署类型必须按 CRM 公有云版重置为公有云 UUID');
+  // case/profile 无契约 → null（前端回退 JSON 编辑）。
+  assert.equal(confirmDraftEditContract({ ...deskDraft, record_type: 'case' }), null);
+  // 未知选项报错且不产出草稿。
+  const bad = applyConfirmDraftEdits(deskDraft, { 'field:CATNfrrF': '不存在环境' });
+  assert.ok(bad.errors.length > 0);
+  assert.equal(bad.draft, null);
 });

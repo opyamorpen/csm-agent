@@ -783,3 +783,45 @@ test('action cards no longer offer WeCom todo sync', () => {
   // H5 确认页专用样式同步移除。
   assert.doesNotMatch(styles, /wecom-page|wecom-shell|todo-preview|todo-meta|form-status/);
 });
+
+test('draft edit renders the structured contract form instead of raw JSON textareas', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/function renderDraftEditForm[\s\S]*?\n  \}\n\n  async function editableDraft/)?.[0];
+  assert.ok(renderer, 'renderDraftEditForm source was not found');
+  // 按契约 type 渲染控件：select 下拉（含未知当前值兜底项）、datetime-local、number；锁定/只读区块中文标题。
+  assert.match(renderer, /field\.type === 'select'/);
+  assert.match(renderer, /document\.createElement\('select'\)/);
+  assert.match(renderer, /field\.type === 'datetime' \? 'datetime-local'/);
+  assert.match(renderer, /field\.type === 'number' \? 'number'/);
+  assert.match(renderer, /以下信息已锁定/);
+  assert.match(renderer, /以下信息由系统自动填写/);
+  assert.match(renderer, /item\.reason/);
+  // collect() 只收集契约内字段，必填项为空时给出中文错误。
+  assert.match(renderer, /edits\[field\.key\] = input\.value/);
+  assert.match(renderer, /`「\$\{field\.label\}」为必填项`/);
+
+  const editor = source.match(/async function editableDraft[\s\S]*?\n  \}\n\n  \/\*\* 确认执行一组同批次草稿/)?.[0];
+  assert.ok(editor, 'editableDraft source was not found');
+  // 编辑弹窗优先走契约：GET /api/draft-items/:id 拉契约，PATCH 只提交 edits（服务端权威合并）。
+  assert.match(editor, /api\(`\/api\/draft-items\/\$\{item\.id\}`\)/);
+  assert.match(editor, /detail\?\.editContract/);
+  assert.match(editor, /edits: collected\.edits/);
+  // 无契约类型回退原始 JSON 编辑器（诊断兜底），保留 json-editor。
+  assert.match(editor, /json-editor/);
+
+  // 会话确认卡带 editContract 参数：契约路径提交 edits，无契约保留 JSON 兜底。
+  const confirmCard = source.match(/function addConfirmCard[\s\S]*?\n  \}\n\n  function setThinking/)?.[0];
+  assert.ok(confirmCard, 'addConfirmCard source was not found');
+  assert.match(confirmCard, /function addConfirmCard\(draft, editContract\)/);
+  assert.match(confirmCard, /renderDraftEditForm\(editContract, card\)/);
+  assert.match(confirmCard, /edits: collected\.edits/);
+  assert.match(confirmCard, /draft: approve \? edited : undefined/);
+  // SSE confirm 事件把契约传入确认卡。
+  assert.match(source, /case 'confirm': addConfirmCard\(e\.draft, e\.editContract\)/);
+
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.draft-edit-select \{/);
+  assert.match(styles, /\.draft-edit-locked \{/);
+  assert.match(styles, /\.draft-edit-readonly \{/);
+  assert.match(styles, /\.draft-edit-hint \{/);
+});
