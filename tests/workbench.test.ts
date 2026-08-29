@@ -212,60 +212,50 @@ test('workbench: ONES manhour parser normalizes detail records and pagination', 
 test('workbench: action completion is persisted with default and explicit outcomes', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-4', name: '客户丁' });
   const action = db.createAction({ customerId: 'crm-4', title: '确认续约预算', whyNow: '进入续约窗口' });
-  db.updateAction(action.id, { status: 'accepted' });
   const completed = db.completeAction(action.id);
   assert.equal(completed?.status, 'completed');
   assert.equal(completed?.outcome, 'CSM 在工作台确认完成');
   const explicit = db.createAction({ customerId: 'crm-4', title: '指定结果', whyNow: '进入续约窗口' });
-  db.updateAction(explicit.id, { status: 'accepted' });
   db.completeAction(explicit.id, '已同步上线');
   assert.equal(db.getAction(explicit.id)?.outcome, '已同步上线');
   assert.equal(db.completeAction('missing-id'), null);
 }));
 
-test('workbench: bulk accept applies per item with skipped/failed and per-item audit', () => withDb((db) => {
-  db.upsertCustomer({ id: 'crm-b1', name: '批量客户' });
-  const a1 = db.createAction({ customerId: 'crm-b1', title: '行动一', whyNow: '原因一' });
-  const a2 = db.createAction({ customerId: 'crm-b1', title: '行动二', whyNow: '原因二' });
-  const a3 = db.createAction({ customerId: 'crm-b1', title: '行动三', whyNow: '原因三' });
-  db.updateAction(a3.id, { status: 'accepted' });
-  // 重复 ID 去重：同一次调用里 a1 只处理一次，结果条数与输入去重后一致。
-  const results = db.bulkAcceptActions([a1.id, a2.id, a3.id, 'missing-id', a1.id]);
-  assert.deepEqual(results.map((item) => item.result), ['accepted', 'accepted', 'skipped', 'failed']);
-  assert.equal(results[2].reason, '当前状态 accepted，仅待处理可接受');
-  assert.equal(results[3].title, null);
-  assert.equal(db.getAction(a1.id)?.status, 'accepted');
-  assert.equal(db.getAction(a2.id)?.status, 'accepted');
-  assert.equal(db.getAction(a3.id)?.status, 'accepted');
-  const audited = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='accept_action' AND entity_type='action_item'").get() as { n: number };
-  assert.equal(audited.n, 2);
-  // 再跑一遍：已接受的全部跳过，幂等不重复审计。
-  const again = db.bulkAcceptActions([a1.id, a2.id]);
-  assert.deepEqual(again.map((item) => item.result), ['skipped', 'skipped']);
-  const auditedAgain = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='accept_action'").get() as { n: number };
-  assert.equal(auditedAgain.n, 2);
-}));
+test('workbench: legacy accepted actions are migrated back to new on open', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-accept-migrate-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-m1', name: '迁移客户' });
+    const legacy = db.createAction({ customerId: 'crm-m1', title: '历史已接受行动', whyNow: '原因' });
+    db.db.prepare("UPDATE action_items SET status='accepted' WHERE id=?").run(legacy.id);
+    db.close();
+    const reopened = new WorkbenchDatabase(dir);
+    try {
+      assert.equal(reopened.getAction(legacy.id)?.status, 'new');
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('workbench: bulk complete degrades only failing item and keeps default outcome', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-b2', name: '完成客户' });
   const ok = db.createAction({ customerId: 'crm-b2', title: '普通行动', whyNow: '原因' });
-  db.updateAction(ok.id, { status: 'accepted' });
   const linked = db.createAction({ customerId: 'crm-b2', title: '进行中行动', whyNow: '原因' });
   db.updateAction(linked.id, { status: 'in_progress' });
-  const fresh = db.createAction({ customerId: 'crm-b2', title: '未接受行动', whyNow: '原因' });
-  const results = db.bulkCompleteActions([ok.id, linked.id, fresh.id, 'missing-id']);
+  const snoozed = db.createAction({ customerId: 'crm-b2', title: '已搁置行动', whyNow: '原因' });
+  db.updateAction(snoozed.id, { status: 'snoozed' });
+  // 待处理/进行中均可直接完成（接受流程已移除），终态与搁置跳过。
+  const results = db.bulkCompleteActions([ok.id, linked.id, snoozed.id, 'missing-id']);
   assert.deepEqual(results.map((item) => item.result), ['completed', 'completed', 'skipped', 'failed']);
-  assert.equal(results[2].reason, '当前状态 new，仅已接受/进行中可完成');
+  assert.equal(results[2].reason, '当前状态 snoozed，仅待处理/进行中可完成');
   assert.equal(results[3].title, null);
   assert.equal(db.getAction(ok.id)?.status, 'completed');
   assert.equal(db.getAction(ok.id)?.outcome, 'CSM 在工作台确认完成');
   assert.equal(db.getAction(linked.id)?.status, 'completed');
-  assert.equal(db.getAction(fresh.id)?.status, 'new');
+  assert.equal(db.getAction(snoozed.id)?.status, 'snoozed');
   const completed = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='complete_action' AND entity_id=?").get(ok.id) as { n: number };
   assert.equal(completed.n, 1);
   // 显式 outcome 传播到完成项。
   const next = db.createAction({ customerId: 'crm-b2', title: '指定结果行动', whyNow: '原因' });
-  db.updateAction(next.id, { status: 'accepted' });
   const withOutcome = db.bulkCompleteActions([next.id], '已同步上线');
   assert.equal(withOutcome[0].result, 'completed');
   assert.equal(db.getAction(next.id)?.outcome, '已同步上线');

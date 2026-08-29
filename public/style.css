@@ -557,14 +557,17 @@ header .quiet-command { background: transparent; border-color: #5d6670; color: #
 .recommended { margin-top: 9px; padding: 8px 10px; background: #edf6f0; border-left: 3px solid #2a8253; color: #245d40; }
 .action-board, .case-list { display: grid; gap: 9px; }
 .action-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-/* 批量接受/完成操作条：复用 Hemory 归属栏的 34px 单行居中契约（select-all/计数沿用同款类）。 */
-.action-bulk-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; background: #f7f8fa; }
+/* 批量完成操作条：复用 Hemory 归属栏的 34px 单行居中契约（select-all/计数沿用同款类），sticky 冻结在滚动容器顶。 */
+.action-bulk-bar { position: sticky; top: 0; z-index: 8; display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; background: #f7f8fa; box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08); }
 /* 勾选框入卡片头：标题占据剩余宽度，徽标靠右不位移。 */
 .action-head input[type="checkbox"] { width: 16px; height: 16px; margin: 3px 0 0; flex: none; accent-color: var(--accent); cursor: pointer; }
 .action-head strong { flex: 1; }
+/* 点卡片本体即可选中：selectable 提示可点，selected 给整卡描边反馈。 */
+.action-card.selectable { cursor: pointer; }
+.action-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .action-meta { margin: 7px 0 10px; color: var(--muted); font-size: 12px; }
 .business-badge.status-new { color: #845400; }
-.business-badge.status-accepted, .business-badge.status-in_progress { color: #1e4eaa; }
+.business-badge.status-in_progress { color: #1e4eaa; }
 .business-badge.status-completed { color: #12643b; }
 
 .source-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(230px, 1fr)); gap: 10px; }
@@ -785,6 +788,8 @@ footer { background: #fff; }
   .settings-bottom, .agent-sessions { display: none; }
   .workbench-main { overflow: visible; }
   .workbench-view { padding: 14px 10px 28px; }
+  /* 移动端滚动容器变为 window：批量栏冻在 54px header（z-index 20）之下，低于侧栏层级防重叠。 */
+  .action-bulk-bar { top: 54px; z-index: 14; }
   .view-head, .customer-detail-head { align-items: flex-start; flex-direction: column; }
   .toolbar, .toolbar input { width: 100%; }
   .metric-strip { grid-template-columns: repeat(2, 1fr); }

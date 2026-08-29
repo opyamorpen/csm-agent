@@ -55,7 +55,7 @@ const CLI_CAPABILITIES = [
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
-  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-accept', '/api/action-items/bulk-complete'] },
+  { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
@@ -120,10 +120,8 @@ function help(): void {
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
-  csm-agent action accept <行动ID...>
-    （批量接受：仅待处理状态生效，其余跳过；逐项处理互不影响）
   csm-agent action complete <行动ID...> [--outcome <实际结果>]
-    （批量完成：仅已接受/进行中状态生效，其余跳过；单项失败不影响其他项；
+    （批量完成：仅待处理/进行中状态生效，其余跳过；单项失败不影响其他项；
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
@@ -349,15 +347,14 @@ function parseObject(input: string, label: string): Record<string, unknown> {
 
   async function actionCommand(subcommand: string, values: string[]): Promise<void> {
     if (subcommand === 'list') return showActions(values.join(' ') || undefined);
-    if (subcommand === 'accept' || subcommand === 'complete') {
+    if (subcommand === 'complete') {
       const positional = values.filter((value) => !value.startsWith('--'));
-      if (!positional.length) throw new Error(`action ${subcommand} 缺少行动 ID`);
-      const endpoint = subcommand === 'accept' ? '/api/action-items/bulk-accept' : '/api/action-items/bulk-complete';
-      const outcome = subcommand === 'accept' ? undefined : inlineOptionOf(values, '--outcome');
+      if (!positional.length) throw new Error('action complete 缺少行动 ID');
+      const outcome = inlineOptionOf(values, '--outcome');
       const body: Record<string, unknown> = { ids: positional };
       if (outcome !== undefined) body.outcome = outcome;
-      const result = await request(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      return printActionBulkResult(subcommand === 'accept' ? '批量接受' : '批量完成', result);
+      const result = await request('/api/action-items/bulk-complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return printActionBulkResult('批量完成', result);
     }
     const actionId = values.shift() ?? '';
     if (!actionId) throw new Error(`action ${subcommand || '(空)'} 缺少行动 ID`);
@@ -367,12 +364,7 @@ function parseObject(input: string, label: string): Record<string, unknown> {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       }));
     }
-    if (subcommand === 'complete') {
-      return print(await request(`/api/action-items/${encodeURIComponent(actionId)}/complete`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome: values.join(' ') }),
-      }));
-    }
-    throw new Error('action 子命令只允许 list/update/accept/complete');
+    throw new Error('action 子命令只允许 list/update/complete');
   }
 
 async function caseCommand(subcommand: string, values: string[]): Promise<void> {

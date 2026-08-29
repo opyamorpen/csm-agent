@@ -34,7 +34,9 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(!capabilities.some((item) => item.workflow === 'wecom-todo' || item.api.some((api) => api.includes('/api/wecom/'))),
     'wecom-todo workflow and /api/wecom/* endpoints should be removed');
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/:id/complete')));
-  assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-accept')));
+  // 行动「接受」流程已整体移除（草稿确认即视为接受）：bulk-accept API 不得再出现。
+  assert.ok(!capabilities.some((item) => item.api.includes('/api/action-items/bulk-accept')),
+    'bulk-accept API should be removed from capabilities');
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-complete')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
@@ -63,7 +65,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent serve/);
   assert.match(help.stdout, /csm-agent customers .*--sort default\|renewal_date\|renewal_amount/);
   assert.match(help.stdout, /csm-agent capabilities/);
-  assert.match(help.stdout, /csm-agent action accept <行动ID\.\.\.>/);
+  assert.doesNotMatch(help.stdout, /action accept/);
   assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);

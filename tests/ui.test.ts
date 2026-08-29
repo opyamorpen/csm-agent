@@ -256,34 +256,41 @@ test('draft cards expose per-card confirm/ignore and a sticky selection bar with
   assert.match(styles, /\.primary-command\.danger \{/);
 });
 
-test('weekly actions view exposes bulk accept and bulk complete with selection toolbar', () => {
+test('weekly actions view exposes card-click selection and a sticky bulk-complete toolbar (accept flow removed)', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
-  // 工具条：全选 + 已选计数 + 批量接受/完成按钮（静态 DOM，仅本周行动页）。
+  // 工具条：全选 + 已选计数 + 批量完成按钮（接受流程整体移除：草稿确认即视为接受）。
   assert.match(html, /id="actionSelectAll"/);
   assert.match(html, /id="actionSelectedCount"/);
-  assert.match(html, /id="actionBulkAccept"/);
   assert.match(html, /id="actionBulkComplete"/);
-  assert.match(html, />批量接受</);
   assert.match(html, />批量完成</);
-  // 卡片勾选：仅可操作状态（new/accepted/in_progress）头插 checkbox，dataset 带 actionId。
+  assert.ok(!html.includes('actionBulkAccept'), 'bulk accept button should be removed');
+  assert.ok(!source.includes('bulk-accept'), 'bulk accept API call should be removed');
+  // 卡片勾选：仅可操作状态（new/in_progress）头插 checkbox，dataset 带 actionId，卡片加 selectable 类。
   const card = source.match(/function actionCard[\s\S]*?\n  }\n\n  function inputField/)?.[0];
   assert.ok(card, 'actionCard source was not found');
-  assert.match(card, /selectable && \['new', 'accepted', 'in_progress'\]\.includes\(action\.status\)/);
+  assert.match(card, /selectable && \['new', 'in_progress'\]\.includes\(action\.status\)/);
   assert.match(card, /check\.dataset\.actionId = action\.id/);
+  assert.match(card, /card\.classList\.add\('selectable'\)/);
+  assert.doesNotMatch(card, /'接受'/);
+  // 点卡片本体切换选中：委托监听排除按钮/勾选框等交互元素，无勾选框的卡片不响应。
+  assert.match(source, /actionBoard\.addEventListener\('click'/);
+  assert.match(source, /event\.target\.closest\('button, input, label, a'\)/);
+  assert.match(source, /check\.checked = !check\.checked;/);
   // 批量接口与逐项语义：批量完成弹一次共用结果输入（取消中止、留空用默认）。
-  assert.match(source, /\/api\/action-items\/bulk-accept/);
   assert.match(source, /\/api\/action-items\/bulk-complete/);
   assert.match(source, /记录实际结果（留空使用默认）/);
-  assert.match(source, /仅待处理状态会被接受，其余跳过/);
-  // 勾选联动：全选跟随 + 已选 n/m 计数 + 批量期间按钮禁用。
+  // 勾选联动：全选跟随 + 已选 n/m 计数 + 整卡 selected 反馈 + 批量期间按钮禁用。
   assert.match(source, /function updateActionSelection\(\)/);
   assert.match(source, /已选 \$\{selected\}\/\$\{checks\.length\}/);
+  assert.match(source, /classList\.toggle\('selected', input\.checked\)/);
   assert.match(source, /function setActionBulkBusy\(busy\)/);
-  // 操作条样式。
-  assert.match(styles, /\.action-bulk-bar \{/);
+  // 操作条样式：sticky 冻结在滚动容器顶 + selectable/selected 卡片态。
+  assert.match(styles, /\.action-bulk-bar \{ position: sticky; top: 0; z-index: 8;/);
+  assert.match(styles, /\.action-card\.selectable/);
+  assert.match(styles, /\.action-card\.selected/);
   assert.match(styles, /\.action-head input\[type="checkbox"\]/);
 });
 
@@ -767,7 +774,7 @@ test('action cards no longer offer WeCom todo sync', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
-  // 显示契约：行动卡片只保留 接受/编辑/完成，「同步企微待办」入口与编辑表单的企微 UserId 字段整体移除。
+  // 显示契约：行动卡片只保留 编辑/完成（接受已随流程移除），「同步企微待办」入口与编辑表单的企微 UserId 字段整体移除。
   assert.doesNotMatch(app, /同步企微待办|已关联企微|wecom-todo-intents|ownerWecomUserid/);
   const editor = app.match(/function editAction[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 客户详情的 Hemory 片段 tab/)?.[0];
   assert.ok(editor, 'editAction source was not found');

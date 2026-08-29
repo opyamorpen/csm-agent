@@ -1,5 +1,5 @@
 export type RiskLevel = 'high' | 'medium' | 'low' | 'unknown';
-export type ActionStatus = 'new' | 'accepted' | 'in_progress' | 'completed' | 'snoozed' | 'false_positive';
+export type ActionStatus = 'new' | 'in_progress' | 'completed' | 'snoozed' | 'false_positive';
 export type AttributionStatus = 'confirmed' | 'ambiguous' | 'unattributed' | 'ignored';
 export type DraftItemType = 'internal_todo' | 'workhour' | 'followup' | 'suggestion' | 'ticket' | 'operations';
 export type DraftItemStatus = 'draft' | 'ready' | 'writing' | 'written' | 'failed' | 'dismissed' | 'stale';
@@ -158,7 +158,7 @@ export interface ActionItem extends ActionItemInput {
 export interface ActionBulkResult {
   id: string;
   title: string | null;
-  result: 'accepted' | 'completed' | 'skipped' | 'failed';
+  result: 'completed' | 'skipped' | 'failed';
   reason?: string;
   error?: string;
 }

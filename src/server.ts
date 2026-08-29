@@ -511,12 +511,6 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (req.method === 'GET' && path === '/api/action-items') {
         return json(res, 200, { actions: workbench.db.listActions(url.searchParams.get('customer_id') ?? undefined) });
       }
-      if (req.method === 'POST' && path === '/api/action-items/bulk-accept') {
-        const body = await readBody(req);
-        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-        if (!ids.length) return json(res, 400, { error: 'ids 不能为空' });
-        return json(res, 200, { items: workbench.db.bulkAcceptActions(ids) });
-      }
       if (req.method === 'POST' && path === '/api/action-items/bulk-complete') {
         const body = await readBody(req);
         const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
@@ -530,7 +524,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const sub = actionMatch[2] ?? '';
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
-          const allowed = ['new', 'accepted', 'in_progress', 'completed', 'snoozed', 'false_positive'];
+          const allowed = ['new', 'in_progress', 'completed', 'snoozed', 'false_positive'];
           if (body.status && !allowed.includes(body.status)) return json(res, 400, { error: 'invalid action status' });
           const action = workbench.db.updateAction(actionId, body);
           return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });

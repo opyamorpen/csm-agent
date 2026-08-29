@@ -9,7 +9,7 @@
 - 风险判断：确定性规则负责分数和等级；缺失数据保持 `unknown`，不转换为风险分。
 - 增购机会：只在非高风险客户中展示至少两个独立证据支持的假设。
 - 客户案例：固定模板成稿，CSM 编辑并确认后写入 ONES Wiki。
-- 行动批量处理：「本周行动」页支持勾选（全选 + 已选计数）后批量接受 / 批量完成；批量完成弹一次共用「实际结果」输入（留空记「CSM 在工作台确认完成」）。逐项处理互不影响——仅待处理状态可被接受、仅已接受/进行中可被完成，其余跳过，单项失败不回滚其他项，结果按 项数 汇总提示。CLI 同款：`csm-agent action accept <行动ID...>`、`csm-agent action complete <行动ID...> [--outcome]`。
+- 行动批量处理：「本周行动」页支持勾选（全选 + 已选计数，点卡片本体即可选中）后批量完成，批量操作条 sticky 冻结在滚动区顶部；批量完成弹一次共用「实际结果」输入（留空记「CSM 在工作台确认完成」）。逐项处理互不影响——仅待处理/进行中可被完成，其余跳过，单项失败不回滚其他项，结果按 项数 汇总提示。CLI 同款：`csm-agent action complete <行动ID...> [--outcome]`。「接受」流程已移除：草稿确认即视为接受，不接受的草稿直接忽略。
 - Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_profile` / `get_customer_events` 直接读工作台已同步数据（本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。会话支持「分享」（一键复制全文：标题、客户绑定、时间范围与完整对话；Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
 - 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看；建议/工单/运维三个 ONES 工作项列表只展示语义化 ID（`display_id`）、标题、状态、创建时间，标题可点击进入工作项详情，并默认按创建时间倒序。工时页同时展示总工时和登记明细（登记人、工时日期、登记小时、工时描述），明细默认按工时日期倒序。
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
@@ -90,7 +90,6 @@ csm-agent customer <CRM客户ID>
 csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent workhours <CRM客户ID> # 总工时和登记明细，按工时日期倒序
 csm-agent actions [CRM客户ID]
-csm-agent action accept <行动ID...> # 批量接受：仅待处理状态生效，其余跳过
 csm-agent action complete <行动ID...> --outcome "已与客户确认下一步" # 批量完成，--outcome 支持空格或=传值
 csm-agent action update <行动ID> '{"status":"in_progress"}'
 csm-agent cases [CRM客户ID]
@@ -188,7 +187,7 @@ ONES_TEAM_ID=RDjYMhKq
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`、`GET /api/draft-jobs?ids=`（生成任务状态；归属/重生成响应返回 jobId，失败任务不创建批次只能在此查询）
 - `GET /api/action-items`、`PATCH /api/action-items/:id`、`POST /api/action-items/:id/complete`
-- `POST /api/action-items/bulk-accept`、`POST /api/action-items/bulk-complete`（body `{ids}`，完成可带 `outcome`；逐项处理互不影响，返回 `{items:[{id,title,result,reason?,error?}]}`）
+- `POST /api/action-items/bulk-complete`（body `{ids}`，可带 `outcome`；逐项处理互不影响，返回 `{items:[{id,title,result,reason?,error?}]}`）
 - `POST /api/case-drafts`、`PATCH /api/case-drafts/:id`、`POST /api/case-drafts/:id/publish`
 - `GET /api/sessions`（默认剔除已归档；`?include=archived` 返回全量）、`PATCH /api/sessions/:id`（重命名 / 归档切换）、`GET /api/sessions/:id/export`（会话全文文本）
 
