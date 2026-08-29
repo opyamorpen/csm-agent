@@ -1921,41 +1921,104 @@
     return value.name || value.value || value.label || '';
   }
 
-  function renderOnesSources(events) {
-    const groups = [
-      ['suggestion_feedback', '建议与反馈'],
-      ['support_ticket', '工单'],
-      ['operations_ticket', '运维工单'],
-      ['customer_manhour', '客户工时'],
-      ['private_cloud_instance', '私有云实例'],
-    ];
-    const grid = el('div', 'source-summary-grid');
-    for (const [sourceType, label] of groups) {
-      const records = events.filter((event) => event.sourceSystem === 'ones' && event.sourceType === sourceType);
-      const group = el('article', 'source-summary');
-      const head = el('div', 'source-summary-head');
-      head.append(el('strong', null, label), badge(`${records.length} 条`, records.length ? 'accent' : ''));
-      group.append(head);
-      if (!records.length) {
-        group.append(el('div', 'cell-muted', '暂无已归属记录'));
-      } else {
-        for (const event of records.slice(0, 4)) {
-          const line = el('div', 'source-record');
-          const status = nestedName(event.payload?.field005);
-          let detail = [status, formatDate(event.occurredAt)].filter(Boolean).join(' · ');
-          if (sourceType === 'customer_manhour') {
-            const hours = Number(event.payload?.field019 || 0) / 100000;
-            detail = `已登记 ${hours.toFixed(1)} 小时 · ${detail}`;
-          }
-          const title = event.url ? el('a', null, event.title) : el('span', null, event.title);
-          if (event.url) { title.href = event.url; title.target = '_blank'; title.rel = 'noopener'; }
-          line.append(title, el('small', null, detail));
-          group.append(line);
-        }
+  /** 工作项状态类型（SELECT field005.category，已完成编码为 done）；旧同步数据没有 → null。 */
+  function statusCategoryOf(event) {
+    const status = event.payload?.field005;
+    return status && typeof status === 'object' && !Array.isArray(status) && typeof status.category === 'string' && status.category ? status.category : null;
+  }
+
+  /**
+   * 「数据概览」统计卡条：只给数量与比率，明细留在各自 tab。
+   * 完成率/解决率一律按状态类型（category === 'done'）判定；旧数据缺 category → 待刷新，
+   * 绝不拿状态名冒充类别（用户明确口径）。
+   */
+  function renderOverviewStats({ timeline, actions, fragments, workhours }) {
+    const byType = (type) => timeline.filter((event) => event.sourceSystem === 'ones' && event.sourceType === type);
+    const rateOf = (events) => {
+      if (!events.length) return null;
+      if (events.some((event) => statusCategoryOf(event) == null)) return 'stale';
+      const done = events.filter((event) => statusCategoryOf(event) === 'done').length;
+      return { done, total: events.length, pct: Math.round((done / events.length) * 100) };
+    };
+    const statCard = ({ label, value, sub, extra, rate, subClass, hint }) => {
+      const card = el('article', 'stat-card');
+      card.title = hint;
+      card.append(el('div', 'stat-label', label), el('strong', 'stat-value', value));
+      const subEl = el('div', 'stat-sub');
+      subEl.textContent = sub;
+      if (extra) subEl.append(extra);
+      if (subClass) subEl.classList.add(subClass);
+      card.append(subEl);
+      if (rate) {
+        const bar = el('div', `stat-bar${rate.pct === 100 ? ' full' : ''}`);
+        const fill = el('i');
+        fill.style.width = `${rate.pct}%`;
+        bar.append(fill);
+        card.append(bar);
       }
-      grid.append(group);
+      return card;
+    };
+    const rateCard = (label, events, rateLabel, doneLabel, hint) => {
+      const rate = rateOf(events);
+      let sub = '暂无已归属记录';
+      let extra = null;
+      if (events.length) {
+        sub = rate === 'stale' ? `${rateLabel}待刷新（「刷新三套系统」后按状态类型出数）` : `${rateLabel} ${rate.pct}%（${doneLabel} ${rate.done}/${rate.total}）`;
+      }
+      return statCard({ label, value: `${events.length} 条`, sub, extra, rate: rate && rate !== 'stale' ? rate : null, hint });
+    };
+
+    const strip = el('div', 'stat-strip');
+    const tickets = byType('support_ticket');
+    const ticketCard = rateCard('工单', tickets, '解决率', '已完成', '明细见「工单」tab');
+    if (tickets.length) {
+      const blocked = tickets.filter((event) => /阻塞|挂起|blocked/i.test(nestedName(event.payload?.field005))).length;
+      if (blocked) {
+        const flag = el('span', 'stat-flag', ` · 阻塞 ${blocked}`);
+        ticketCard.querySelector('.stat-sub').append(flag);
+      }
     }
-    return grid;
+    strip.append(
+      rateCard('需求', byType('suggestion_feedback'), '完成率', '已完成', '明细见「建议」tab'),
+      ticketCard,
+      rateCard('运维', byType('operations_ticket'), '解决率', '已执行', '明细见「运维」tab'),
+    );
+
+    const manhourIssue = timeline.find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
+    const totalHours = workhours?.totalHours ?? (manhourIssue ? Number(manhourIssue.payload?.field019 || 0) / 100000 : null);
+    const remainingHours = workhours?.remainingHours ?? (manhourIssue ? Number(manhourIssue.payload?.field020 || 0) / 100000 : null);
+    const hoursText = (value) => (value == null || !Number.isFinite(Number(value)) ? '未知' : `${Number(value).toFixed(1)} 小时`);
+    strip.append(statCard({
+      label: '工时',
+      value: hoursText(totalHours),
+      sub: `已登记总工时 · 剩余 ${hoursText(remainingHours)}`,
+      hint: '明细见「工时」tab',
+    }));
+
+    const all = actions || [];
+    const open = all.filter((action) => action.status === 'new').length;
+    strip.append(statCard({
+      label: '待办',
+      value: `${open} 项`,
+      sub: !all.length ? '暂无行动事项' : open ? '未完成行动事项' : '全部完成',
+      subClass: all.length && !open ? 'ok' : '',
+      hint: '明细见「行动事项」tab',
+    }));
+
+    const cutoff = Date.now() - 30 * 86400000;
+    const recent = (fragments || []).filter((fragment) => {
+      const at = Date.parse(fragment.occurredAt || '');
+      return !Number.isNaN(at) && at >= cutoff;
+    });
+    // 沟通场次按录音事件去重（一场长会切出的多个话题片段只算一场）。
+    const sessions = new Set(recent.map((fragment) => String(fragment.payload?.recordingId ?? fragment.id))).size;
+    strip.append(statCard({
+      label: '沟通',
+      value: `${sessions} 场`,
+      sub: `近 30 天 · ${recent.length} 个片段`,
+      hint: '明细见「Hemory 片段」tab',
+    }));
+    return strip;
   }
 
   function renderBusinessRecords(events, sourceType) {
@@ -2536,7 +2599,8 @@
     }
 
     const overview = el('div');
-    overview.append(sectionBlock('续约风险', renderRisk(data.risk)), sectionBlock('增购机会', opportunities), sectionBlock('数据概览', renderOnesSources(timeline)));
+    overview.append(sectionBlock('续约风险', renderRisk(data.risk)), sectionBlock('增购机会', opportunities),
+      sectionBlock('数据概览', renderOverviewStats({ timeline, actions: data.actions || [], fragments: hemoryFragmentsData.fragments || [], workhours: workhoursData })));
     addTab('overview', '概览', overview);
     addTab('suggestion_feedback', '建议', renderOnesWorkItems(timeline, 'suggestion_feedback'), draftCommand(c, 'suggestion_feedback', timeline, data.identities));
     addTab('support_ticket', '工单', renderOnesWorkItems(timeline, 'support_ticket'), draftCommand(c, 'support_ticket', timeline, data.identities));

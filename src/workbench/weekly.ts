@@ -78,8 +78,23 @@ function nestedStatus(event: SourceEvent): string {
   return '';
 }
 
+function nestedStatusCategory(event: SourceEvent): string | null {
+  const value = event.payload?.field005;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const category = (value as Record<string, unknown>).category;
+    if (typeof category === 'string' && category) return category;
+  }
+  return null;
+}
+
 function isDoneStatus(status: string): boolean {
   return /完成|关闭|已解决|done|closed|resolved/i.test(status);
+}
+
+/** 完成判定以状态类型为准（category === 'done'）；旧数据缺 category 时才回退状态名正则。 */
+function isDoneEvent(event: SourceEvent): boolean {
+  const category = nestedStatusCategory(event);
+  return category ? category === 'done' : isDoneStatus(nestedStatus(event));
 }
 
 function isBlockedStatus(status: string): boolean {
@@ -123,10 +138,10 @@ function buildStats(weekStart: string, context: { workItems: SourceEvent[]; hemo
     const at = parseOnesTime(event.payload?.field009 as string ?? event.occurredAt);
     return at != null && inWeek(at);
   };
-  // 「本周解决」：field010 更新在本周且当前状态已完成/关闭（快照近似口径）。
+  // 「本周解决」：field010 更新在本周且当前状态类型为已完成（旧数据回退状态名判断，快照近似口径）。
   const resolvedInWeek = (event: SourceEvent) => {
     const updated = parseOnesTime(updatedAtOf(event));
-    return isDoneStatus(nestedStatus(event)) && updated != null && inWeek(updated);
+    return isDoneEvent(event) && updated != null && inWeek(updated);
   };
   const tickets = of('support_ticket');
   return {
@@ -138,10 +153,10 @@ function buildStats(weekStart: string, context: { workItems: SourceEvent[]; hemo
     resolvedTickets: tickets.filter(resolvedInWeek).length,
     resolvedOperations: of('operations_ticket').filter(resolvedInWeek).length,
     blockedTickets: tickets.filter((event) => isBlockedStatus(nestedStatus(event))).length,
-    openTickets: tickets.filter((event) => !isDoneStatus(nestedStatus(event))).length,
+    openTickets: tickets.filter((event) => !isDoneEvent(event)).length,
     workhours: context.workhours,
     actionsCompleted: context.actionsCompleted,
-    notes: ['沟通次数按录音场数计（一场会议的多个话题片段只算一次）', '工作项按本周有更新聚合去重；「解决」按当前状态快照与更新时间近似判定'],
+    notes: ['沟通次数按录音场数计（一场会议的多个话题片段只算一次）', '工作项按本周有更新聚合去重；「解决」按状态类型=已完成与更新时间近似判定（旧同步数据回退状态名判断）'],
   };
 }
 

@@ -969,3 +969,39 @@ test('dual theme tokens stay in sync and the theme switch is wired', () => {
   assert.match(html, /id="themeToggle"/);
   assert.match(html, /localStorage\.setItem\('csm-theme', next\)/);
 });
+
+test('customer overview data section renders count-only stat cards with status-category rates', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const sync = readFileSync(new URL('../src/workbench/sync.ts', import.meta.url), 'utf8');
+
+  // 显示契约：「数据概览」是统一节奏统计卡（需求/工单/运维/工时/待办/沟通），只给数量与比率，明细留在各自 tab。
+  const renderer = source.match(/function renderOverviewStats[\s\S]*?\n  \}\n\n  function renderBusinessRecords/)?.[0];
+  assert.ok(renderer, 'renderOverviewStats source was not found');
+  for (const label of ['需求', '工单', '运维', '工时', '待办', '沟通']) {
+    assert.match(renderer, new RegExp(`'${label}'`));
+  }
+  // 完成判定只认状态类型（category === 'done'），不用状态名猜；旧数据缺 category → 待刷新。
+  assert.match(renderer, /statusCategoryOf\(event\) === 'done'/);
+  assert.match(renderer, /return 'stale'/);
+  assert.match(renderer, /待刷新/);
+  assert.match(source, /function statusCategoryOf/);
+  assert.match(source, /status\.category/);
+  // 明细列表整体移除：不再有卡内记录行/旧容器类。
+  assert.doesNotMatch(source, /function renderOnesSources/);
+  assert.doesNotMatch(source, /source-summary|source-record/);
+  assert.doesNotMatch(styles, /\.source-summary|\.source-record/);
+  // 调用点带齐三个数据源（ONES 时间线 + 行动 + Hemory 片段 + 工时）。
+  assert.match(source, /renderOverviewStats\(\{ timeline, actions: data\.actions \|\| \[\], fragments: hemoryFragmentsData\.fragments \|\| \[\], workhours: workhoursData \}\)/);
+  // 同步层取回状态类型：ONESQL SELECT 含 field005.category，支撑统计 category 优先。
+  assert.match(sync, /field005\.category/);
+  assert.match(sync, /onesStatusCategory/);
+  assert.match(sync, /category \? category === 'done'/);
+  // 进度条按百分比渲染，统计卡容器与样式存在。
+  assert.match(renderer, /fill\.style\.width = `\$\{rate\.pct\}%`/);
+  assert.match(renderer, /'stat-strip'/);
+  assert.match(styles, /\.stat-strip \{/);
+  assert.match(styles, /\.stat-card \{/);
+  assert.match(styles, /\.stat-bar \{/);
+  assert.match(styles, /\.stat-bar i \{/);
+});

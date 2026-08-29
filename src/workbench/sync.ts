@@ -335,7 +335,9 @@ export function buildOnesCustomerQuery(optionIds: string[], cursor = ''): string
   const privateCloud = ONES_CSM_SOURCES.find((source) => source.sourceType === 'private_cloud_instance')!;
   // 客户可能同时有全称与简称两个客户信息选项，工作项挂在任一名下都要拉取（IN 单元素等价于 =）。
   const options = optionIds.map((id) => `'${onesqlLiteral(id)}'`).join(', ');
-  return `SELECT uuid, display_id, field001, field005.name, field006.name, field007.name, ${ONES_CUSTOMER_FIELD_ID}.name, `
+  // field005.category 是 grammar 未记载但实测可用的扩展：返回状态类型编码（to_do/in_progress/done），
+  // 只能用于 SELECT、不能 WHERE——完成率/解决率一律按 category === 'done' 判定，不靠状态名猜。
+  return `SELECT uuid, display_id, field001, field005.name, field005.category, field006.name, field007.name, ${ONES_CUSTOMER_FIELD_ID}.name, `
     + `TODATE(field009, 'YYYY-MM-DD HH:mm:ss'), TODATE(field010, 'YYYY-MM-DD HH:mm:ss'), field019, field020 `
     + `FROM issue WHERE v$cursor > '${onesqlLiteral(cursor)}' AND ${ONES_CUSTOMER_FIELD_ID} IN (${options}) AND (`
     + `(field006 = 'GL3ysesFPdnAQNIU' AND field007 IN (${deskTypes})) OR `
@@ -347,6 +349,20 @@ export function buildOnesCustomerQuery(optionIds: string[], cursor = ''): string
 export function onesSourceType(issue: Record<string, unknown>): string | null {
   const issueType = asText(issue.field007);
   return issueType ? ONES_SOURCE_BY_ISSUE_TYPE.get(issueType)?.sourceType ?? null : null;
+}
+
+/**
+ * 工作项状态类型编码（to_do/in_progress/done），来自 SELECT field005.category。
+ * 旧同步数据的 field005 是纯状态名字符串、没有 category——返回 null，让调用方显式走兜底口径，
+ * 绝不用状态名去猜类别。
+ */
+export function onesStatusCategory(item: Record<string, unknown>): string | null {
+  const status = item?.field005;
+  if (status && typeof status === 'object' && !Array.isArray(status)) {
+    const category = (status as Record<string, unknown>).category;
+    if (typeof category === 'string' && category) return category;
+  }
+  return null;
 }
 
 export function onesIssueUrl(issueUuid: string, displayId?: string | null): string {
@@ -882,7 +898,11 @@ export class PortfolioSyncService {
       }
     }
 
-    const isClosed = (item: Record<string, unknown>) => /完成|关闭|已解决|done|closed|resolved/i.test(asText(item.field005) ?? '');
+    const isClosed = (item: Record<string, unknown>) => {
+      const category = onesStatusCategory(item);
+      // 状态类型优先；旧同步数据缺 category（当时只取状态名）才回退名称正则凑合判定。
+      return category ? category === 'done' : /完成|关闭|已解决|done|closed|resolved/i.test(asText(item.field005) ?? '');
+    };
     const open = supportIssues.filter((item) => !isClosed(item)).length;
     const blocked = supportIssues.filter((item) => /阻塞|挂起|blocked/i.test(asText(item.field005) ?? '')).length;
     this.db.updateSupportStats(customer.id, open, blocked);
