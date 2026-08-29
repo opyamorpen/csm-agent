@@ -74,6 +74,26 @@ test('draft inbox separates fully stale batches into a dedicated tab without bat
   assert.match(styles, /\.draft-subtab\.active \{[^}]*border-bottom-color: #2457c5/);
 });
 
+test('draft subtab counts are item-level and share the pending badge source', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+
+  assert.ok(renderer, 'loadDraftBatches source was not found');
+  // 显示契约：待处理数字 = 可处理草稿条目数（一个批次含多条草稿，按批计数会和卡片数对不上）；
+  // actionableCount helper 同时供分组（actionable/archived）与计数复用，服务端缺失时本地回退。
+  assert.match(renderer, /const actionableCount = \(batch\) => batch\.actionableItemCount \?\? \(batch\.items \|\| \[\]\)\.filter\(\(item\) => !\['written', 'dismissed', 'stale'\]\.includes\(item\.status\)\)\.length/);
+  assert.match(renderer, /const pending = actionable\.reduce\(\(sum, batch\) => sum \+ actionableCount\(batch\), 0\)/);
+  // 顶部角标与二级 tab 计数同源（同一 pending 变量）。
+  assert.match(renderer, /draftPendingCount\.textContent = pending \|\| '';/);
+  assert.match(renderer, /draftTabPending\.textContent = pending \? `待处理（\$\{pending\}）` : '待处理';/);
+  // 已忽略/已作废 tab 同一原则：数字 = 该 tab 里渲染的卡片（条目）数。
+  assert.match(renderer, /const archivedCount = archived\.reduce\(\(sum, batch\) => sum \+ \(batch\.items \|\| \[\]\)\.length, 0\)/);
+  assert.match(renderer, /draftTabArchived\.textContent = archivedCount \? `已忽略\/已作废（\$\{archivedCount\}）` : '已忽略\/已作废';/);
+  // 旧的按批计数口径必须整体移除。
+  assert.doesNotMatch(renderer, /actionable\.length \? `待处理/);
+  assert.doesNotMatch(renderer, /archived\.length \? `已忽略/);
+});
+
 test('draft inbox renders persistent failed generation jobs with fragment details', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function renderDraftFailedJobs[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];

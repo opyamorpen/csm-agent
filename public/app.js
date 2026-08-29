@@ -1535,20 +1535,25 @@
   async function loadDraftBatches() {
     const data = await api('/api/draft-batches');
     const batches = data.batches || [];
-    const pending = batches.flatMap((batch) => batch.items || []).filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
+    // 待处理口径统一为草稿条目数（可处理卡片数）：一个批次（客户×天）含多条草稿，
+    // 按批计数会让数字和卡片对不上；顶部角标、二级 tab、侧边栏 Agent 角标同一来源。
+    const actionableCount = (batch) => batch.actionableItemCount ?? (batch.items || []).filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length;
+    // 纯已作废/已忽略批次（actionableItemCount=0）与待处理批次分列两个 tab，互不混排：
+    // 这些卡片 checkbox 被禁用且不再需要处理，留在待处理列表只会让「选不中」像故障。
+    const actionable = batches.filter((batch) => actionableCount(batch) > 0);
+    const archived = batches.filter((batch) => !actionable.includes(batch));
+    const pending = actionable.reduce((sum, batch) => sum + actionableCount(batch), 0);
     draftPendingCount.textContent = pending || '';
     updateAgentNavCount();
     await renderDraftFailedJobs();
     draftBatchList.innerHTML = '';
     // 重渲染后勾选清零：浮动条随之隐藏并复位确认模式（忽略模式是临时态）。
     if (!draftSelectionBar.classList.contains('hidden')) { draftSelectionBar.classList.add('hidden'); if (draftBarIgnoreMode) { draftBarIgnoreMode = false; applyDraftBarMode(); } }
-    // 纯已作废/已忽略批次（actionableItemCount=0）与待处理批次分列两个 tab，互不混排：
-    // 这些卡片 checkbox 被禁用且不再需要处理，留在待处理列表只会让「选不中」像故障。
-    const actionable = batches.filter((batch) => (batch.actionableItemCount ?? batch.items.filter((item) => !['written', 'dismissed', 'stale'].includes(item.status)).length) > 0);
-    const archived = batches.filter((batch) => !actionable.includes(batch));
     for (const tab of document.querySelectorAll('.draft-subtab')) tab.classList.toggle('active', tab.dataset.draftTab === activeDraftTab);
-    draftTabPending.textContent = actionable.length ? `待处理（${actionable.length}）` : '待处理';
-    draftTabArchived.textContent = archived.length ? `已忽略/已作废（${archived.length}）` : '已忽略/已作废';
+    draftTabPending.textContent = pending ? `待处理（${pending}）` : '待处理';
+    // 已忽略/已作废 tab 同一原则：数字 = 该 tab 里渲染的卡片（条目）数。
+    const archivedCount = archived.reduce((sum, batch) => sum + (batch.items || []).length, 0);
+    draftTabArchived.textContent = archivedCount ? `已忽略/已作废（${archivedCount}）` : '已忽略/已作废';
     if (!batches.length) return draftBatchList.append(el('div', 'workspace-empty', '还没有 Hemory 草稿'));
     const visible = activeDraftTab === 'archived' ? archived : actionable;
     if (!visible.length) return draftBatchList.append(el('div', 'workspace-empty', activeDraftTab === 'archived' ? '还没有已忽略/已作废批次' : '还没有待处理草稿'));
