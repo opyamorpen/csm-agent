@@ -278,15 +278,16 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
 
 /**
  * 客户版 Markdown 的唯一权威渲染（Web 复制、Wiki 发布正文、CLI 默认输出均复用本函数产物，
- * 不允许任何一端自行拼装第二份格式）。只输出客户可见正文：条目仅 text，
- * source/category/date 降级为内部元数据；不含统计引用块、来源括号与内部评级。
+ * 不允许任何一端自行拼装第二份格式）。只输出客户可见正文：章节标题用中文数字（一、二、三、四），
+ * 各章节条目统一阿拉伯数字有序编号；source/category/date 降级为内部元数据；不含统计引用块、
+ * 来源括号与内部评级。
  */
 export function renderWeeklyMarkdown(report: WeeklyReport, customerName = '客户'): string {
   const bodies: Record<keyof WeeklyReportContent, string> = {
     summary: String(report.content.summary ?? '').trim(),
-    accomplishments: (report.content.accomplishments ?? []).map((item) => `- ${item.text}`).join('\n'),
+    accomplishments: (report.content.accomplishments ?? []).map((item, index) => `${index + 1}. ${item.text}`).join('\n'),
     next_week_plan: (report.content.next_week_plan ?? []).map((item, index) => `${index + 1}. ${item.text}`).join('\n'),
-    risks: (report.content.risks ?? []).map((item) => `- ${item.text}`).join('\n') || WEEKLY_NO_RISK_SENTENCE,
+    risks: (report.content.risks ?? []).map((item, index) => `${index + 1}. ${item.text}`).join('\n') || WEEKLY_NO_RISK_SENTENCE,
   };
   return [
     `# ${customerName} ONES 项目实施周报\n`,

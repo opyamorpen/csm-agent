@@ -2688,7 +2688,7 @@ test('workbench: weekly report generation uses full-context model call and persi
     // 幂等：同指纹再次生成复用任务，不新建。
     const again = service.generate('crm-w2', '2026-08-26');
     assert.equal(again.jobId, result.jobId);
-    // 客户版 Markdown：新标题格式 + 四个编号章节；不含统计与来源。
+    // 客户版 Markdown：新标题格式 + 四个编号章节；条目统一阿拉伯有序编号；不含统计与来源。
     const markdown = renderWeeklyMarkdown(report, '周报客户二');
     assert.match(markdown, /# 周报客户二 ONES 项目实施周报/);
     assert.match(markdown, /周报周期：2026-08-24 至 2026-08-30/);
@@ -2696,6 +2696,8 @@ test('workbench: weekly report generation uses full-context model call and persi
     assert.match(markdown, /## 二、本周关键进展/);
     assert.match(markdown, /## 三、下周工作计划/);
     assert.match(markdown, /## 四、风险与待协调事项/);
+    assert.match(markdown, /^1\. /m);
+    assert.doesNotMatch(markdown, /^- /m);
     assert.doesNotMatch(markdown, /（\d{2}-\d{2} 会议）/);
     assert.doesNotMatch(markdown, /【问题与支持】/);
     // 生成版本锁定：回退版本字符串会让旧指纹复活幂等短路，旧内容周报无法重建。
@@ -2792,7 +2794,7 @@ test('workbench: customer-facing markdown excludes internal evidence and stats w
     generator: 'fake/model', fingerprint: 'fp-x', createdAt: '2026-08-31T00:00:00Z', updatedAt: '2026-08-31T00:00:00Z',
   };
   const markdown = renderWeeklyMarkdown(report as any, '测试客户');
-  // 四章节标题与条目保留。
+  // 四章节标题与条目保留；条目统一阿拉伯有序编号（无 `- ` 圆点）。
   assert.match(markdown, /## 一、本周工作概览/);
   assert.match(markdown, /## 二、本周关键进展/);
   assert.match(markdown, /## 三、下周工作计划/);
@@ -2800,6 +2802,8 @@ test('workbench: customer-facing markdown excludes internal evidence and stats w
   assert.match(markdown, /【风险】服务器资源到位时间尚待确认/);
   assert.match(markdown, /【阻塞】第三方接口未开通/);
   assert.match(markdown, /【待确认】数据库选型/);
+  assert.match(markdown, /^1\. 【风险】服务器资源到位时间/m);
+  assert.doesNotMatch(markdown, /^- /m);
   // 客户版正文不得包含的内部证据：source 括号、Hemory/CRM/行动事项、统计、[分类] 前缀、unknown。
   assert.ok(!/Hemory/.test(markdown), 'markdown 不得包含 Hemory');
   assert.ok(!/CRM 跟进/.test(markdown), 'markdown 不得包含 CRM 跟进');

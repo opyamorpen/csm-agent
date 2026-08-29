@@ -804,9 +804,13 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   // 展示四章节（客户版）+ 内部统计标记 + 内部依据弱化 + 操作（编辑/复制 Markdown/发布到 Wiki/重新生成）。
   const renderer = source.match(/async function renderWeeklyReport[\s\S]*?\n  \}\n\n  function renderWeeklyBody/)?.[0];
   assert.ok(renderer, 'renderWeeklyReport source was not found');
-  for (const section of ['本周工作概览', '本周关键进展', '下周工作计划', '风险与待协调事项']) {
+  // 显示契约：章节标题用中文数字（一、二、三、四），条目章节统一有序列表（ol，不用 ul 圆点）。
+  for (const section of ['一、本周工作概览', '二、本周关键进展', '三、下周工作计划', '四、风险与待协调事项']) {
     assert.match(renderer, new RegExp(section));
   }
+  assert.doesNotMatch(renderer, /[①②③④]/);
+  assert.ok((renderer.match(/el\('ol', 'weekly-list'\)/g) ?? []).length >= 3, '三个条目章节必须都是有序列表');
+  assert.doesNotMatch(renderer, /el\('ul', 'weekly-list'\)/);
   assert.match(renderer, /weeklyStatsLine/);
   assert.match(renderer, /内部统计（不随客户版内容复制或发布）/);
   assert.match(renderer, /内部依据：/);
@@ -828,11 +832,15 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(source, /function withLoading\(button, busyText, fn\)/);
   assert.match(source, /button\.disabled = true;\n      button\.textContent = busyText;/);
 
-  // 编辑弹窗：新章节字段名 + 客户版帮助文字（内部依据仅审核用、风险条目前缀提示）。
+  // 编辑弹窗：新章节字段名（中文数字）+ 客户版帮助文字（内部依据仅审核用、风险条目前缀提示）。
   const editor = source.match(/function editWeeklyReport[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 轮询周报生成任务/)?.[0];
   assert.ok(editor, 'editWeeklyReport source was not found');
   assert.match(editor, /编辑实施周报（客户版）/);
-  assert.match(editor, /本周工作概览（客户可见正文/);
+  assert.match(editor, /一、本周工作概览（客户可见正文/);
+  assert.match(editor, /二、本周关键进展/);
+  assert.match(editor, /三、下周工作计划/);
+  assert.match(editor, /四、风险与待协调事项/);
+  assert.doesNotMatch(editor, /[①②③④]/);
   assert.match(editor, /内部依据，可省略/);
   assert.match(editor, /【风险】【阻塞】【待确认】/);
 
