@@ -5,7 +5,9 @@
  * 两者共享同一 buildId——「进程内代码」与「页面脚本」的版本比对以此为锚点，
  * 旧进程加载新 UI（或反之）可以被前端横幅与 /api/version 立刻暴露。
  *
- * --out <dir> 指定 dist 输出目录（默认 dist），单测用它写临时目录。
+ * --out <dir> 指定 dist 输出目录（默认 dist），单测用它写临时目录；public 锚点只在
+ * 输出目录就是仓库 dist 的真实构建时才改写——单测的临时 --out 若也改写它，每次 npm test
+ * 都会把前端比对锚点推进到一个没有对应 dist 的幽灵构建时间，制造 staleness 误报。
  * git 不可用时（如源码包拷贝）退化为纯时间戳构建号，不阻塞构建。
  */
 import { execFileSync } from 'node:child_process';
@@ -36,10 +38,14 @@ const builtAt = new Date().toISOString();
 const buildId = `${gitSha ? gitSha.slice(0, 12) : 'nogit'}-${dirty ? 'dirty' : 'clean'}-${builtAt}`;
 const info = { buildId, gitSha, dirty, builtAt };
 
+const stampsPublicAnchor = outDir === join(repoRoot, 'dist');
+
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify(info, null, 2)}\n`, 'utf8');
-writeFileSync(join(publicDir, 'build-info.js'), `// 构建时生成（gitignore）：前端与 /api/version 的 buildId 比对锚点。\nwindow.__CSM_BUILD__ = ${JSON.stringify(info)};\n`, 'utf8');
+if (stampsPublicAnchor) {
+  // 已有 build-info.js 被提交过的仓库里，重写会改变工作区状态；保持幂等即可（内容含时间戳必然变化）。
+  writeFileSync(join(publicDir, 'build-info.js'), `// 构建时生成（gitignore）：前端与 /api/version 的 buildId 比对锚点。\nwindow.__CSM_BUILD__ = ${JSON.stringify(info)};\n`, 'utf8');
+}
 
-// 已有 build-info.js 被提交过的仓库里，重写会改变工作区状态；保持幂等即可（内容含时间戳必然变化）。
-console.log(`build stamp: ${buildId} -> ${join(outDir, 'build-info.json')}, ${join(publicDir, 'build-info.js')}`);
+console.log(`build stamp: ${buildId} -> ${join(outDir, 'build-info.json')}${stampsPublicAnchor ? `, ${join(publicDir, 'build-info.js')}` : ''}`);
 export { info };

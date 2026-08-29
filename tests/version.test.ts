@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,19 +77,20 @@ test('version: staleness watch fires onReload when the disk build changes and st
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('version: stamp-build writes dist/build-info.json and public/build-info.js with the same buildId', async () => {
+test('version: stamp-build --out 临时目录只写 dist 戳，不得改写 public/build-info.js 锚点', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'csm-version-stamp-'));
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const publicAnchor = join(repoRoot, 'public', 'build-info.js');
+  const before = existsSync(publicAnchor) ? readFileSync(publicAnchor, 'utf8') : null;
   try {
-    // 在临时目录里复制 stamp 脚本语义：直接以 --out 运行脚本，校验双产物共享 buildId。
-    // stamp 脚本写 public/build-info.js 到仓库 public/（构建产物，gitignore），因此用 import 断言其结构。
+    // 单测形态（--out 临时目录）曾把仓库 public/build-info.js 一起改写成幽灵构建时间——
+    // 该时间没有对应 dist 构建，前端 staleness 横幅会误报且自动换新不会触发，这里锁定锚点必须保持原样。
     const { spawnSync } = await import('node:child_process');
-    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
     const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'stamp-build.mjs'), '--out', outDir], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     const distInfo = JSON.parse(readFileSync(join(outDir, 'build-info.json'), 'utf8'));
     assert.match(distInfo.buildId, /^([0-9a-f]{12}|nogit)-(dirty|clean)-/, 'buildId 形如 sha12-dirty-时间');
-    const publicJs = readFileSync(join(repoRoot, 'public', 'build-info.js'), 'utf8');
-    assert.match(publicJs, /window\.__CSM_BUILD__ = \{/);
-    assert.ok(publicJs.includes(distInfo.buildId), 'public/build-info.js 与 dist/build-info.json 共享同一 buildId');
+    const after = existsSync(publicAnchor) ? readFileSync(publicAnchor, 'utf8') : null;
+    assert.equal(after, before, '--out 临时目录运行不得改写 public/build-info.js');
   } finally { rmSync(outDir, { recursive: true, force: true }); }
 });
