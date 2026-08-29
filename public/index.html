@@ -5,6 +5,17 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CSM Agent</title>
+  <script>
+    // 主题启动（防闪烁）：本地记忆优先，未选择过则跟随系统，首帧绘制前落到 <html data-theme>。
+    (function () {
+      var theme = null;
+      try { theme = localStorage.getItem('csm-theme'); } catch (error) { theme = null; }
+      if (theme !== 'dark' && theme !== 'light') {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -13,6 +24,7 @@
     <div class="brand">客户成功工作台 <span class="sub">CSM Agent</span></div>
     <div class="right">
       <button id="globalSync" class="quiet-command">同步数据</button>
+      <button id="themeToggle" class="quiet-command theme-toggle" type="button" title="切换深浅主题" aria-label="切换深浅主题">☾ 深色</button>
       <div id="status" class="status"><span class="dot"></span>连接中…</div>
     </div>
   </header>
@@ -269,6 +281,23 @@
 
   <!-- 构建戳先于 app.js 加载：前端 buildId 与 /api/version 的比对锚点（旧进程横幅依赖）。 -->
   <script src="/build-info.js"></script>
+  <script>
+    // 主题切换：写 <html data-theme> 并持久化；按钮文案提示「点它将切到哪个主题」。
+    (function () {
+      var btn = document.getElementById('themeToggle');
+      if (!btn) return;
+      function syncThemeLabel() {
+        btn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀ 浅色' : '☾ 深色';
+      }
+      btn.addEventListener('click', function () {
+        var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem('csm-theme', next); } catch (error) { /* 存储不可用时仅本次会话生效 */ }
+        syncThemeLabel();
+      });
+      syncThemeLabel();
+    })();
+  </script>
   <script src="/app.js"></script>
 </body>
 </html>

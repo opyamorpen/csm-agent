@@ -53,7 +53,7 @@ test('draft inbox marks regenerating batches with a badge and disables all actio
   assert.match(renderer, /if \(!batch\.regenerating && !\['written', 'dismissed', 'stale', 'writing'\]\.includes\(item\.status\)\)/);
   assert.match(renderer, /if \(!batch\.regenerating && item\.status === 'failed'\)/);
   // 角标样式：spinner 动画复用 draft-spin。
-  assert.match(styles, /\.draft-regenerating \{[^}]*color: #174a9d/);
+  assert.match(styles, /\.draft-regenerating \{[^}]*color: var\(--accent-deep\)/);
   assert.match(styles, /\.draft-regenerating::before \{[^}]*animation: draft-spin/);
 });
 
@@ -87,10 +87,10 @@ test('draft inbox separates archived items into a dedicated tab without batch-le
   // 状态徽标用服务端中文标签（statusLabel），禁用卡片灰化增强。
   assert.match(renderer, /item\.statusLabel \|\| item\.status/);
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
-  assert.match(styles, /\.draft-item-disabled \{ cursor: default; background: #f7f8fa; opacity: 0\.62; \}/);
+  assert.match(styles, /\.draft-item-disabled \{ cursor: default; background: var\(--panel-2\); opacity: 0\.62; \}/);
   // tab 样式与行动页 subtab 并列复用（同一组选择器，草稿箱视觉不变）。
   assert.match(styles, /\.draft-subtab, \.action-subtab \{/);
-  assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{[^}]*border-bottom-color: #2457c5/);
+  assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{[^}]*border-bottom-color: var\(--accent\)/);
 });
 
 test('draft subtab counts are item-level and share the pending badge source', () => {
@@ -494,7 +494,7 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.match(styles, /\.hemory-assign-bar \{[^}]*align-items: center/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*position: sticky/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*z-index: 7/);
-  assert.match(styles, /\.hemory-assign-bar \{[^}]*background: #f7f8fa/);
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*background: var\(--bar-bg\)/);
   // 全选 checkbox 保持 16px、不再被输入框规则拉伸；输入框选择器收窄为 input[list]。
   assert.match(styles, /\.hemory-assign-bar input\[list\] \{[^}]*min-height: 34px/);
   assert.match(styles, /\.hemory-select-all input \{[^}]*width: 16px/);
@@ -579,7 +579,7 @@ test('hemory tab exposes one-click attributed view toggle', () => {
   assert.match(toggleState, /'看待归属' : '已归属'/);
   assert.match(source, /updateHemoryConfirmedToggle\(\)/);
   // 激活态样式：头部 quiet-command.active 高亮。
-  assert.match(styles, /\.agent-work-head \.quiet-command\.active \{[^}]*background: #eaf0fa/);
+  assert.match(styles, /\.agent-work-head \.quiet-command\.active \{[^}]*background: var\(--accent-soft\)/);
 });
 
 test('hemory attributed view groups fragments by customer with collapsed folds', () => {
@@ -606,7 +606,7 @@ test('hemory attributed view groups fragments by customer with collapsed folds',
   assert.match(label, /if \(!customerId\) return '未绑定客户'/);
   assert.match(label, /customersCache\.find\(\(item\) => item\.id === customerId\)\?\.name \?\? `CRM \$\{customerId\}`/);
   // 折叠态样式：summary 可点击带 ▸ 指示（展开旋转 90°），隐藏原生 marker；组为白底卡片。
-  assert.match(styles, /\.customer-group \{[^}]*background: #fff/);
+  assert.match(styles, /\.customer-group \{[^}]*background: var\(--panel\)/);
   assert.match(styles, /\.customer-group-title \{[^}]*cursor: pointer/);
   assert.match(styles, /\.customer-group-title \{[^}]*list-style: none/);
   assert.match(styles, /\.customer-group-title::-webkit-details-marker \{ display: none/);
@@ -940,4 +940,32 @@ test('draft edit renders the structured contract form instead of raw JSON textar
   assert.match(styles, /\.draft-edit-locked \{/);
   assert.match(styles, /\.draft-edit-readonly \{/);
   assert.match(styles, /\.draft-edit-hint \{/);
+});
+
+test('dual theme tokens stay in sync and the theme switch is wired', () => {
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 显示契约：浅色为默认主题（:root 兜底 + 显式 light 块），深色「科技版」为完整第二套。
+  assert.match(styles, /:root, \[data-theme="light"\] \{/);
+  assert.match(styles, /\[data-theme="dark"\] \{/);
+  // 两套主题必须定义同名变量全集：漏一个变量，深色下该处就会透出浅色值。
+  const lightBlock = styles.match(/\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1];
+  const darkBlock = styles.match(/\[data-theme="dark"\] \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(lightBlock, 'light theme token block was not found');
+  assert.ok(darkBlock, 'dark theme token block was not found');
+  const tokenNames = (block) => [...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]).sort();
+  assert.deepEqual(tokenNames(darkBlock), tokenNames(lightBlock));
+  // 组件只允许引用两主题都定义过的变量（防 typo 变量名静默失效）。
+  const defined = new Set(tokenNames(lightBlock));
+  for (const used of styles.matchAll(/var\((--[a-z0-9-]+)\)/g)) {
+    assert.ok(defined.has(used[1]), `未定义的 CSS 变量被引用: ${used[1]}`);
+  }
+
+  // index.html：首帧前 boot 脚本落 data-theme（本地记忆 > 系统偏好），顶栏有切换按钮并挂事件。
+  assert.match(html, /localStorage\.getItem\('csm-theme'\)/);
+  assert.match(html, /prefers-color-scheme: dark/);
+  assert.match(html, /document\.documentElement\.dataset\.theme/);
+  assert.match(html, /id="themeToggle"/);
+  assert.match(html, /localStorage\.setItem\('csm-theme', next\)/);
 });
