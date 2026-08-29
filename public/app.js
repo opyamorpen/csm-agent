@@ -2562,7 +2562,7 @@
 
   /**
    * 本周行动双 tab：未完成（status='new'，可勾选批量完成）/ 已完成（status='completed'，最近完成在前）。
-   * 两个 tab 都按客户分组（details.customer-group 默认折叠，客户名经 customersCache 解析）；
+   * 两个 tab 都按客户分组（details.customer-group 默认展开、点组标题可折叠，客户名经 customersCache 解析）；
    * 客户组顺序跟随列表序——未完成 tab 紧急客户（截止时间早）在前，已完成 tab 最近完成的客户在前。
    */
   async function loadActions() {
@@ -2576,6 +2576,8 @@
     actionTabPending.textContent = pending.length ? `未完成（${pending.length}）` : '未完成';
     actionTabCompleted.textContent = completed.length ? `已完成（${completed.length}）` : '已完成';
     actionBulkBar.classList.toggle('hidden', activeActionTab !== 'pending');
+    // 选中 tab 态随重渲染同步（切 tab 后高亮跟随，不残留在初始按钮上）。
+    for (const tab of document.querySelectorAll('.action-subtab')) tab.classList.toggle('active', tab.dataset.actionTab === activeActionTab);
     actionBoard.innerHTML = '';
     const visible = activeActionTab === 'pending' ? pending : completed;
     if (!visible.length) {
@@ -2586,6 +2588,7 @@
       for (const [customerId, rows] of groups) {
         const group = document.createElement('details');
         group.className = 'customer-group';
+        group.open = true;
         group.append(el('summary', 'customer-group-title', `${fragmentCustomerLabel(customerId)} · ${rows.length} 项`));
         const body = el('div', 'customer-group-body');
         for (const action of rows) body.append(actionCard(action, false, true));

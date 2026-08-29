@@ -327,7 +327,7 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(source, /querySelectorAll\('\.action-subtab'\)/);
   assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{/);
   // 两态划分 + 客户分组渲染：未完成= status==='new'（后端 due_at 升序），已完成按 updatedAt 倒序；
-  // 按 customerId 分桶为 details.customer-group（默认折叠，客户名经 customersCache 解析）。
+  // 按 customerId 分桶为 details.customer-group（默认展开、点组标题可折叠，客户名经 customersCache 解析）。
   const loader = source.match(/async function loadActions[\s\S]*?\n  \}\n\n  \/\/ 本周行动二级 tab/)?.[0];
   assert.ok(loader, 'loadActions source was not found');
   assert.match(loader, /actions\.filter\(\(a\) => a\.status === 'new'\)/);
@@ -335,9 +335,12 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(loader, /Date\.parse\(b\.updatedAt\) - Date\.parse\(a\.updatedAt\)/);
   assert.match(loader, /groups\.set\(action\.customerId, \[\.\.\.\(groups\.get\(action\.customerId\) \?\? \[\]\), action\]\)/);
   assert.match(loader, /'customer-group'/);
+  assert.match(loader, /group\.open = true;/);
   assert.match(loader, /fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 项/);
   // 客户名懒加载：进行动页时 customersCache 为空才请求 /api/customers。
   assert.match(loader, /if \(!customersCache\.length\) customersCache = \(await api\('\/api\/customers'\)\)\.customers \|\| \[\];/);
+  // 选中 tab 态随重渲染同步：切 tab 后高亮跟随 activeActionTab，不残留在初始按钮上。
+  assert.match(loader, /querySelectorAll\('\.action-subtab'\)\) tab\.classList\.toggle\('active', tab\.dataset\.actionTab === activeActionTab\)/);;
   // 导航角标与 tab 计数同源（未完成数）。
   assert.match(loader, /actionNavCount\.textContent = pending\.length \|\| '';/);
   // 已完成 tab 无可勾选卡片，隐藏批量操作条。
