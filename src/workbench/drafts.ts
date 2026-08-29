@@ -282,15 +282,19 @@ function onesDeskTypeId(type: DraftItemType): OnesDeskDraftType | null {
 
 // 生成与校验共用的客户 option 解析：本客户 confirmed 身份优先；
 // 历史草稿可能绑在 AccountObj 旧行上，按名称唯一复用同名售后客户的身份（与 followup 的 afterSales 回退同构）。
-function resolveOnesOption(db: WorkbenchDatabase, customer: Customer): { id: string; label: string } | undefined {
-  const find = (id: string) => {
-    const identity = db.listIdentities(id).find((item) => item.system === 'ones_customer_option' && item.status === 'confirmed');
-    return identity?.external_id ? { id: String(identity.external_id), label: String(identity.label ?? '') } : undefined;
-  };
-  const own = find(customer.id);
+// 一个客户可能解析出全称与简称两个选项（多变体同步所致）：Desk 新建工作项确定性绑定全称选项，其次简称。
+export function resolveOnesOption(db: WorkbenchDatabase, customer: Customer): { id: string; label: string } | undefined {
+  const find = (id: string) => db.listIdentities(id)
+    .filter((item) => item.system === 'ones_customer_option' && item.status === 'confirmed')
+    .sort((left, right) => (String(right.label) === customer.name ? 1 : 0) - (String(left.label) === customer.name ? 1 : 0)
+      || (String(right.label) === customer.shortName ? 1 : 0) - (String(left.label) === customer.shortName ? 1 : 0))
+    .find((item) => !!item.external_id);
+  const pick = (identity?: { external_id?: unknown }) => identity?.external_id
+    ? { id: String(identity.external_id), label: String((identity as { label?: unknown }).label ?? '') } : undefined;
+  const own = pick(find(customer.id));
   if (own) return own;
   const sameName = db.listCustomers().filter((item) => item.id !== customer.id && item.name === customer.name);
-  return sameName.length === 1 ? find(sameName[0].id) : undefined;
+  return sameName.length === 1 ? pick(find(sameName[0].id)) : undefined;
 }
 
 interface DraftProposal {

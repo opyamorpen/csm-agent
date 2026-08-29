@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, computeWorkhours, draftDisplayFields, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 import { WecomTodoService } from '../src/workbench/wecom.js';
 
@@ -139,8 +139,11 @@ test('workbench: last interaction aggregates the latest business event across so
 }));
 
 test('workbench: ONES CSM sources are selected by customer option and exact issue types', () => {
-  const query = buildOnesCustomerQuery('customer-option-1');
-  assert.match(query, /JrvswW8P = 'customer-option-1'/);
+  const query = buildOnesCustomerQuery(['customer-option-1']);
+  assert.match(query, /JrvswW8P IN \('customer-option-1'\)/);
+  // 双选项客户：全称与简称选项的工作项都要拉取。
+  const dual = buildOnesCustomerQuery(['opt-full', 'opt-short']);
+  assert.match(dual, /JrvswW8P IN \('opt-full', 'opt-short'\)/);
   assert.match(query, /A99xMfkg/);
   assert.match(query, /7sxvwZMY/);
   assert.match(query, /943qpMX7/);
@@ -1948,26 +1951,27 @@ function fakeOnesOptionSearchMcp(optionsByInput: Record<string, Array<{ uuid: st
   };
 }
 
-test('workbench: ONES customer option resolves by 客户名称 then 售后客户名称, uniquely', async () => {
+test('workbench: ONES customer option resolves per name variant; dual options both resolved', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-option-'));
   const db = new WorkbenchDatabase(dir);
   try {
-    // 场景一（常态）：客户名称（field_n1qN0__c__r 全称）与 ONES 选项精确一致。
+    // 场景一（常态）：客户名称（field_n1qN0__c__r 全称）与 ONES 选项精确一致；简称变体同步解析（搜不到也无妨）。
     db.upsertCustomer({ id: 'crm-hd', name: '北京华大九天科技股份有限公司', shortName: '华大九天', sourceObject: 'object_Umwnn__c' });
     const mcp = fakeOnesOptionSearchMcp({
       '北京华大九天科技股份有限公司': [{ uuid: 'BJY0WFZJ', name: '北京华大九天科技股份有限公司' }],
+      '华大九天': [],
     });
     const sync = new PortfolioSyncService(db, mcp, async () => []);
-    const optionId = await (sync as any).resolveOnesCustomerOption(db.getCustomer('crm-hd'));
-    assert.equal(optionId, 'BJY0WFZJ');
+    const optionIds = await (sync as any).resolveOnesCustomerOptions(db.getCustomer('crm-hd'));
+    assert.deepEqual(optionIds, ['BJY0WFZJ']);
     const identity = db.listIdentities('crm-hd').find((item) => item.system === 'ones_customer_option');
     assert.equal(identity?.external_id, 'BJY0WFZJ');
     assert.equal(identity?.label, '北京华大九天科技股份有限公司');
     assert.equal(identity?.status, 'confirmed');
-    // 客户名称直接命中时不再搜索简称。
-    assert.deepEqual(mcp.calls.map((call) => call.args.input), ['北京华大九天科技股份有限公司']);
+    // 两个名称变体都被搜索（简称搜不到选项、不落候选）。
+    assert.deepEqual(mcp.calls.map((call) => call.args.input), ['北京华大九天科技股份有限公司', '华大九天']);
 
-    // 场景二：客户名称在 ONES 侧搜不到精确选项时，回退搜索售后客户名称（简称），精确唯一命中即可确认。
+    // 场景二：全称搜不到精确选项时简称精确唯一命中（历史行为保留）。
     db.upsertCustomer({ id: 'crm-ai', name: '北京通用人工智能研究院', shortName: '通用AI研究院', sourceObject: 'object_Umwnn__c' });
     const mcp2 = fakeOnesOptionSearchMcp({
       '北京通用人工智能研究院': [
@@ -1977,8 +1981,8 @@ test('workbench: ONES customer option resolves by 客户名称 then 售后客户
       '通用AI研究院': [{ uuid: 'tyy8tinj', name: '通用AI研究院' }],
     });
     const sync2 = new PortfolioSyncService(db, mcp2, async () => []);
-    const optionId2 = await (sync2 as any).resolveOnesCustomerOption(db.getCustomer('crm-ai'));
-    assert.equal(optionId2, 'tyy8tinj');
+    const optionIds2 = await (sync2 as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai'));
+    assert.deepEqual(optionIds2, ['tyy8tinj']);
     assert.equal(db.listIdentities('crm-ai').find((item) => item.system === 'ones_customer_option')?.external_id, 'tyy8tinj');
 
     // 场景二b：客户名称与简称都无法精确唯一匹配 → 未归属、落候选事件。
@@ -1988,8 +1992,8 @@ test('workbench: ONES customer option resolves by 客户名称 then 售后客户
       '智源': [{ uuid: 'v8Goci1j', name: '智源研究院' }],
     });
     const sync2b = new PortfolioSyncService(db, mcp2b, async () => []);
-    const optionId2b = await (sync2b as any).resolveOnesCustomerOption(db.getCustomer('crm-ai2'));
-    assert.equal(optionId2b, null);
+    const optionIds2b = await (sync2b as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai2'));
+    assert.deepEqual(optionIds2b, []);
     assert.equal(db.listIdentities('crm-ai2').filter((item) => item.system === 'ones_customer_option').length, 0);
     assert.ok(db.listSourceEvents('ones', 'customer_option_candidate', 'crm-ai2').length >= 1);
 
@@ -2000,11 +2004,79 @@ test('workbench: ONES customer option resolves by 客户名称 then 售后客户
       '简称客户': [{ uuid: 'opt-a', name: '简称客户集团' }],
     });
     const sync3 = new PortfolioSyncService(db, mcp3, async () => []);
-    const optionId3 = await (sync3 as any).resolveOnesCustomerOption(db.getCustomer('crm-xx'));
-    assert.equal(optionId3, null);
+    const optionIds3 = await (sync3 as any).resolveOnesCustomerOptions(db.getCustomer('crm-xx'));
+    assert.deepEqual(optionIds3, []);
     assert.equal(db.listIdentities('crm-xx').filter((item) => item.system === 'ones_customer_option').length, 0);
     const candidates = db.listSourceEvents('ones', 'customer_option_candidate', 'crm-xx');
     assert.ok(candidates.length >= 2, '歧义候选应写入 source_events');
+
+    // 场景四（双选项核心）：全称与简称在 ONES 各有一个独立选项（敏锐达/思灵真实事故形状）——
+    // 两个都要解析成功并都用于同步查询；缓存里已有简称时，实时补解析全称。
+    db.upsertCustomer({ id: 'crm-md', name: '北京敏锐达致机器人科技有限责任公司', shortName: '北京思灵机器人科技有限责任公司', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-md', 'ones_customer_option', '87pQMH70', '北京思灵机器人科技有限责任公司', 'confirmed');
+    const mcp4 = fakeOnesOptionSearchMcp({
+      '北京敏锐达致机器人科技有限责任公司': [{ uuid: '6iioSn0M', name: '北京敏锐达致机器人科技有限责任公司' }],
+      // 简称已命中缓存，不再实时搜索。
+    });
+    const sync4 = new PortfolioSyncService(db, mcp4, async () => []);
+    const optionIds4 = await (sync4 as any).resolveOnesCustomerOptions(db.getCustomer('crm-md'));
+    // 全称（primary）在前，简称在后，两者都参与 ONESQL IN 查询。
+    assert.deepEqual(optionIds4, ['6iioSn0M', '87pQMH70']);
+    assert.deepEqual(mcp4.calls.map((call) => call.args.input), ['北京敏锐达致机器人科技有限责任公司']);
+    const identities4 = db.listIdentities('crm-md').filter((item) => item.system === 'ones_customer_option');
+    assert.equal(identities4.length, 2);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: dual-option customer syncs the manhour issue bound to the secondary option', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-option-sync-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 端到端：售后客户工作项挂在简称选项名下（或反之），IN 查询必须把它拉进来。
+    db.upsertCustomer({ id: 'crm-dual', name: '北京敏锐达致机器人科技有限责任公司', shortName: '北京思灵机器人科技有限责任公司', sourceObject: 'object_Umwnn__c' });
+    const mcp = fakeOnesOptionSearchMcp({
+      '北京敏锐达致机器人科技有限责任公司': [{ uuid: 'opt-full', name: '北京敏锐达致机器人科技有限责任公司' }],
+      '北京思灵机器人科技有限责任公司': [{ uuid: 'opt-short', name: '北京思灵机器人科技有限责任公司' }],
+    });
+    const issues = [{
+      uuid: 'KHGS-2282803', display_id: 'KHGS-2282803', field001: '北京敏锐达致机器人科技有限责任公司',
+      field005: { name: '进行中' }, field006: { name: '客户工时管理' }, field007: { name: '售后客户' },
+      JrvswW8P: { name: '北京敏锐达致机器人科技有限责任公司' }, field009: '2026-08-28 10:00:00',
+    }];
+    let capturedQuery = '';
+    const onesMcp: any = {
+      listTools: () => [], isWrite: () => false, resolve: () => undefined,
+      call: async (publicName: string, args: any) => {
+        if (publicName === 'mcp__ones__query_issues_by_onesql') {
+          capturedQuery = String(args?.query ?? '');
+          return { text: JSON.stringify({ result: 'SUCCESS', data: issues, page_info: { has_next_page: false } }), isError: false };
+        }
+        if (publicName === 'mcp__ones__search_for_issue_field_options') return mcp.call(publicName, args);
+        if (publicName === 'mcp__ones__get_onesql_grammar_help') return { text: '{}', isError: false };
+        return { text: '{}', isError: false };
+      },
+    };
+    const sync = new PortfolioSyncService(db, onesMcp, async () => []);
+    const count = await (sync as any).syncOnesCustomer(db.getCustomer('crm-dual'));
+    assert.ok(count >= 1);
+    // ONESQL 查询必须同时含两个选项 ID。
+    assert.match(capturedQuery, /JrvswW8P IN \('opt-full', 'opt-short'\)/);
+    // 全称选项名下的售后客户工作项成功归属入库，findCustomerManhourIssue 命中。
+    const manhour = db.findCustomerManhourIssue('crm-dual');
+    assert.equal(manhour?.externalId, 'KHGS-2282803');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: resolveOnesOption prefers the full-name identity deterministically', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-option-draft-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 双身份并存时（简称先插入），草稿/校验侧仍确定性优先全称。
+    db.upsertCustomer({ id: 'crm-pick', name: '北京敏锐达致机器人科技有限责任公司', shortName: '北京思灵机器人科技有限责任公司', sourceObject: 'object_Umwnn__c' });
+    db.upsertIdentity('crm-pick', 'ones_customer_option', '87pQMH70', '北京思灵机器人科技有限责任公司', 'confirmed');
+    db.upsertIdentity('crm-pick', 'ones_customer_option', '6iioSn0M', '北京敏锐达致机器人科技有限责任公司', 'confirmed');
+    const picked = resolveOnesOption(db, db.getCustomer('crm-pick'));
+    assert.deepEqual(picked, { id: '6iioSn0M', label: '北京敏锐达致机器人科技有限责任公司' });
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

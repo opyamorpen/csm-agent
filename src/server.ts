@@ -878,7 +878,11 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const boundCustomer = customerId ? workbench.db.getCustomer(customerId) : undefined;
         if (customerId && !boundCustomer) return json(res, 404, { error: 'customer not found' });
         const identities = boundCustomer ? workbench.db.listIdentities(boundCustomer.id) : [];
-        const option = identities.find((item) => item.system === 'ones_customer_option' && item.status === 'confirmed');
+        // 多变体解析后可能存在全称+简称两个 confirmed 选项：会话注入确定性优先全称（与草稿 resolveOnesOption 同序）。
+        const rank = (label: unknown) => (label === boundCustomer?.name ? 2 : label === boundCustomer?.shortName ? 1 : 0);
+        const option = identities
+          .filter((item) => item.system === 'ones_customer_option' && item.status === 'confirmed' && item.external_id)
+          .sort((left, right) => rank(right.label) - rank(left.label))[0];
         const manhour = boundCustomer
           ? workbench.db.findCustomerManhourIssue(boundCustomer.id)
           : undefined;

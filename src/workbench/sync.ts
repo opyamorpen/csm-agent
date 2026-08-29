@@ -328,14 +328,16 @@ function onesqlLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-export function buildOnesCustomerQuery(optionId: string, cursor = ''): string {
+export function buildOnesCustomerQuery(optionIds: string[], cursor = ''): string {
   const deskTypes = ONES_CSM_SOURCES.filter((source) => source.projectName === 'ONES Desk')
     .map((source) => `'${source.issueTypeId}'`).join(', ');
   const hours = ONES_CSM_SOURCES.find((source) => source.sourceType === 'customer_manhour')!;
   const privateCloud = ONES_CSM_SOURCES.find((source) => source.sourceType === 'private_cloud_instance')!;
+  // 客户可能同时有全称与简称两个客户信息选项，工作项挂在任一名下都要拉取（IN 单元素等价于 =）。
+  const options = optionIds.map((id) => `'${onesqlLiteral(id)}'`).join(', ');
   return `SELECT uuid, display_id, field001, field005.name, field006.name, field007.name, ${ONES_CUSTOMER_FIELD_ID}.name, `
     + `TODATE(field009, 'YYYY-MM-DD HH:mm:ss'), TODATE(field010, 'YYYY-MM-DD HH:mm:ss'), field019, field020 `
-    + `FROM issue WHERE v$cursor > '${onesqlLiteral(cursor)}' AND ${ONES_CUSTOMER_FIELD_ID} = '${onesqlLiteral(optionId)}' AND (`
+    + `FROM issue WHERE v$cursor > '${onesqlLiteral(cursor)}' AND ${ONES_CUSTOMER_FIELD_ID} IN (${options}) AND (`
     + `(field006 = 'GL3ysesFPdnAQNIU' AND field007 IN (${deskTypes})) OR `
     + `(field006 = '${hours.projectId}' AND field007 = '${hours.issueTypeId}') OR `
     + `(field006 = '${privateCloud.projectId}' AND field007 = '${privateCloud.issueTypeId}')) `
@@ -758,16 +760,21 @@ export class PortfolioSyncService {
     await this.onesqlGrammarReady;
   }
 
-  // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）只作次级搜索。
-  // 解析顺序：客户名称精确唯一 → 售后客户名称精确唯一；两者都失败才落候选事件，不做模糊归属。
-  private async resolveOnesCustomerOption(customer: Customer): Promise<string | null> {
+  // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）是次级变体。
+  // 一个客户在 ONES 可能同时存在全称与简称两个选项（实测：敏锐达/思灵、信通院/工物所），工作项可能挂在
+  // 任一选项名下——逐变体解析、全部用于 ONESQL 查询，缺一个就会漏同步该选项名下的工作项。
+  // 每个变体独立解析：先查 label 精确等于该变体的 confirmed 身份缓存，miss 则实时精确唯一匹配并落缓存；
+  // 解析失败的变体落候选事件，不做模糊归属。返回去重后的 optionId 列表（全称在前）。
+  private async resolveOnesCustomerOptions(customer: Customer): Promise<string[]> {
     const names = [...new Set([customer.name, customer.shortName].filter((name): name is string => !!name))];
-    const existing = this.db.listIdentities(customer.id).find((item) =>
-      item.system === 'ones_customer_option' && item.status === 'confirmed' && names.includes(String(item.label)));
-    if (existing?.external_id) return String(existing.external_id);
-
+    const optionIds = new Set<string>();
     const candidates: Array<{ option: Record<string, unknown>; exact: boolean }> = [];
+
     for (const name of names) {
+      const existing = this.db.listIdentities(customer.id).find((item) =>
+        item.system === 'ones_customer_option' && item.status === 'confirmed' && String(item.label) === name);
+      if (existing?.external_id) { optionIds.add(String(existing.external_id)); continue; }
+
       const result = await this.mcp.call('mcp__ones__search_for_issue_field_options', {
         fieldID: ONES_CUSTOMER_FIELD_ID,
         input: name,
@@ -782,7 +789,8 @@ export class PortfolioSyncService {
         const optionId = asText(exact[0].uuid ?? exact[0].id);
         if (optionId) {
           this.db.upsertIdentity(customer.id, 'ones_customer_option', optionId, name, 'confirmed');
-          return optionId;
+          optionIds.add(optionId);
+          continue;
         }
       }
       for (const item of exact.length > 1 ? exact : options) {
@@ -806,18 +814,18 @@ export class PortfolioSyncService {
         attributionStatus: exact ? 'ambiguous' : 'unattributed',
       });
     }
-    return null;
+    return [...optionIds];
   }
 
   private async syncOnesCustomer(customer: Customer): Promise<number> {
     await this.ensureOnesqlGrammar();
-    const optionId = await this.resolveOnesCustomerOption(customer);
-    if (!optionId) return 0;
+    const optionIds = await this.resolveOnesCustomerOptions(customer);
+    if (!optionIds.length) return 0;
 
     const issues: Record<string, unknown>[] = [];
     let cursor = '';
     for (let page = 0; page < 20; page++) {
-      const result = await this.mcp.call('mcp__ones__query_issues_by_onesql', { query: buildOnesCustomerQuery(optionId, cursor) });
+      const result = await this.mcp.call('mcp__ones__query_issues_by_onesql', { query: buildOnesCustomerQuery(optionIds, cursor) });
       if (result.isError) throw new Error(result.text);
       const parsed = parseOnesIssuePage(result.text);
       issues.push(...parsed.records);
