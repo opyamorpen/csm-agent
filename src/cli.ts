@@ -159,7 +159,8 @@ function help(): void {
   csm-agent hemory ignore <片段ID...>
   csm-agent hemory regenerate <片段ID...> [--wait]
     （按天强制重生成：片段决定要重建的「客户+上海日」，各天全部已确认片段参与，
-     当天旧草稿作废；--wait 轮询生成任务到终态）
+     当天旧草稿作废；--wait 轮询生成任务到终态。已写入草稿消费过的片段不再被
+     同类型重复提案——全部消费时任务以备注收尾，不产出新草稿）
   csm-agent drafts [客户ID或名称] [--all] [--json]
   csm-agent draft review <批次ID>
   csm-agent draft retry <草稿ID>
@@ -609,6 +610,7 @@ async function waitDraftJobs(jobIds: string[], maxAttempts = 90): Promise<any[]>
 function printDraftJobSummary(jobs: any[]): void {
   const failed = jobs.filter((job) => job.status === 'failed');
   for (const job of failed) console.log(`草稿生成任务 ${job.id} 失败：${job.error ?? '未知原因'}`);
+  for (const job of jobs.filter((job) => job.status !== 'failed' && job.note)) console.log(`草稿生成任务 ${job.id}：${job.note}`);
   if (!failed.length) console.log(`草稿生成完成（${jobs.length} 个任务）。运行 csm-agent drafts 查看新草稿。`);
   if (failed.length) process.exitCode = 2;
 }
@@ -678,6 +680,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
       end: item.payload?.endAt ?? item.occurredAt, recording: item.payload?.recordingId, topic: item.payload?.topic ?? item.title,
       part: item.payload?.topicGroupId ? `${item.payload?.topicPartIndex}/${item.payload?.topicPartCount}` : '',
       summary: String(item.payload?.summary ?? '').slice(0, 80), speakers: (item.payload?.speakers ?? []).join(','), status: item.attributionStatus,
+      consumed: (item.consumedBy ?? []).join(',') || '',
       customer: customer ? customer.name : customers?.find((c: any) => c.id === item.customerId)?.name ?? '' })));
     return;
   }
@@ -886,6 +889,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
       console.log(`任务 ${job.id}`);
       console.log(`  客户：${nameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''} · 状态 ${job.status} · 尝试 ${job.attempts} 次`);
       if (job.error) console.log(`  错误：${job.error}`);
+      if (job.note) console.log(`  备注：${job.note}`);
       if (job.fragments?.length) {
         console.log(`  涉及片段（${job.fragments.length} 个）：`);
         for (const fragment of job.fragments) console.log(`    ${fragment.id} · ${fragment.topic}${fragment.summary ? `：${String(fragment.summary).slice(0, 60)}` : ''}`);

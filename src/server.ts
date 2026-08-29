@@ -21,7 +21,7 @@ import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from 
 import { CaseService } from './workbench/cases.js';
 import { WecomTodoService, scheduleWecomSync } from './workbench/wecom.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate } from './workbench/drafts.js';
-import type { DraftBatch, DraftItem, DraftGenerationJob } from './workbench/types.js';
+import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
 import { WikiService } from './workbench/wiki.js';
@@ -193,6 +193,31 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       fragments.push({ id: event.id, occurredAt: event.occurredAt, topic: event.title, summary: summary.slice(0, 120) });
     }
     return { ...job, dateKey: dateKey || undefined, fragments };
+  }
+
+  // 片段消费台账可见性：每片段标注被哪些类型的已写入草稿消费（written 草稿 evidence_refs 反查，按客户一次构建）。
+  function decorateHemoryFragments(fragments: SourceEvent[]): Array<SourceEvent & { consumedBy?: DraftItemType[] }> {
+    const byCustomer = new Map<string, Map<string, DraftItemType[]>>();
+    const consumedOf = (customerId: string): Map<string, DraftItemType[]> => {
+      let map = byCustomer.get(customerId);
+      if (!map) {
+        map = new Map();
+        for (const [type, ids] of workbench.db.writtenEvidenceByType(customerId)) {
+          for (const id of ids) {
+            const list = map.get(id) ?? [];
+            list.push(type);
+            map.set(id, list);
+          }
+        }
+        byCustomer.set(customerId, map);
+      }
+      return map;
+    };
+    return fragments.map((fragment) => {
+      if (!fragment.customerId) return fragment;
+      const consumedBy = consumedOf(fragment.customerId).get(fragment.id);
+      return consumedBy?.length ? { ...fragment, consumedBy } : fragment;
+    });
   }
 
   function makeAgent(session: Session): AgentSession {
@@ -389,7 +414,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           recordingId: url.searchParams.get('recording_id') ?? undefined,
           cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100),
           days: daysParam == null ? undefined : Math.max(0, Number(daysParam) || 0) });
-        return json(res, 200, { fragments, nextCursor: fragments.at(-1)?.occurredAt ?? null });
+        return json(res, 200, { fragments: decorateHemoryFragments(fragments), nextCursor: fragments.at(-1)?.occurredAt ?? null });
       }
       if (req.method === 'PUT' && path === '/api/hemory/fragments/ignore') {
         const body = await readBody(req);

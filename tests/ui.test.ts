@@ -698,3 +698,14 @@ test('wiki page picker replaces manual page id input for case and weekly publish
   assert.match(styles, /\.wiki-tree-host \{/);
   assert.match(styles, /\.wiki-tree-node \{/);
 });
+
+test('hemory inbox shows consumption badges for fragments written to business systems', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/function renderHemoryFragmentRow[\s\S]*?\n  \}\n\n  \/\*\* 已归属视图的客户分组标题/)?.[0];
+
+  // 显示契约：片段卡片显示「已写入·工单/跟进」消费徽标，类型映射为中文短标签。
+  assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
+  assert.match(renderer, /Array\.isArray\(fragment\.consumedBy\) && fragment\.consumedBy\.length/);
+  assert.match(renderer, /const typeLabels = \{ internal_todo: '行动', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' \}/);
+  assert.match(renderer, /已写入·\$\{label\}/);
+});

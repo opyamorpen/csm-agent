@@ -507,10 +507,12 @@ export function onesAsrAliasRule(): string {
   return `转写由语音识别生成，产品名 ONES 常被误转为发音相近的词（如 ${ONES_PHONETIC_ALIASES.join('、')} 等）。凡上下文指代产品之处，一律优先理解为并写作 ONES（引用客户原话时同样订正为 ONES）；仅当上下文明确指向其他事物（如人名）时保留原词。`;
 }
 
-async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[]): Promise<DraftProposal[]> {
+async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[],
+  consumedTypes?: Map<string, DraftItemType[]>): Promise<DraftProposal[]> {
   const unpublished = new Set(unpublishedEvents.map((event) => event.id));
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
     published: !unpublished.has(event.id),
+    consumed_types: consumedTypes?.get(event.id) ?? [],
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [], text: textOf(event) }));
   const requiredGuide = (Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[])
     .map((type) => `- ${type}：${ONES_DESK_FIELD_SPECS[type].map((spec) => `${spec.label}（${spec.options ? Object.keys(spec.options).join('|') : '成员名'}）`).join('、')}`)
@@ -529,7 +531,7 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
     + `${requiredGuide}\n`
     + `ones_required 证据不足时的保守默认：服务类目→其他、是否客户付费→否、运维工程师→吴孟淋、优先级→P2、实例部署类型→私有云、环境类型→PRD（生产环境）、是否稳定复现→偶现、建议类型→新需求；所属模块/所属产品必须按下方分类指引选最接近的一项，不得留空。\n`
     + `${classificationGuide}\n`
-    + `每条草稿的 evidence_refs 必须列出它依据的证据 id。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
+    + `每条草稿的 evidence_refs 必须列出它依据的证据 id。consumed_types 列出该片段已被哪些类型的已写入草稿消费过：禁止基于片段已消费的类型再次提出该类型草稿（如某片段 consumed_types 含 ticket，不得再基于它提出 ticket），只有未消费类型仍可提案。不得猜测负责人、日期、时长或事实，缺失值写 "unknown" 并列入 unknowns（ones_required 除外，按上面的保守默认给值）。\n`
     + `只输出 JSON：{"drafts":[{"type":"...","title":"...","summary":"...","fields":{},"evidence_refs":["..."],"unknowns":[]}]}。\n`
     + `客户：${customer.name}（CRM ${customer.id}${customer.usageVersion ? `，使用版本 ${customer.usageVersion}` : ''}）\n证据：${JSON.stringify(evidence)}`;
   // 中继端点偶发连接超时（坏窗口可持续数分钟）：complete 不抛异常而是返回 stopReason='error' +
@@ -590,6 +592,11 @@ export function draftFingerprint(customerId: string, dateKey: string, events: So
 
 export function sortedDraftEvents(events: SourceEvent[]): SourceEvent[] {
   return [...events].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** 事件集合成员判定（process 消费映射构建用）。 */
+function byIdIn(events: SourceEvent[], id: string): boolean {
+  return events.some((event) => event.id === id);
 }
 
 /**
@@ -717,9 +724,8 @@ export class HemoryDraftService {
       // 同一天片段集合已有可用批次时保持幂等，直接复用原任务；只有批次已作废才需要换盐重新生成。
       return { jobId: this.db.findDraftJobByFingerprint(fingerprint)?.id ?? '', fingerprint };
     }
-    this.db.markDraftsStaleForEvents(events.map((event) => event.id));
-    // 同日重建即宣告旧失败任务已被替代：标记 superseded，失败卡片不再堆积、重启也不再重试。
-    this.db.supersedeFailedDraftJobsForDay(customerId, dateKey);
+    // 作废旧批次与 supersede 失败任务后移到 process() 有提案之后执行：零提案（证据全被已写入
+    // 草稿消费）不作废旧草稿，生成失败也不再先作废——旧待处理草稿在模型调用窗口内仍可确认。
     const finalFingerprint = existing || force
       ? hash(`${fingerprint}:regenerate:${Date.now()}:${Math.random()}`)
       : fingerprint;
@@ -760,15 +766,41 @@ export class HemoryDraftService {
       const followupEvents = cutoff
         ? events.filter((event) => new Date(event.occurredAt).getTime() > new Date(cutoff).getTime())
         : events;
+      // 消费台账：客户各类型已写入草稿引用过的片段不再被同类型消费（如已写入工单的片段不再重新
+      // 提案工单）。计算式推导自 written 草稿，假 written 被修复翻转后消费自动解除。
+      const writtenEvidence = this.db.writtenEvidenceByType(customer.id);
+      const consumedTypesByEvent = new Map<string, DraftItemType[]>();
+      for (const [type, ids] of writtenEvidence) {
+        for (const id of ids) {
+          if (!byIdIn(events, id)) continue;
+          const list = consumedTypesByEvent.get(id) ?? [];
+          list.push(type);
+          consumedTypesByEvent.set(id, list);
+        }
+      }
+      // 工时消费独立于 followup 豁免：跟进写入失败但工时已写入时，再生成不得重复计工时。
+      const writtenWorkhours = writtenEvidence.get('workhour') ?? new Set<string>();
+      const workhourEvents = followupEvents.filter((event) => !writtenWorkhours.has(event.id));
       // 草稿质量完全依赖模型：模型调用失败就令任务 failed 并给出明确错误，绝不静默降级到规则兜底
       // （兜底草稿无分节摘要、无 ones_required 提案、描述塞原始转写，曾被误当正常草稿写入 CRM/ONES）。
       // 失败任务不建批次，用户在草稿箱点「重新生成」即可重试。
       if (!this.runtime) throw new Error('模型未配置，无法生成草稿（请检查 LLM 配置后重新生成）');
       let ai: DraftProposal[];
-      try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents); }
+      try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents, consumedTypesByEvent); }
       catch (error) { throw new Error(`模型未生成草稿: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
-      const proposals = this.buildProposals(ai, customer, events, followupEvents, dateKey);
+      const proposals = this.buildProposals(ai, customer, events, followupEvents, workhourEvents, dateKey, writtenEvidence);
+      // 零提案守卫：全部证据片段均已被已写入草稿消费时不建批次、不作废旧批次、不 supersede 失败
+      // 任务，任务以 succeeded + note 收尾——避免「空转作废」把仍有效的待处理草稿打 stale。
+      if (!proposals.length) {
+        const note = '当天证据片段均已被已写入草稿消费，未生成新草稿';
+        this.db.updateDraftJob(jobId, 'succeeded', null, note);
+        this.db.audit('agent', 'generate_hemory_drafts', 'draft_job', jobId, { customerId: customer.id, dateKey, skipped: 'fully-consumed', sourceEventIds: events.map((event) => event.id) });
+        return;
+      }
+      // 有新提案才作废旧批次与宣告旧失败任务被替代（从 generateForDay 后移至此）。
+      this.db.markDraftsStaleForEvents(events.map((event) => event.id));
+      this.db.supersedeFailedDraftJobsForDay(customer.id, dateKey);
       // 工时草稿的写工具按 ONES 实例工时模式绑定；模式获取失败只降级为该草稿的校验错误，不拖垮整个生成任务。
       let workhourBinding: WorkhourToolBinding = { mode: null, error: null };
       if (proposals.some((proposal) => proposal.type === 'workhour')) {
@@ -796,7 +828,7 @@ export class HemoryDraftService {
       // 同客户同日只保留一个活跃批次：临创建前作废包含当天片段的其他批次（含并发任务先建者），已写入项不受影响。
       this.db.markDraftsStaleForEvents(events.map((event) => event.id), batch.id);
       if (!batch.items?.length) {
-        for (const proposal of proposals) this.createItem(batch, customer, events, proposal, workhourBinding);
+        for (const proposal of proposals) this.createItem(batch, customer, events, proposal, workhourBinding, writtenEvidence.get(proposal.type));
       }
       this.db.refreshDraftBatchStatus(batch.id);
       this.db.updateDraftJob(jobId, 'succeeded');
@@ -809,14 +841,16 @@ export class HemoryDraftService {
   }
 
   /**
-   * 最终提案集合：followup 恒为一条（合并当天全部未发布沟通），有 followup 就连带一条 workhour（录音时长 + 一句话描述）；
-   * 其余类型沿用 LLM 提案与关键词兜底，可多条。
+   * 最终提案集合：followup 恒为一条（合并当天全部未发布沟通），有可计工时沟通就连带一条 workhour（录音时长 + 一句话描述）；
+   * 其余类型沿用 LLM 提案与关键词兜底，可多条，且证据片段不得已被同类型已写入草稿消费。
    */
-  private buildProposals(ai: DraftProposal[], customer: Customer, events: SourceEvent[], followupEvents: SourceEvent[], dateKey: string): DraftProposal[] {
+  private buildProposals(ai: DraftProposal[], customer: Customer, events: SourceEvent[], followupEvents: SourceEvent[],
+    workhourEvents: SourceEvent[], dateKey: string, writtenEvidence?: Map<DraftItemType, Set<string>>): DraftProposal[] {
     const proposals: DraftProposal[] = [];
     if (followupEvents.length) {
       const followup = this.mergedFollowupProposal(ai, customer, followupEvents, dateKey);
-      proposals.push(followup, this.workhourProposal(customer, followupEvents, dateKey, followup));
+      if (workhourEvents.length) proposals.push(followup, this.workhourProposal(customer, workhourEvents, dateKey, followup));
+      else proposals.push(followup);
     }
     const seen = new Set<string>();
     const byId = new Map(events.map((event) => [event.id, event]));
@@ -824,6 +858,17 @@ export class HemoryDraftService {
       if (proposal.type === 'followup' || proposal.type === 'workhour') continue; // 这两类结构化生成，不信任模型多条输出
       const key = `${proposal.type}::${proposal.title}`;
       if (seen.has(key) || proposals.length >= MAX_DRAFT_ITEMS) continue;
+      // 消费台账硬过滤：提案证据解析到当天事件的集合（解析为空回退整批事件）剔除已被同类型已写入
+      // 草稿消费的片段后为空即整体丢弃（该类型证据已全部消费，宁缺毋滥）；保留的提案证据重写为
+      // 未消费子集，保证消费单调递增——新草稿只对增量片段持有证据引用。
+      const consumedOfType = writtenEvidence?.get(proposal.type);
+      if (consumedOfType?.size) {
+        const referenced = (proposal.evidenceRefs ?? []).flatMap((id) => { const event = byId.get(id); return event ? [event.id] : []; });
+        const base = referenced.length ? referenced : events.map((event) => event.id);
+        const effective = base.filter((id) => !consumedOfType.has(id));
+        if (!effective.length) continue;
+        if (referenced.length) proposal.evidenceRefs = effective;
+      }
       // ONES 工作项宁缺毋滥：LLM 语义判定之外，其证据片段文本还必须命中该类型的业务信号；
       // 无信号即丢弃（内容仍保留在沟通记录里），证据引用缺失时按整批事件判定。
       const deskType = onesDeskTypeId(proposal.type);
@@ -879,14 +924,17 @@ export class HemoryDraftService {
       unknowns: hours == null ? ['工时时长（录音时间缺失，请人工补充）'] : [] };
   }
 
-  private createItem(batch: DraftBatch, customer: Customer, events: SourceEvent[], proposal: DraftProposal, workhourBinding?: WorkhourToolBinding): DraftItem {
+  private createItem(batch: DraftBatch, customer: Customer, events: SourceEvent[], proposal: DraftProposal, workhourBinding?: WorkhourToolBinding,
+    consumedOfType?: Set<string>): DraftItem {
     const available = new Map(events.map((event) => [event.id, event]));
     const itemEvents = (proposal.evidenceRefs ?? []).flatMap((id) => {
       const event = available.get(id);
       return event ? [event] : [];
     });
-    // 证据引用缺失或不合法时回退到整批事件，避免草稿失去 evidence_refs。
-    const evidence = itemEvents.length ? [...itemEvents].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) : events;
+    // 证据引用缺失或不合法时回退到整批事件，避免草稿失去 evidence_refs；回退链同样剔除
+    // 已被同类型已写入草稿消费的片段（消费台账硬过滤的兜底路径）。
+    const fallback = consumedOfType?.size ? events.filter((event) => !consumedOfType.has(event.id)) : events;
+    const evidence = itemEvents.length ? [...itemEvents].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) : fallback;
     const evidenceRefs = evidence.map((event) => event.id);
     const fields = { ...(proposal.fields ?? {}), customer_id: customer.id, customer_name: customer.name,
       evidence_refs: evidenceRefs, evidence_quotes: evidence.map(textOf), occurred_at: evidence[0]?.occurredAt ?? new Date().toISOString() };

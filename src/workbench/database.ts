@@ -13,6 +13,7 @@ import type {
   DraftBatch,
   DraftGenerationJob,
   DraftItem,
+  DraftItemType,
   DraftItemStatus,
   HemoryAttributionOverride,
   HemorySegmentationJob,
@@ -520,6 +521,9 @@ export class WorkbenchDatabase {
     const draftJobColumns = this.db.prepare('PRAGMA table_info(draft_generation_jobs)').all() as Row[];
     if (!draftJobColumns.some((column) => String(column.name) === 'kind')) {
       this.db.exec("ALTER TABLE draft_generation_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'hemory';");
+    }
+    if (!draftJobColumns.some((column) => String(column.name) === 'note')) {
+      this.db.exec('ALTER TABLE draft_generation_jobs ADD COLUMN note TEXT;');
     }
     const customerColumns = this.db.prepare('PRAGMA table_info(customers)').all() as Row[];
     if (!customerColumns.some((column) => String(column.name) === 'after_sales_stage')) {
@@ -1208,6 +1212,7 @@ export class WorkbenchDatabase {
       sourceEventIds: parseJson(row.source_event_ids_json, []), status: String(row.status) as DraftGenerationJob['status'],
       attempts: Number(row.attempts), error: row.error as string | null,
       kind: (String(row.kind ?? 'hemory') === 'weekly_report' ? 'weekly_report' : 'hemory'),
+      note: row.note as string | null,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
   }
 
@@ -1264,10 +1269,26 @@ export class WorkbenchDatabase {
     return this.getDraftBatch(batchId);
   }
 
-  updateDraftJob(id: string, status: DraftGenerationJob['status'], error?: string | null): DraftGenerationJob | undefined {
-    this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,updated_at=? WHERE id=?`)
-      .run(status, status, error ?? null, nowIso(), id);
+  updateDraftJob(id: string, status: DraftGenerationJob['status'], error?: string | null, note?: string | null): DraftGenerationJob | undefined {
+    this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,note=COALESCE(?,note),updated_at=? WHERE id=?`)
+      .run(status, status, error ?? null, note ?? null, nowIso(), id);
     return this.getDraftJob(id);
+  }
+
+  /**
+   * 已写入草稿的消费台账：客户维度各草稿类型已消费（written 草稿 evidence_refs 引用）的片段 ID 集合。
+   * 计算式推导不落新表——written 是唯一权威状态，假 written 被 repair 翻转后消费自动解除。
+   */
+  writtenEvidenceByType(customerId: string): Map<DraftItemType, Set<string>> {
+    const consumed = new Map<DraftItemType, Set<string>>();
+    const rows = this.db.prepare("SELECT type,evidence_refs_json FROM draft_items WHERE customer_id=? AND status='written'").all(customerId) as Row[];
+    for (const row of rows) {
+      const type = String(row.type) as DraftItemType;
+      let set = consumed.get(type);
+      if (!set) { set = new Set<string>(); consumed.set(type, set); }
+      for (const eventId of parseJson<string[]>(row.evidence_refs_json, [])) set.add(eventId);
+    }
+    return consumed;
   }
 
   /**

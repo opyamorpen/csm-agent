@@ -218,3 +218,21 @@ test('customer overview CLI reports the aggregated last interaction time', () =>
   assert.ok(showCustomer, 'showCustomer source was not found');
   assert.match(showCustomer, /最后互动: \$\{overview\.lastInteractionAt \?\? overview\.customer\.lastContactAt \?\? 'unknown'\}/);
 });
+
+test('fragment consumption ledger is visible across CLI and API contracts', () => {
+  const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+
+  // inbox 表格补 consumed 列（片段被哪些类型的已写入草稿消费）。
+  const inbox = cli.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
+  assert.ok(inbox, 'hemoryCommand source was not found');
+  assert.match(inbox, /consumed: \(item\.consumedBy \?\? \[\]\)\.join\(','\) \|\| ''/);
+  // 生成任务备注：regenerate --wait / draft jobs 展示「未生成新草稿」结论，与失败错误并列输出。
+  assert.match(cli, /job\.status !== 'failed' && job\.note/);
+  assert.match(cli, /备注：\$\{job\.note\}/);
+  // 服务端同一契约：fragments 响应附 consumedBy（written 草稿 evidence_refs 反查）。
+  assert.match(server, /decorateHemoryFragments\(fragments\)/);
+  assert.match(server, /writtenEvidenceByType\(customerId\)/);
+  // usage 说明消费语义。
+  assert.match(cli, /已写入草稿消费过的片段不再被[\s\S]*?同类型重复提案/);
+});

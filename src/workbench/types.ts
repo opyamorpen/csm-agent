@@ -237,6 +237,8 @@ export interface DraftGenerationJob {
   error?: string | null;
   /** 生成任务种类：hemory 日草稿（默认）或 weekly_report 实施周报；resume 与轮询按 kind 认领。 */
   kind?: 'hemory' | 'weekly_report';
+  /** 任务备注：零提案跳过等非失败结论的人读解释（如「当天证据片段均已被已写入草稿消费」）。 */
+  note?: string | null;
   createdAt: string;
   updatedAt: string;
 }

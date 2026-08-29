@@ -784,6 +784,114 @@ test('workbench: CRM followup events also count as published signal for the day 
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: written draft items consume fragments per type and block duplicate proposals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-consumed-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-c1', name: '客户澈' });
+    // 两个带缺陷信号的片段：f1 已被写入工单消费，f2 是同日后补归属的新片段。
+    // ticket 信号门控只采标题/分段摘要不扫转写原文，summary 必须带信号词。
+    const f1 = segment(db, 'crm-c1', 'rc1:a', 'rc1', '白屏话题', '2026-08-25T05:00:00Z', '页面白屏报错无法使用', '页面白屏报错无法使用');
+    const f2 = segment(db, 'crm-c1', 'rc1:b', 'rc1', '统计话题', '2026-08-25T07:00:00Z', '统计又报错了数据不对', '统计报错数据不对');
+    // 第一轮：模型只提案 f1 的工单；确认写入（直接置 written 模拟 ONES 回写完成）。
+    const first = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
+      { type: 'ticket', title: '白屏工单', summary: '客户反馈白屏', evidence_refs: [f1.id] },
+    ]));
+    const queued = first.enqueue('crm-c1', [f1.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch1 = db.listDraftBatches('crm-c1').find((item) => item.items?.some((entry) => entry.type === 'ticket'))!;
+    db.setDraftItemExecution(batch1.items!.find((item) => item.type === 'ticket')!.id, 'written',
+      { result: { response: '{"result":"SUCCESS"}' } });
+    // 第二轮：强制再生成。模型仍提案已消费的 f1 工单（复现重复入口）、覆盖 f1+f2 的混合工单、只覆盖 f2 的新工单。
+    const second = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
+      { type: 'ticket', title: '白屏工单', summary: '客户反馈白屏', evidence_refs: [f1.id] },
+      { type: 'ticket', title: '混合工单', summary: '两个故障', evidence_refs: [f1.id, f2.id] },
+      { type: 'ticket', title: '新工单', summary: '新故障', evidence_refs: [f2.id] },
+    ]));
+    const regenerated = second.regenerateByEventIds([f1.id]);
+    await waitForJob(db, regenerated.jobs[0]!.jobId);
+    const active = db.listDraftBatches('crm-c1').find((item) => item.items?.some((entry) => entry.title === '新工单'))!;
+    const tickets = active.items!.filter((item) => item.type === 'ticket');
+    // 完全被消费的提案整体丢弃；部分消费的保留但证据只剩未消费片段（消费单调递增）。
+    assert.ok(!tickets.some((item) => item.title === '白屏工单'), '已写入工单不得原样重复提案');
+    const mixed = tickets.find((item) => item.title === '混合工单');
+    assert.ok(mixed, '部分消费的工单提案应保留');
+    assert.deepEqual(mixed!.evidenceRefs, [f2.id]);
+    const fresh = tickets.find((item) => item.title === '新工单');
+    assert.ok(fresh, '未消费片段的新工单应保留');
+    assert.deepEqual(fresh!.evidenceRefs, [f2.id]);
+    // 粒度按片段×类型：f1 只被工单消费，跟进/工时草稿仍覆盖两个片段。
+    const followup = active.items!.find((item) => item.type === 'followup')!;
+    assert.deepEqual([...followup.evidenceRefs].sort(), [f1.id, f2.id].sort());
+    // 旧批次的已写入工单保持 written（终态保护）。
+    assert.equal(db.getDraftItem(batch1.items!.find((item) => item.type === 'ticket')!.id)!.status, 'written');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: fully consumed day skips generation with a note and keeps pending drafts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-skip-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-c2', name: '客户檀' });
+    const f1 = segment(db, 'crm-c2', 'rc2:a', 'rc2', '白屏话题', '2026-08-25T05:00:00Z', '页面白屏报错无法使用');
+    // 第一轮：工单 + 待办 + 自动跟进/工时；工单、跟进、工时全部写入，待办留待处理。
+    const first = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
+      { type: 'ticket', title: '白屏工单', summary: '客户反馈白屏', evidence_refs: [f1.id] },
+      { type: 'internal_todo', title: '跟进排期', summary: '确认修复排期', evidence_refs: [f1.id] },
+    ]));
+    const queued = first.enqueue('crm-c2', [f1.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch1 = db.listDraftBatches('crm-c2')[0];
+    for (const item of batch1.items!) {
+      if (item.type !== 'internal_todo') db.setDraftItemExecution(item.id, 'written', { result: { response: '{"result":"SUCCESS"}' } });
+    }
+    const todoId = batch1.items!.find((item) => item.type === 'internal_todo')!.id;
+    // 第二轮：模型只提案已被消费的工单——全部类型消费完毕，应零提案收尾而非空转作废。
+    const second = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([
+      { type: 'ticket', title: '白屏工单', summary: '客户反馈白屏', evidence_refs: [f1.id] },
+    ]));
+    const regenerated = second.regenerateByEventIds([f1.id]);
+    await waitForJob(db, regenerated.jobs[0]!.jobId);
+    const job = db.getDraftJob(regenerated.jobs[0]!.jobId)!;
+    assert.equal(job.status, 'succeeded');
+    assert.match(job.note ?? '', /均已被已写入草稿消费/);
+    // 零提案守卫：不建新批次、未写入的待办草稿不被作废。
+    assert.equal(db.listDraftBatches('crm-c2').length, 1);
+    assert.notEqual(db.getDraftItem(todoId)!.status, 'stale');
+    // 跳过结论落审计（entity=draft_job，含当日片段集合）。
+    const skipped = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='generate_hemory_drafts' AND entity_type='draft_job' AND entity_id=?").get(job.id) as { n: number };
+    assert.equal(skipped.n, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: written workhour consumes fragments without blocking the failed followup retry', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-wh-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-c3', name: '客户棠' });
+    const f1 = segment(db, 'crm-c3', 'rc3:a', 'rc3', '部署话题', '2026-08-25T05:00:00Z', '沟通了报表需求');
+    // 第一轮：跟进写入失败、工时已写入——再生成必须只重出跟进，不得重复计工时。
+    const first = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const queued = first.enqueue('crm-c3', [f1.id]);
+    await waitForJob(db, queued[0]!.jobId);
+    const batch1 = db.listDraftBatches('crm-c3')[0];
+    db.setDraftItemExecution(batch1.items!.find((item) => item.type === 'workhour')!.id, 'written',
+      { result: { response: '{"result":"SUCCESS"}' } });
+    db.setDraftItemExecution(batch1.items!.find((item) => item.type === 'followup')!.id, 'failed',
+      { error: 'CRM 回写业务失败' });
+    const second = new HemoryDraftService(db, fakeMcpForDrafts(), fakeModelRuntime([]));
+    const regenerated = second.regenerateByEventIds([f1.id]);
+    await waitForJob(db, regenerated.jobs[0]!.jobId);
+    const active = db.listDraftBatches('crm-c3').find((item) => item.items?.some((entry) => entry.type === 'followup' && entry.status !== 'stale'))!;
+    // 跟进可重出（未消费），工时不重复（片段已被 written 工时消费）。
+    const newFollowup = active.items!.find((item) => item.type === 'followup' && item.status !== 'stale')!;
+    assert.deepEqual(newFollowup.evidenceRefs, [f1.id]);
+    assert.ok(!active.items!.some((item) => item.type === 'workhour' && item.status !== 'stale'), '工时已写入后不得连带重复生成');
+    // 旧批次的 written 工时保持终态。
+    assert.equal(db.getDraftItem(batch1.items!.find((item) => item.type === 'workhour')!.id)!.status, 'written');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: multi-day attribution creates one batch per Shanghai day', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));
   const db = new WorkbenchDatabase(dir);

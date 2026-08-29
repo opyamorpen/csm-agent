@@ -1058,6 +1058,12 @@
       : fragment.attributionStatus === 'ignored' ? badge('已忽略', 'muted')
       : badge('待归属', 'warning');
     head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
+    // 消费台账徽标：该片段已被哪些类型的已写入草稿消费（如工单已写入），提示再生成不会重复产出该类型。
+    if (Array.isArray(fragment.consumedBy) && fragment.consumedBy.length) {
+      const typeLabels = { internal_todo: '行动', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' };
+      const label = fragment.consumedBy.map((type) => typeLabels[type] ?? type).join('/');
+      head.append(badge(`已写入·${label}`, 'muted'));
+    }
     // 同一事件被打断后再次出现时共享话题组，徽标提示分段序号，方便合并归属。
     if (fragment.payload?.topicGroupId) {
       head.append(el('span', 'fragment-topic-part', `同话题 ${fragment.payload.topicPartIndex ?? '?'}/${fragment.payload.topicPartCount ?? '?'}`));
