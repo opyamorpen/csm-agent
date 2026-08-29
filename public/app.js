@@ -1369,12 +1369,6 @@
     } catch (error) { alertDialog(error.message); }
   }
 
-  async function confirmDraftBatch(batch, container) {
-    const itemIds = [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.itemId);
-    if (!itemIds.length) return alertDialog('请选择要确认的草稿');
-    if (await confirmDraftItems(batch.id, itemIds)) await Promise.all([loadDraftBatches(), loadActions()]);
-  }
-
   /** 忽略单条草稿（单卡忽略与浮动条批量忽略共用）：确认后软删除，批次状态由服务端刷新。 */
   async function ignoreDraftItem(item) {
     if (!await confirmDialog(`忽略草稿「${item.title}」？忽略后不再出现在待处理列表（已写入项不受影响）。`)) return false;
@@ -1441,13 +1435,7 @@
       const customer = customersCache.find((item) => item.id === batch.customerId);
       const title = el('div'); title.append(el('strong', null, customer?.name || batch.customerId), el('div', 'cell-sub', `${formatDateTime(batch.updatedAt)} · ${batch.generator} · ${batch.status}`));
       const headActions = el('div', 'row-actions');
-      // 已忽略/已作废批次：条目全部禁用，确认与忽略按钮不再出现；重新生成是找回内容的出口，保留。
-      if (!archived.includes(batch)) {
-        const confirmButton = el('button', 'primary-command small', '确认所选草稿');
-        confirmButton.type = 'button';
-        confirmButton.onclick = () => confirmDraftBatch(batch, section);
-        headActions.append(confirmButton);
-      }
+      // 批次级「确认所选/忽略批次」已由单卡按钮 + 底部浮动条承担（整批忽略走 CLI draft dismiss），头部只留重新生成。
       // 存在校验错误（如 ONES 客户信息未解析）的草稿批次无法确认，同样允许重新生成以在问题修复后重绑参数。
       const hasBlockingErrors = (batch.items || []).some((item) => item.validationErrors?.length && !['written', 'dismissed', 'stale'].includes(item.status));
       if (['stale', 'partial', 'failed'].includes(batch.status) || hasBlockingErrors || !archived.includes(batch)) {
@@ -1463,17 +1451,6 @@
           catch (error) { alertDialog(error.message); }
         };
         headActions.append(regenerate);
-      }
-      // 忽略批次：作废/阻断批次不需要重生成时的软删除出口（已写入项不受影响）；纯作废批次已是终态，不再提供。
-      if (!archived.includes(batch) && (batch.items || []).some((item) => !['written', 'writing'].includes(item.status))) {
-        const dismiss = el('button', 'quiet-command small', '忽略批次');
-        dismiss.type = 'button';
-        dismiss.onclick = async () => {
-          if (!await confirmDialog('忽略后未写入的草稿不再出现在待处理列表（已写入项不受影响），继续？')) return;
-          try { await api(`/api/draft-batches/${batch.id}/dismiss`, { method: 'POST' }); await loadDraftBatches(); }
-          catch (error) { alertDialog(error.message); }
-        };
-        headActions.append(dismiss);
       }
       head.append(title, headActions);
       section.append(head);

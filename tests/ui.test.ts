@@ -39,7 +39,7 @@ test('draft inbox exposes regenerate control and operations label', () => {
   assert.match(source, /operations: '运维工单'/);
 });
 
-test('draft inbox separates fully stale batches into a dedicated tab and exposes dismiss control', () => {
+test('draft inbox separates fully stale batches into a dedicated tab without batch-level buttons', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
   const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
@@ -51,9 +51,10 @@ test('draft inbox separates fully stale batches into a dedicated tab and exposes
   assert.match(renderer, /还没有已忽略\/已作废批次/);
   assert.match(renderer, /还没有待处理草稿/);
   assert.match(source, /let activeDraftTab = 'pending';/);
-  // 已忽略/已作废批次的确认/忽略按钮不再渲染（条目全禁用，两按钮无意义）。
-  assert.match(renderer, /if \(!archived\.includes\(batch\)\) \{\s*const confirmButton/);
-  assert.match(renderer, /!archived\.includes\(batch\) && \(batch\.items \|\| \[\]\)\.some/);
+  // 批次级「确认所选/忽略批次」已删除：确认/忽略由单卡按钮与底部浮动条承担，批次头部只留重新生成。
+  assert.ok(!source.includes('confirmDraftBatch'), 'confirmDraftBatch should be gone');
+  assert.ok(!renderer.includes("el('button', 'quiet-command small', '忽略批次')"), 'batch-level dismiss button should be gone');
+  assert.ok(!renderer.includes('/api/draft-batches/${batch.id}/dismiss'), 'batch dismiss API call should be gone from web UI');
   // tab 按钮：index.html 提供两个 data-draft-tab，JS 绑定点击切换并整表重渲染。
   assert.match(page, /data-draft-tab="pending"/);
   assert.match(page, /data-draft-tab="archived"/);
@@ -63,9 +64,8 @@ test('draft inbox separates fully stale batches into a dedicated tab and exposes
   // 旧折叠方案彻底移除。
   assert.ok(!source.includes('draftArchivedExpanded'), 'draftArchivedExpanded should be gone');
   assert.ok(!source.includes('draft-archive-toggle'), 'draft-archive-toggle should be gone');
-  // 忽略批次：软删除出口，已写入项不受影响。
-  assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/dismiss/);
-  assert.match(renderer, /忽略后未写入的草稿不再出现在待处理列表/);
+  // 重新生成保留：作废/阻断批次找回内容的出口。
+  assert.match(renderer, /\/api\/draft-batches\/\$\{batch\.id\}\/regenerate/);
   // 状态徽标用服务端中文标签（statusLabel），禁用卡片灰化增强。
   assert.match(renderer, /item\.statusLabel \|\| item\.status/);
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
