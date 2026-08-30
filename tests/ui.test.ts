@@ -1276,3 +1276,41 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(caseCard, /contextStale/);
   assert.match(caseCard, /'数据已更新'/);
 });
+
+test('cursor ripple fx: theme tokens, header toggle, script guards and load order', () => {
+  const fx = readFileSync(new URL('../public/cursor-effects.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 双主题涟漪取色 token（同名全集由双主题契约测试守护，这里锁字面量）。
+  const lightBlock = styles.match(/\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1];
+  const darkBlock = styles.match(/\[data-theme="dark"\] \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(lightBlock, 'light theme token block was not found');
+  assert.ok(darkBlock, 'dark theme token block was not found');
+  assert.match(lightBlock, /--fx-wake: #2457c5;/);
+  assert.match(lightBlock, /--fx-ring: #3d85f8;/);
+  assert.match(darkBlock, /--fx-wake: #22d3ee;/);
+  assert.match(darkBlock, /--fx-ring: #4f8cff;/);
+
+  // index.html：顶栏开关（复刻 themeToggle 模式：localStorage 记忆 + 文案提示点击后果），脚本先于开关接线与 app.js 挂载。
+  assert.match(html, /id="cursorFxToggle"/);
+  assert.match(html, /localStorage\.setItem\('csm-cursor-fx', next \? 'on' : 'off'\)/);
+  assert.match(html, /window\.csmCursorFx\.setEnabled\(next\)/);
+  const fxIndex = html.indexOf('src="/cursor-effects.js"');
+  const fxWiringIndex = html.indexOf("getElementById('cursorFxToggle')");
+  const appIndex = html.indexOf('src="/app.js"');
+  assert.ok(fxIndex > 0, 'index.html 必须引入 /cursor-effects.js');
+  assert.ok(fxIndex < fxWiringIndex && fxWiringIndex < appIndex, 'cursor-effects.js 必须先于开关接线与 app.js');
+
+  // 动效脚本守卫：减弱动效强制关闭、双主题渲染分流、事件与逐帧循环、主题换色来源。
+  assert.match(fx, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/);
+  assert.match(fx, /localStorage\.getItem\('csm-cursor-fx'\) !== 'off'/);
+  assert.match(fx, /dark \? 'lighter' : 'source-over'/);
+  assert.match(fx, /window\.addEventListener\('pointermove'/);
+  assert.match(fx, /window\.addEventListener\('pointerdown'/);
+  assert.match(fx, /window\.csmCursorFx = \{/);
+  assert.match(fx, /getPropertyValue\('--fx-wake'\)/);
+  assert.match(fx, /getPropertyValue\('--fx-ring'\)/);
+  // 画布不挡交互：pointer-events:none 且压在模态框（z-index 50）之上。
+  assert.match(fx, /pointer-events:none;z-index:60/);
+});

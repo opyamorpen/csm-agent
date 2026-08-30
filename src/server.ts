@@ -404,7 +404,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(await readFile(join(publicDir, 'index.html'), 'utf8'));
       }
-      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/build-info.js'].includes(path)) {
+      if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/build-info.js', '/cursor-effects.js'].includes(path)) {
         const file = path.slice(1);
         const type = path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
           : path.endsWith('.svg') ? 'image/svg+xml; charset=utf-8' : 'text/html; charset=utf-8';
