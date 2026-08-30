@@ -1033,27 +1033,32 @@ test('dual theme tokens stay in sync and the theme switch is wired', () => {
 test('system background aurora layer loops in both themes behind translucent shell bars', () => {
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
-  // 显示契约：两套主题都提供光晕渐变层与半透明审批栏令牌（同名全集由双主题契约测试守护）。
+  // 显示契约：两套主题都提供双层光晕渐变与半透明审批栏令牌（同名全集由双主题契约测试守护）。
   const lightBlock = styles.match(/\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1];
   const darkBlock = styles.match(/\[data-theme="dark"\] \{([\s\S]*?)\n\}/)?.[1];
   for (const block of [lightBlock, darkBlock]) {
-    assert.match(block, /--body-aurora: radial-gradient/);
+    assert.match(block, /--body-aurora-a: radial-gradient/);
+    assert.match(block, /--body-aurora-b: radial-gradient/);
     assert.match(block, /--records-bg: rgba\(/);
   }
   // 深色基础底不再内嵌静态光晕（已迁入动效层，防双层叠加过亮）。
   assert.doesNotMatch(darkBlock, /--body-bg: radial-gradient/);
 
-  // body::before 承载循环动效：固定铺满、内容之下、不挡交互；reduced-motion 由全局降级收敛。
-  const aurora = styles.match(/body::before \{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(aurora, 'body::before aurora layer was not found');
-  assert.match(aurora, /position: fixed/);
-  assert.match(aurora, /background: var\(--body-aurora\)/);
-  assert.match(aurora, /pointer-events: none/);
-  assert.match(aurora, /z-index: -1/);
-  assert.match(aurora, /bg-aurora-drift \d+s ease-in-out infinite alternate/);
-  assert.match(aurora, /bg-aurora-breathe \d+s ease-in-out infinite alternate/);
-  assert.match(styles, /@keyframes bg-aurora-drift \{/);
-  assert.match(styles, /@keyframes bg-aurora-breathe \{/);
+  // ::before/::after 双层反向漂移+错相呼吸：刚性整体平移柔和色洗不可感知，双层相对运动才让色相流动可见。
+  const shared = styles.match(/body::before, body::after \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(shared, 'shared body::before/::after aurora base rule was not found');
+  assert.match(shared, /position: fixed/);
+  assert.match(shared, /pointer-events: none/);
+  assert.match(shared, /z-index: -1/);
+  const layerA = styles.match(/^body::before \{([\s\S]*?)\n\}/m)?.[1];
+  const layerB = styles.match(/^body::after \{([\s\S]*?)\n\}/m)?.[1];
+  assert.match(layerA, /background: var\(--body-aurora-a\)/);
+  assert.match(layerB, /background: var\(--body-aurora-b\)/);
+  assert.match(layerA, /bg-aurora-drift \d+s ease-in-out infinite alternate/);
+  assert.match(layerB, /bg-aurora-drift-b \d+s ease-in-out infinite alternate/);
+  for (const name of ['bg-aurora-drift', 'bg-aurora-drift-b', 'bg-aurora-breathe', 'bg-aurora-breathe-b']) {
+    assert.match(styles, new RegExp(`@keyframes ${name} \\{`));
+  }
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 
   // 外壳三栏（顶栏/侧栏/右栏）半透明毛玻璃双主题一致生效，透出漂移光晕。

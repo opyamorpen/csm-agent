@@ -8,10 +8,11 @@
   /* 表面 */
   --bg: #f1f4f8;
   --body-bg: linear-gradient(180deg, #e9f0fa 0%, #dfe6f2 100%);
-  /* 背景光晕层：body::before 的漂移渐变，勿用于组件。 */
-  --body-aurora: radial-gradient(58vw 50vh at 20% 14%, rgba(80, 126, 220, 0.4), rgba(80, 126, 220, 0) 100%),
-    radial-gradient(52vw 46vh at 82% 16%, rgba(34, 184, 207, 0.34), rgba(34, 184, 207, 0) 100%),
-    radial-gradient(64vw 52vh at 50% 96%, rgba(156, 122, 224, 0.32), rgba(156, 122, 224, 0) 100%);
+  /* 背景光晕层：body::before/::after 双层反向漂移的渐变，勿用于组件。 */
+  --body-aurora-a: radial-gradient(46vw 42vh at 22% 18%, rgba(80, 126, 220, 0.5), rgba(80, 126, 220, 0) 100%),
+    radial-gradient(40vw 36vh at 80% 16%, rgba(34, 184, 207, 0.44), rgba(34, 184, 207, 0) 100%);
+  --body-aurora-b: radial-gradient(48vw 42vh at 50% 90%, rgba(156, 122, 224, 0.42), rgba(156, 122, 224, 0) 100%),
+    radial-gradient(30vw 28vh at 66% 56%, rgba(240, 178, 122, 0.24), rgba(240, 178, 122, 0) 100%);
   --workbench-bg: transparent;
   --panel: #ffffff;
   --panel-2: #f7f9fc;
@@ -116,10 +117,11 @@
   /* 表面 */
   --bg: #0a1120;
   --body-bg: linear-gradient(180deg, #0a1120 0%, #101a3a 100%);
-  /* 背景光晕层：body::before 的漂移渐变（原静态霓虹晕迁入此层 + 居中紫晕），勿用于组件。 */
-  --body-aurora: radial-gradient(60vw 55vh at 78% 6%, rgba(34, 211, 238, 0.38), rgba(34, 211, 238, 0) 100%),
-    radial-gradient(58vw 55vh at 12% 92%, rgba(79, 140, 255, 0.4), rgba(79, 140, 255, 0) 100%),
-    radial-gradient(55vw 50vh at 50% 45%, rgba(139, 92, 246, 0.28), rgba(139, 92, 246, 0) 100%);
+  /* 背景光晕层：body::before/::after 双层反向漂移的渐变（原静态霓虹晕迁入 + 居中紫晕），勿用于组件。 */
+  --body-aurora-a: radial-gradient(46vw 44vh at 74% 10%, rgba(34, 211, 238, 0.48), rgba(34, 211, 238, 0) 100%),
+    radial-gradient(44vw 42vh at 16% 88%, rgba(79, 140, 255, 0.52), rgba(79, 140, 255, 0) 100%);
+  --body-aurora-b: radial-gradient(48vw 42vh at 50% 48%, rgba(139, 92, 246, 0.4), rgba(139, 92, 246, 0) 100%),
+    radial-gradient(34vw 32vh at 24% 52%, rgba(34, 211, 238, 0.22), rgba(34, 211, 238, 0) 100%);
   --workbench-bg: transparent;
   --panel: #101a2e;
   --panel-2: #15213a;
@@ -238,27 +240,40 @@ body {
   font: 15px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
 }
 
-/* 背景光晕层：在基础渐变之上持续漂移+呼吸（轻盈缓慢，循环往复）；
-   inset 过扫保证漂移不露底；只动 transform/opacity，合成器合成不触发重绘；
+/* 背景光晕层：::before/::after 双层反向漂移+错相呼吸——刚性平移柔和色洗人眼无法察觉，
+   双层相对运动让固定点的色相随时间持续变化，才是可感知的流动；
+   inset 过扫保证漂移/旋转不露底；只动 transform/opacity，合成器合成不触发重绘；
    reduced-motion 下由文末全局降级规则收敛为静态。 */
-body::before {
+body::before, body::after {
   content: "";
   position: fixed;
-  inset: -12%;
+  inset: -20%;
   z-index: -1;
   pointer-events: none;
-  background: var(--body-aurora);
-  animation: bg-aurora-drift 30s ease-in-out infinite alternate, bg-aurora-breathe 20s ease-in-out infinite alternate;
+}
+body::before {
+  background: var(--body-aurora-a);
+  animation: bg-aurora-drift 14s ease-in-out infinite alternate, bg-aurora-breathe 8s ease-in-out infinite alternate;
+}
+body::after {
+  background: var(--body-aurora-b);
+  animation: bg-aurora-drift-b 19s ease-in-out infinite alternate, bg-aurora-breathe-b 11s ease-in-out infinite alternate;
 }
 @keyframes bg-aurora-drift {
-  from { transform: translate3d(-4%, 2.5%, 0) scale(1); }
-  50% { transform: translate3d(3%, -3%, 0) scale(1.04); }
-  to { transform: translate3d(4%, 2.5%, 0) scale(1.07); }
+  from { transform: translate3d(-12%, -7%, 0) rotate(-2.5deg) scale(1); }
+  to { transform: translate3d(12%, 7%, 0) rotate(2.5deg) scale(1.08); }
+}
+@keyframes bg-aurora-drift-b {
+  from { transform: translate3d(5%, -9%, 0) rotate(2deg) scale(1.06); }
+  to { transform: translate3d(-5%, 9%, 0) rotate(-2deg) scale(1); }
 }
 @keyframes bg-aurora-breathe {
-  from { opacity: 0.78; }
-  50% { opacity: 1; }
-  to { opacity: 0.86; }
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+@keyframes bg-aurora-breathe-b {
+  from { opacity: 1; }
+  to { opacity: 0.5; }
 }
 
 /* 微动效：视图/面板入场（.hidden 移除时触发一次），180–220ms，绝不遮挡交互。 */
