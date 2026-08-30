@@ -13,6 +13,9 @@
     radial-gradient(40vw 36vh at 80% 16%, rgba(34, 184, 207, 0.44), rgba(34, 184, 207, 0) 100%);
   --body-aurora-b: radial-gradient(48vw 42vh at 50% 90%, rgba(156, 122, 224, 0.42), rgba(156, 122, 224, 0) 100%),
     radial-gradient(30vw 28vh at 66% 56%, rgba(240, 178, 122, 0.24), rgba(240, 178, 122, 0) 100%);
+  /* 光标涟漪层：拖尾丝带/沿途细环/点击同心环取色，cursor-effects.js 逐帧调透明度，勿用于组件。 */
+  --fx-wake: #2457c5;
+  --fx-ring: #3d85f8;
   --workbench-bg: transparent;
   --panel: #ffffff;
   --panel-2: #f7f9fc;
@@ -122,6 +125,9 @@
     radial-gradient(44vw 42vh at 16% 88%, rgba(79, 140, 255, 0.52), rgba(79, 140, 255, 0) 100%);
   --body-aurora-b: radial-gradient(48vw 42vh at 50% 48%, rgba(139, 92, 246, 0.4), rgba(139, 92, 246, 0) 100%),
     radial-gradient(34vw 32vh at 24% 52%, rgba(34, 211, 238, 0.22), rgba(34, 211, 238, 0) 100%);
+  /* 光标涟漪层：拖尾丝带/沿途细环/点击同心环取色（霓虹水光：lighter 叠加 + 泛光），勿用于组件。 */
+  --fx-wake: #22d3ee;
+  --fx-ring: #4f8cff;
   --workbench-bg: transparent;
   --panel: #101a2e;
   --panel-2: #15213a;

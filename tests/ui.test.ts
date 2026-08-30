@@ -1277,20 +1277,20 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(caseCard, /'数据已更新'/);
 });
 
-test('cursor water fx: wavefield guards, header toggle and load order', () => {
+test('cursor ripple fx: theme tokens, silky wake guards, header toggle and load order', () => {
   const fx = readFileSync(new URL('../public/cursor-effects.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
-  // 无色渲染：彩色取色 token 已退役，两主题块均不得残留（防把主题色又画回水面）。
+  // 双主题涟漪取色 token（同名全集由双主题契约测试守护，这里锁字面量）。
   const lightBlock = styles.match(/\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1];
   const darkBlock = styles.match(/\[data-theme="dark"\] \{([\s\S]*?)\n\}/)?.[1];
   assert.ok(lightBlock, 'light theme token block was not found');
   assert.ok(darkBlock, 'dark theme token block was not found');
-  assert.doesNotMatch(lightBlock, /--fx-wake|--fx-ring/);
-  assert.doesNotMatch(darkBlock, /--fx-wake|--fx-ring/);
-  assert.doesNotMatch(fx, /getPropertyValue\('--fx-/);
-  assert.doesNotMatch(fx, /'lighter'/);
+  assert.match(lightBlock, /--fx-wake: #2457c5;/);
+  assert.match(lightBlock, /--fx-ring: #3d85f8;/);
+  assert.match(darkBlock, /--fx-wake: #22d3ee;/);
+  assert.match(darkBlock, /--fx-ring: #4f8cff;/);
 
   // index.html：顶栏开关（复刻 themeToggle 模式：localStorage 记忆 + 文案提示点击后果），脚本先于开关接线与 app.js 挂载。
   assert.match(html, /id="cursorFxToggle"/);
@@ -1302,17 +1302,20 @@ test('cursor water fx: wavefield guards, header toggle and load order', () => {
   assert.ok(fxIndex > 0, 'index.html 必须引入 /cursor-effects.js');
   assert.ok(fxIndex < fxWiringIndex && fxWiringIndex < appIndex, 'cursor-effects.js 必须先于开关接线与 app.js');
 
-  // 波动场守卫：双缓冲高度场 + ImageData 低分辨率渲染 + 平滑放大全屏（丝滑契约），事件与逐帧循环。
-  assert.match(fx, /new Float32Array\(simW \* simH\)/);
-  assert.match(fx, /createImageData\(simW, simH\)/);
-  assert.match(fx, /putImageData\(simImg, 0, 0\)/);
-  assert.match(fx, /imageSmoothingQuality = 'high'/);
+  // 丝滑契约：拖尾=单条中点二次贝塞尔曲线 + 尾→头整体线性渐变三趟描边（分段描边=点阵感的根因，禁回退）；
+  // 波动场 ImageData/Float32Array 路线已退役，不得复活。
+  assert.match(fx, /quadraticCurveTo\(trail\[i\]\.x, trail\[i\]\.y, midX, midY\)/);
+  assert.match(fx, /createLinearGradient\(first\.x, first\.y, last\.x, last\.y\)/);
+  assert.doesNotMatch(fx, /Float32Array/);
+  assert.doesNotMatch(fx, /putImageData/);
+  assert.match(fx, /dark \? 'lighter' : 'source-over'/);
+  assert.match(fx, /getPropertyValue\('--fx-wake'\)/);
+  assert.match(fx, /getPropertyValue\('--fx-ring'\)/);
   assert.match(fx, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/);
   assert.match(fx, /localStorage\.getItem\('csm-cursor-fx'\) !== 'off'/);
   assert.match(fx, /window\.addEventListener\('pointermove'/);
   assert.match(fx, /window\.addEventListener\('pointerdown'/);
   assert.match(fx, /window\.csmCursorFx = \{/);
-  assert.match(fx, /requestAnimationFrame/);
   // 画布不挡交互：pointer-events:none 且压在模态框（z-index 50）之上。
   assert.match(fx, /pointer-events:none;z-index:60/);
 });

@@ -25,7 +25,7 @@
     <div class="right">
       <button id="globalSync" class="quiet-command">同步数据</button>
       <button id="themeToggle" class="quiet-command theme-toggle" type="button" title="切换深浅主题" aria-label="切换深浅主题">☾ 深色</button>
-      <button id="cursorFxToggle" class="quiet-command" type="button" title="切换光标水波动效" aria-label="切换光标水波动效">✦ 开动效</button>
+      <button id="cursorFxToggle" class="quiet-command" type="button" title="切换光标涟漪动效" aria-label="切换光标涟漪动效">✦ 开动效</button>
       <div id="status" class="status"><span class="dot"></span>连接中…</div>
     </div>
   </header>
@@ -301,10 +301,10 @@
       syncThemeLabel();
     })();
   </script>
-  <!-- 光标水波：自建全屏画布（z-index 60）、pointer-events:none 不挡交互；须在开关接线前挂载以提供 window.csmCursorFx。 -->
+  <!-- 光标涟漪：自建全屏画布（z-index 60）、pointer-events:none 不挡交互；须在开关接线前挂载以提供 window.csmCursorFx。 -->
   <script src="/cursor-effects.js"></script>
   <script>
-    // 水波开关：默认开启、localStorage 记忆；系统「减弱动态效果」时脚本内强制关，按钮只切用户偏好。
+    // 涟漪开关：默认开启、localStorage 记忆；系统「减弱动态效果」时脚本内强制关，按钮只切用户偏好。
     (function () {
       var btn = document.getElementById('cursorFxToggle');
       if (!btn || !window.csmCursorFx) return;
