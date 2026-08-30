@@ -674,6 +674,20 @@ test('session list supports share, archive and an archived fold with restore', (
   assert.match(html, /id="archivedList"/);
 });
 
+test('sidebar scrollbar only appears on hover inside its own track pad', () => {
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 遮挡根因是 Mac 叠加滚动条盖内容：滚动容器自身垫 8px 轨道区（移动端 720px
+  // 断点的 #sidebar { padding: 6px } 会覆盖外层 padding——垫区必须挂容器自己）。
+  assert.match(css, /\.sidebar-top \{ flex: 1; overflow-y: auto; min-height: 0; scrollbar-width: none; padding-right: 8px; \}/);
+  // hover 门控：width:none 常态隐藏 → hover 变 thin（约 6-8px，恰好落进 8px 垫区）。
+  assert.match(css, /\.sidebar-top:hover \{ scrollbar-width: thin; scrollbar-color: var\(--scrollbar\) transparent; \}/);
+  // 侧栏壳层不再承担轨道垫区（垫区归位 .sidebar-top 自身）。
+  const sidebar = css.match(/^#sidebar \{[\s\S]*?\n\}/m)?.[0];
+  assert.ok(sidebar, 'sidebar rule was not found');
+  assert.doesNotMatch(sidebar, /padding-right: 8px/);
+});
+
 test('agent nav item shows the sum of hemory pending and draft counts', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
