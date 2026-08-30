@@ -3,11 +3,12 @@ import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 import { extractText as extractPdfText } from 'unpdf';
+import { extractOfficeText } from './office.js';
 import { dataDir } from './store.js';
 
 /** 对话附件：分类/落盘/上下文块构建。文件落盘在 {dataDir}/attachments/<sessionId>/，消息体内联 base64。 */
 
-export type AttachmentKind = 'text' | 'image' | 'pdf' | 'unsupported';
+export type AttachmentKind = 'text' | 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'ole' | 'unsupported';
 
 /** 客户端提交的待存附件（消息体 JSON 内嵌 base64）。 */
 export interface IncomingAttachment {
@@ -32,6 +33,17 @@ export const MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 export const TEXT_CONTEXT_CAP = 50_000;
 
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+/** OOXML 三件套（按 MIME/扩展名双通道识别）；旧版 OLE2 二进制单独归类以便给出针对性指引。 */
+const OFFICE_EXT: Record<string, 'docx' | 'xlsx' | 'pptx'> = {
+  '.docx': 'docx', '.xlsx': 'xlsx', '.pptx': 'pptx',
+};
+const OFFICE_MIME: Record<string, 'docx' | 'xlsx' | 'pptx'> = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+};
+const OLE_EXT = new Set(['.doc', '.xls', '.ppt']);
+const OLE_MIME = new Set(['application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint']);
 const TEXT_EXT = new Set([
   '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.jsonl', '.log', '.ndjson',
   '.yaml', '.yml', '.xml', '.html', '.htm', '.css',
@@ -49,6 +61,10 @@ export function classifyAttachment(mimeType: string, name: string): AttachmentKi
   const ext = extname(name || '').toLowerCase();
   if (IMAGE_MIME.has(mime)) return 'image';
   if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
+  // OOXML：MIME 优先，扩展名兜底（浏览器 file.type 偶发为空）。
+  if (OFFICE_MIME[mime]) return OFFICE_MIME[mime];
+  if (OFFICE_EXT[ext]) return OFFICE_EXT[ext];
+  if (OLE_MIME.has(mime) || OLE_EXT.has(ext)) return 'ole';
   if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/xml'
     || mime === 'application/x-yaml' || mime === 'application/yaml' || TEXT_EXT.has(ext)) return 'text';
   return 'unsupported';
@@ -108,7 +124,7 @@ export async function storeAttachments(sessionId: string, incoming: IncomingAtta
     if (!name) throw new AttachmentError('附件缺少文件名');
     const kind = classifyAttachment(String(item.mimeType ?? ''), name);
     if (kind === 'unsupported') {
-      throw new AttachmentError(`不支持的附件类型「${name}」（${item.mimeType || '未知类型'}）：目前支持文本类（txt/md/csv/json/log/代码等）、PDF 和图片`);
+      throw new AttachmentError(`不支持的附件类型「${name}」（${item.mimeType || '未知类型'}）：目前支持文本类（txt/md/csv/json/log/代码等）、Office（docx/xlsx/pptx）、PDF 和图片`);
     }
     let bytes: Buffer;
     try {
@@ -173,7 +189,9 @@ export async function buildContentBlocks(
     }
     const bytes = await readFile(path).catch(() => { throw new AttachmentError(`附件「${attachment.name}」读取失败`); });
     let body: string;
-    if (attachment.kind === 'pdf') {
+    if (attachment.kind === 'ole') {
+      throw new AttachmentError(`附件「${attachment.name}」是旧版 Office 二进制格式（.doc/.xls/.ppt），暂不支持直接读取；请另存为 .docx / .xlsx / .pptx 后重新上传`);
+    } else if (attachment.kind === 'pdf') {
       try {
         const result = await extractPdfText(new Uint8Array(bytes), { mergePages: true });
         body = String(result.text ?? '');
@@ -182,6 +200,12 @@ export async function buildContentBlocks(
       }
       if (!body.trim()) {
         throw new AttachmentError(`附件「${attachment.name}」PDF 未提取到文字（可能是扫描件，目前仅支持文字型 PDF）`);
+      }
+    } else if (attachment.kind === 'docx' || attachment.kind === 'xlsx' || attachment.kind === 'pptx') {
+      try {
+        body = await extractOfficeText(attachment.kind, bytes);
+      } catch (err) {
+        throw new AttachmentError(`附件「${attachment.name}」${(err as Error).message}`);
       }
     } else {
       body = bytes.toString('utf8');

@@ -201,8 +201,8 @@ function help(): void {
      本地已同步事件 get_customer_events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
      落库 record_web_intelligence；
-     --attach 附带本地文件（文本类/PDF 内容注入上下文，可重复；图片要求视觉模型，
-     自定义端点先 config llm set ... --vision=on 声明能力））
+     --attach 附带本地文件（文本类/Office（docx/xlsx/pptx）/PDF 内容注入上下文，可重复；
+     图片要求视觉模型，自定义端点先 config llm set ... --vision=on 声明能力））
   csm-agent sessions [list] [--all] [--json]
   csm-agent sessions show <会话ID> [--json]
     （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）
@@ -682,6 +682,10 @@ const CLI_MIME: Record<string, string> = {
   '.log': 'text/plain', '.yaml': 'application/yaml', '.yml': 'application/yaml', '.xml': 'application/xml',
   '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.ts': 'text/plain',
   '.py': 'text/plain', '.sh': 'text/plain', '.sql': 'text/plain', '.toml': 'text/plain', '.ini': 'text/plain',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel', '.ppt': 'application/vnd.ms-powerpoint',
 };
 
 function mimeFromName(name: string): string {

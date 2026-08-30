@@ -1331,7 +1331,7 @@ test('composer exposes the attachment entry embedded inside the input box', () =
   const attachIdx = shell.indexOf('id="attach"');
   const inputIdx = shell.indexOf('id="input"');
   assert.ok(attachIdx > -1 && inputIdx > -1 && attachIdx < inputIdx, '「+」按钮必须在 .input-shell 内、#input 之前');
-  assert.match(shell, /<button id="attach" type="button" title="添加附件（文本 \/ PDF \/ 图片，也可拖拽或粘贴截图）">＋<\/button>/);
+  assert.match(shell, /<button id="attach" type="button" title="添加附件（文本 \/ Office（docx\/xlsx\/pptx）\/ PDF \/ 图片，也可拖拽或粘贴截图）">＋<\/button>/);
   assert.match(shell, /<input id="attachFile" type="file" multiple class="hidden" \/>/);
   assert.match(page, /<div id="attachmentChips" class="hidden" aria-live="polite"><\/div>/);
 });
