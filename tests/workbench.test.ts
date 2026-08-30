@@ -21,9 +21,62 @@ test('workbench: CRM id is the stable customer key and missing data stays unknow
   db.saveRisk(risk);
   assert.equal(risk.level, 'unknown');
   assert.equal(risk.score, null);
-  assert.deepEqual(risk.unknowns.sort(), ['合同状态', '客户声音', '工单与交付统计', '最后互动时间', '续约日期'].sort());
+  // v3：需求完成率/工单解决率/互动/客户声音/公开动态五维度；续约日期与合同状态退出计分。
+  assert.deepEqual(risk.unknowns.sort(), ['公开动态', '客户声音', '工单解决率', '最后互动时间', '需求完成率'].sort());
+  assert.equal(risk.ruleVersion, 'csm-risk-v3');
   assert.equal(db.listCustomers()[0].id, 'crm-1');
 }));
+
+test('workbench: risk v3 dimensions — completion rates tiering, web signals, renewal date not scoring', () => {
+  const now = new Date('2026-08-25T00:00:00Z');
+  const base = { id: 'crm-r3', name: '客户丙', lastContactAt: '2026-08-24T00:00:00Z', explicitNonrenewal: false, contractStatus: '正常' };
+  const rate = (done: number, total: number) => ({ type: 'x', done, total, pct: Math.round((done / total) * 100), stale: false });
+  const webEvidence = (label: string, occurredAt: string, detail = '') => ({
+    customerId: 'crm-r3', kind: 'web_signal', label, detail, occurredAt, confidence: 0.6, sourceSystem: 'web',
+  });
+
+  // 需求完成率分档边界：≥30% → 0 分；15%~29% → 半分（13）；<15% → 满分 25。
+  const healthy = assessRisk(base, [], now, { suggestionRate: rate(3, 10), ticketRate: rate(9, 10) });
+  assert.equal(healthy.dimensions.suggestion.score, 0);
+  assert.equal(healthy.dimensions.ticket.score, 0);
+  const mid = assessRisk(base, [], now, { suggestionRate: rate(2, 10), ticketRate: rate(8, 10) });
+  assert.equal(mid.dimensions.suggestion.score, 13);
+  assert.equal(mid.dimensions.ticket.score, 13);
+  const bad = assessRisk(base, [], now, { suggestionRate: rate(1, 10), ticketRate: rate(5, 10) });
+  assert.equal(bad.dimensions.suggestion.score, 25);
+  assert.equal(bad.dimensions.ticket.score, 25);
+
+  // 续约临近度不再计分：距续约 5 天 vs 300 天分数完全一致。
+  const near = assessRisk({ ...base, renewalDate: '2026-08-30T00:00:00Z' }, [], now, { suggestionRate: rate(3, 10) });
+  const far = assessRisk({ ...base, renewalDate: '2027-06-20T00:00:00Z' }, [], now, { suggestionRate: rate(3, 10) });
+  assert.equal(near.score, far.score);
+  assert.ok(!near.dimensions.renewal && !near.dimensions.contract, 'v3 不再有 renewal/contract 维度');
+
+  // 0 条记录与缺状态类型都是 unknown（不计分、不冒充）。
+  assert.equal(assessRisk(base, [], now, {}).dimensions.suggestion.known, false);
+  assert.equal(assessRisk(base, [], now, { suggestionRate: { type: 'x', done: 0, total: 0, pct: 0, stale: false } }).dimensions.suggestion.known, false);
+  const staleRisk = assessRisk(base, [], now, { suggestionRate: { type: 'x', done: 0, total: 3, pct: 0, stale: true }, ticketRate: rate(9, 10) });
+  assert.equal(staleRisk.dimensions.suggestion.known, false);
+  assert.ok(staleRisk.unknowns.includes('需求完成率'));
+
+  // 公开动态：无记录 unknown；1 条负向半分（10）；≥2 条负向满分（20）；90 天窗口外不计。
+  const noWeb = assessRisk(base, [], now, {});
+  assert.equal(noWeb.dimensions.web.known, false);
+  const oneNeg = assessRisk(base, [webEvidence('裁员 5%', '2026-08-01')], now, {});
+  assert.equal(oneNeg.dimensions.web.score, 10);
+  const twoNeg = assessRisk(base, [webEvidence('裁员 5%', '2026-08-01'), webEvidence('被处罚', '2026-07-15')], now, {});
+  assert.equal(twoNeg.dimensions.web.score, 20);
+  assert.equal(twoNeg.score != null && twoNeg.score >= 40 ? 'medium-or-high' : 'low', 'medium-or-high');
+  const oldWeb = assessRisk(base, [webEvidence('裁员 5%', '2026-01-01')], now, {});
+  assert.equal(oldWeb.dimensions.web.known, false, '窗口外动态不入维度');
+  // 正向动态（融资）不产生风险分。
+  const positive = assessRisk(base, [webEvidence('完成 B 轮融资', '2026-08-01', '[financing] 融资 2 亿')], now, {});
+  assert.equal(positive.dimensions.web.score, 0);
+  assert.equal(positive.dimensions.web.known, true);
+  // detail 前缀 [category]（sentiment/org/executive）兜底判负向。
+  const categoryNeg = assessRisk(base, [webEvidence('某公司动态', '2026-08-01', '[org] 组织架构调整')], now, {});
+  assert.equal(categoryNeg.dimensions.web.score, 10);
+});
 
 test('workbench: explicit nonrenewal overrides incomplete coverage', () => withDb((db) => {
   const customer = db.upsertCustomer({ id: 'crm-2', name: '客户乙', explicitNonrenewal: true, contractStatus: '明确不续约' });
@@ -110,6 +163,46 @@ test('workbench: source events are idempotent by source identity', () => withDb(
   assert.equal(db.listTimeline('crm-3')[0].title, '新标题');
   assert.equal(db.listTimeline('crm-3')[0].externalId, 'internal-uuid');
   assert.equal(db.listTimeline('crm-3')[0].displayId, 'PROJ-1');
+}));
+
+test('workbench: onesCompletionRates is full-population by status type and marks stale records', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-rates', name: '完成率客户' });
+  const done = { field005: { name: '已完成', category: 'done' } };
+  const open = { field005: { name: '处理中', category: 'in_progress' } };
+  const legacy = { field005: '已完成' }; // 旧同步数据：纯状态名，无 category
+  db.upsertSourceEvent({ customerId: 'crm-rates', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-1', title: '建议1', occurredAt: '2026-08-01T00:00:00Z', payload: done });
+  db.upsertSourceEvent({ customerId: 'crm-rates', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-2', title: '建议2', occurredAt: '2026-08-02T00:00:00Z', payload: open });
+  db.upsertSourceEvent({ customerId: 'crm-rates', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-1', title: '工单1', occurredAt: '2026-08-03T00:00:00Z', payload: done });
+  db.upsertSourceEvent({ customerId: 'crm-rates', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-2', title: '工单2', occurredAt: '2026-08-04T00:00:00Z', payload: legacy });
+  // 运维工单与未归属事件不进需求/工单两个率。
+  db.upsertSourceEvent({ customerId: 'crm-rates', sourceSystem: 'ones', sourceType: 'operations_ticket', externalId: 'o-1', title: '运维1', occurredAt: '2026-08-05T00:00:00Z', payload: done });
+  db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-3', title: '未归属工单', occurredAt: '2026-08-06T00:00:00Z', payload: done });
+  const rates = db.onesCompletionRates('crm-rates');
+  assert.deepEqual(rates.suggestion_feedback, { type: 'suggestion_feedback', done: 1, total: 2, pct: 50, stale: false });
+  assert.deepEqual(rates.support_ticket, { type: 'support_ticket', done: 1, total: 2, pct: 50, stale: true }, '缺 category 的旧数据 → stale，绝不拿状态名猜');
+  assert.deepEqual(rates.operations_ticket, { type: 'operations_ticket', done: 1, total: 1, pct: 100, stale: false });
+  assert.ok((db.overview('crm-rates') as Record<string, unknown>).completionRates, 'overview 携带全量完成率');
+}));
+
+test('workbench: recompute wires full rates into risk and web positive signals into expansion opportunity', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-web', name: '公开动态客户', shortName: '公开动态', lastContactAt: '2026-08-20T00:00:00Z' });
+  db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-1', title: '建议1', occurredAt: '2026-08-01T00:00:00Z', payload: { field005: { name: '已完成', category: 'done' } } });
+  db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-2', title: '建议2', occurredAt: '2026-08-02T00:00:00Z', payload: { field005: { name: '处理中', category: 'in_progress' } } });
+  db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-1', title: '工单1', occurredAt: '2026-08-03T00:00:00Z', payload: { field005: { name: '已完成', category: 'done' } } });
+  const sync = new PortfolioSyncService(db, {} as never, async () => ({ events: [], proposedCount: 0, includedCount: 0 }));
+  db.addEvidence({ customerId: 'crm-web', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资 2 亿元', occurredAt: '2026-08-10', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
+  sync.recompute('crm-web');
+  const risk = db.latestRisk('crm-web')!;
+  assert.equal(risk.ruleVersion, 'csm-risk-v3');
+  assert.equal(risk.dimensions.suggestion.score, 0, '50% ≥ 30% 健康线 → 0 分');
+  assert.equal(risk.dimensions.ticket.score, 0);
+  assert.equal(risk.dimensions.web.score, 0, '正向公开动态不产生风险分');
+  assert.ok(risk.dimensions.web.known);
+  const opportunities = db.listOpportunities('crm-web');
+  const expansion = opportunities.find((item) => item.type === 'public_signal_expansion');
+  assert.ok(expansion, '正向 web_signal 生成增购假设');
+  assert.ok(expansion!.detail.includes('完成 B 轮融资'));
+  assert.ok(expansion!.evidenceRefs.length > 0);
 }));
 
 test('workbench: last interaction aggregates the latest business event across sources and formats', () => withDb((db) => {

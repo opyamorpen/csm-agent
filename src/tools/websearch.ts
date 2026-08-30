@@ -280,6 +280,41 @@ export interface WebSearchToolDeps {
   fetcher?: HttpPost;
 }
 
+/** 共享底层搜索结果：agent web_search 工具与同步路径公开动态检索共用同一实现。 */
+export interface RawWebSearchOutcome {
+  /** Tavily key 模式（topic=news 支持 days 严格时间窗）或 keyless 免费轮换。 */
+  mode: 'keyed' | 'keyless';
+  /** keyless 模式实际服务的供应商名；keyed 恒为 'tavily'。 */
+  servedBy: string;
+  results: WebResult[];
+}
+
+/**
+ * 底层搜索：keyed Tavily 走严格 topic/days 窗，无 key 走免费通道轮换（无严格时间过滤）。
+ * key 与 keyless 都未启用时抛错（调用方决定降级行为）；空结果不抛错，由调用方按 unknown 口径处理。
+ */
+export async function performRawWebSearch(
+  options: { query: string; maxResults: number; apiKey?: string; keylessEnabled?: boolean; topic?: 'news' | 'general'; days?: number; fetcher?: HttpPost },
+): Promise<RawWebSearchOutcome> {
+  const query = options.query.trim();
+  if (!query) throw new Error('search query 不能为空');
+  const post = options.fetcher ?? httpPost;
+  const maxResults = Math.min(10, Math.max(1, Math.round(options.maxResults) || 5));
+  if (options.apiKey) {
+    const topic = options.topic === 'general' ? 'general' : 'news';
+    const days = topic === 'news' ? Math.min(365, Math.max(1, Math.round(options.days ?? 90) || 90)) : undefined;
+    const body: Record<string, unknown> = { query, topic, max_results: maxResults, search_depth: 'basic' };
+    if (days !== undefined) body.days = days;
+    const results = await tavilyFetch(body, options.apiKey, SEARCH_TIMEOUT_MS, post);
+    return { mode: 'keyed', servedBy: 'tavily', results };
+  }
+  if (options.keylessEnabled ?? true) {
+    const { results, servedBy } = await keylessSearchWithFailover(query, maxResults, post);
+    return { mode: 'keyless', servedBy, results };
+  }
+  throw new Error('联网搜索未配置且免费通道已停用：请配置 Tavily API key（或启用免费通道）。');
+}
+
 function formatResults(results: WebResult[]): string {
   return results
     .map((r, i) => `${i + 1}. ${r.title || '(无标题)'}\n   日期: ${r.publishedDate || 'unknown'}\n   来源: ${r.url || 'unknown'}\n   摘要: ${(r.content ?? '').slice(0, 400)}`)
@@ -290,44 +325,30 @@ export function makeWebSearchHandler(deps: WebSearchToolDeps): (args: Record<str
   return async (args) => {
     const query = typeof args.query === 'string' ? args.query.trim() : '';
     if (!query) return { text: 'web_search 需要 query 参数。', isError: true };
-    const apiKey = deps.getApiKey();
     const maxResults = Math.min(10, Math.max(1, Math.round(Number(args.max_results ?? deps.getMaxResults())) || deps.getMaxResults()));
-    const post = deps.fetcher ?? httpPost;
+    const topic = args.topic === 'general' ? 'general' : 'news';
+    const days = Math.min(365, Math.max(1, Math.round(Number(args.days ?? 90)) || 90));
 
-    // Keyed Tavily path: strict topic/days window.
-    if (apiKey) {
-      const topic = args.topic === 'general' ? 'general' : 'news';
-      const days = topic === 'news' ? Math.min(365, Math.max(1, Math.round(Number(args.days ?? 90)) || 90)) : undefined;
-      const body: Record<string, unknown> = { query, topic, max_results: maxResults, search_depth: 'basic' };
-      if (days !== undefined) body.days = days;
-  try {
-    const results = await tavilyFetch(body, apiKey, SEARCH_TIMEOUT_MS, post);
-        if (!results.length) {
-          return { text: `未检索到与「${query}」相关的公开结果。注意：未搜到不构成任何正面或负面信号，该角度信息为 unknown。` };
-        }
-        return { text: `联网搜索「${query}」（Tavily，topic=${topic}${days !== undefined ? `，最近 ${days} 天` : ''}，${results.length} 条结果）：\n\n${formatResults(results)}` };
-      } catch (err) {
-        return { text: `联网搜索失败: ${(err as Error).message}。请如实向用户说明该角度未能获取，不要编造结果。`, isError: true };
+    try {
+      const outcome = await performRawWebSearch({
+        query,
+        maxResults,
+        apiKey: deps.getApiKey(),
+        keylessEnabled: deps.getKeylessEnabled?.() ?? true,
+        topic,
+        days,
+        fetcher: deps.fetcher,
+      });
+      if (!outcome.results.length) {
+        return { text: `未检索到与「${query}」相关的公开结果。注意：未搜到不构成任何正面或负面信号，该角度信息为 unknown。` };
       }
+      const windowNote = outcome.mode === 'keyed'
+        ? `Tavily，topic=${topic}${topic === 'news' ? `，最近 ${days} 天` : ''}`
+        : `免费通道 ${outcome.servedBy}；无严格时间过滤，请依据各条日期判断是否在最近三个月内`;
+      return { text: `联网搜索「${query}」（${windowNote}，${outcome.results.length} 条结果）：\n\n${formatResults(outcome.results)}` };
+    } catch (err) {
+      return { text: `联网搜索失败: ${(err as Error).message}。请如实向用户说明该角度未能获取，不要编造结果。`, isError: true };
     }
-
-    // Keyless anonymous tier: no strict time filter; the model must judge
-    // recency from each result's published date.
-    if (deps.getKeylessEnabled?.() ?? true) {
-      try {
-        const { results, servedBy } = await keylessSearchWithFailover(query, maxResults, post);
-        return {
-          text: `联网搜索「${query}」（免费通道 ${servedBy}，${results.length} 条结果；无严格时间过滤，请依据各条日期判断是否在最近三个月内）：\n\n${formatResults(results)}`,
-        };
-      } catch (err) {
-        return { text: `${(err as Error).message} 请如实向用户说明该角度未能获取，不要编造结果。`, isError: true };
-      }
-    }
-
-    return {
-      text: '联网搜索未配置且免费通道已停用：请在「设置」中填写 Tavily API key（或设置 TAVILY_API_KEY / ~/.csm-agent/config/search.user.yaml）。在此之前请明确告知用户本次分析未包含互联网公开动态。',
-      isError: true,
-    };
   };
 }
 

@@ -18,6 +18,7 @@ import type {
   DraftItemStatus,
   HemoryAttributionOverride,
   HemorySegmentationJob,
+  CompletionRate,
   EvidenceInput,
   OpportunityHypothesis,
   RiskAssessment,
@@ -724,6 +725,40 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow);
   }
 
+  /**
+   * ONES 工作项完成率（全量口径，不受 listTimeline 截断窗口影响）：suggestion_feedback / support_ticket / operations_ticket。
+   * 完成判定与概览数据卡一致——payload.field005.category==='done'，绝不拿状态名猜；
+   * 任一记录缺 category → stale=true（旧同步数据，「刷新三套系统」后出数）。
+   */
+  onesCompletionRates(customerId: string): Record<'suggestion_feedback' | 'support_ticket' | 'operations_ticket', CompletionRate> {
+    const rates = {} as Record<'suggestion_feedback' | 'support_ticket' | 'operations_ticket', CompletionRate>;
+    const rows = this.db.prepare(`SELECT source_type,payload_json FROM source_events
+      WHERE customer_id=? AND source_system='ones' AND attribution_status='confirmed'
+      AND source_type IN ('suggestion_feedback','support_ticket','operations_ticket')`).all(customerId) as Row[];
+    const byType = new Map<string, { done: number; total: number; stale: boolean }>();
+    for (const row of rows) {
+      const type = String(row.source_type);
+      const stat = byType.get(type) ?? { done: 0, total: 0, stale: false };
+      const payload = parseJson(row.payload_json, {}) as Record<string, unknown>;
+      const status = payload?.field005;
+      const category = status && typeof status === 'object' && !Array.isArray(status)
+        ? (status as Record<string, unknown>).category : null;
+      stat.total += 1;
+      if (typeof category === 'string' && category) {
+        if (category === 'done') stat.done += 1;
+      } else {
+        stat.stale = true;
+      }
+      byType.set(type, stat);
+    }
+    for (const type of ['suggestion_feedback', 'support_ticket', 'operations_ticket'] as const) {
+      const stat = byType.get(type) ?? { done: 0, total: 0, stale: false };
+      rates[type] = { type, done: stat.done, total: stat.total, stale: stat.stale, pct: stat.total ? Math.round((stat.done / stat.total) * 100) : 0 };
+    }
+    return rates;
+  }
+
+
   listUnattributed(limit = 100): SourceEvent[] {
     const rows = this.db.prepare("SELECT * FROM source_events WHERE attribution_status NOT IN ('confirmed','ignored') ORDER BY occurred_at DESC LIMIT ?").all(limit) as Row[];
     return rows.map(sourceEventFromRow);
@@ -1149,6 +1184,15 @@ export class WorkbenchDatabase {
     return !!this.db.prepare("SELECT 1 FROM sync_runs WHERE scope=? AND status='succeeded' LIMIT 1").get(scope);
   }
 
+  /** 该客户最近一次成功公开动态检索的完成时间；从未成功过返回 null。 */
+  latestWebIntelSyncAt(customerId: string): Date | null {
+    const row = this.db.prepare("SELECT finished_at FROM sync_runs WHERE scope='web_intelligence' AND customer_id=? AND status='succeeded' AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1")
+      .get(customerId) as Row | undefined;
+    if (!row?.finished_at) return null;
+    const at = new Date(String(row.finished_at));
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+
   createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: DraftJobKind = 'hemory'): DraftGenerationJob {
     const existing = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     if (existing) return this.draftJobFromRow(existing);
@@ -1479,6 +1523,7 @@ export class WorkbenchDatabase {
       caseCandidate: this.getCaseCandidate(customerId),
       caseDrafts: this.listCaseDrafts(customerId),
       actions: this.listActions(customerId),
+      completionRates: this.onesCompletionRates(customerId),
       timeline: this.listTimeline(customerId, 30),
       sourceCounts: this.db.prepare(`SELECT source_system,COUNT(*) AS count,MAX(synced_at) AS last_synced_at FROM source_events
         WHERE customer_id=? AND NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)

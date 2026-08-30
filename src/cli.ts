@@ -53,6 +53,7 @@ const CLI_CAPABILITIES = [
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
+  { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel'] },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
@@ -117,6 +118,9 @@ function help(): void {
      保存时自动发一次真实请求验证连通，失败则不落盘；API Key 只写本地配置文件）
   csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
   csm-agent customer <客户ID或名称> [--json]
+  csm-agent webintel <客户ID或名称> [--json]
+    （强制检索该客户最近三个月公开动态（8 个角度：融资/中标/产品/高管/组织/舆情/招聘/政策），
+     落库后重算续约风险与增购机会；未搜到不构成任何信号，风险维度按 unknown 处理）
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
@@ -259,12 +263,48 @@ async function showCustomer(input: string): Promise<void> {
   const counts: Record<string, number> = {};
   for (const event of overview.timeline ?? []) counts[event.sourceType] = (counts[event.sourceType] ?? 0) + 1;
   console.log(`${overview.customer.name} (${overview.customer.id})`);
-  console.log(`CSM: ${overview.customer.csmName ?? 'unknown'}  风险: ${overview.risk?.level ?? 'unknown'} / ${overview.risk?.score ?? 'unknown'}  覆盖率: ${overview.risk?.coverage ?? 0}%`);
+  console.log(`CSM: ${overview.customer.csmName ?? 'unknown'}  风险: ${overview.risk?.level ?? 'unknown'} / ${overview.risk?.score ?? 'unknown'}  覆盖率: ${overview.risk?.coverage ?? 0}%  规则: ${overview.risk?.ruleVersion ?? 'unknown'}`);
   console.log(`续约: ${overview.customer.renewalDate ?? 'unknown'}  合同价值: ${overview.customer.contractValue ?? 'unknown'}  最后互动: ${overview.lastInteractionAt ?? overview.customer.lastContactAt ?? 'unknown'}`);
+  const rates = overview.completionRates ?? {};
+  const rateLine = (key: string, label: string) => {
+    const rate = rates[key];
+    if (!rate || !rate.total) return `${label}: 暂无记录`;
+    return rate.stale ? `${label}: 待刷新（缺状态类型）` : `${label}: ${rate.pct}%（已完成 ${rate.done}/${rate.total}）`;
+  };
+  console.log(`${rateLine('suggestion_feedback', '需求完成率')}  ${rateLine('support_ticket', '工单解决率')}  ${rateLine('operations_ticket', '运维解决率')}`);
+  const dimensions = overview.risk?.dimensions ?? {};
+  if (Object.keys(dimensions).length) {
+    console.log('风险维度:');
+    console.table(Object.entries(dimensions).map(([key, item]: [string, any]) => ({
+      维度: key,
+      得分: item.known ? `${item.score}/${item.weight}` : 'unknown',
+      说明: item.reason,
+    })));
+  }
   console.log(`ONES 分类: ${Object.entries(counts).map(([key, value]) => `${key}=${value}`).join(', ') || 'none'}`);
   console.log(`机会假设: ${(overview.opportunities ?? []).length}  行动: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
   console.log('身份映射:');
   console.table((overview.identities ?? []).map((item: any) => ({ system: item.system, externalId: item.external_id, label: item.label, status: item.status })));
+}
+
+/** 公开动态检索：强制刷新（忽略 7 天门），输出落库条目与刷新后的风险。 */
+async function webintel(input: string): Promise<void> {
+  const customer = await resolveCustomer(input);
+  const result = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/web-intel`, { method: 'POST' });
+  if (jsonOutput) return print(result);
+  const statusLabel: Record<string, string> = { succeeded: '检索完成', skipped: '跳过', failed: '失败' };
+  console.log(`公开动态检索（${customer.name}）：${statusLabel[result.status] ?? result.status}${result.reason ? ` · ${result.reason}` : ''}`);
+  console.log(`检索角度 ${result.searched} 个，落库 ${result.saved} 条`);
+  for (const finding of result.findings ?? []) {
+    console.log(`  - [${finding.category}] ${finding.label}（${finding.occurred_at}）${finding.source_url}`);
+  }
+  if (!result.saved) console.log('  （未找到可落库的最近三个月公开动态；未搜到不构成任何正面或负面信号）');
+  const risk = result.risk;
+  if (risk) {
+    console.log(`刷新后风险: ${risk.level} / ${risk.score == null ? '分数未知' : `${risk.score} 分`}（覆盖 ${risk.coverage}% · ${risk.ruleVersion}）`);
+    const web = risk.dimensions?.web;
+    if (web) console.log(`公开动态维度: ${web.known ? `${web.score}/${web.weight}` : 'unknown'} · ${web.reason}`);
+  }
 }
 
 async function showTimeline(customerInput: string, sourceType?: string): Promise<void> {
@@ -1293,6 +1333,7 @@ async function main(): Promise<void> {
   if (command === 'config') return configCommand(args.shift() ?? '', args);
   if (command === 'customers') return showCustomers(args);
   if (command === 'customer') return showCustomer(args.join(' '));
+  if (command === 'webintel') return webintel(args.join(' '));
   if (command === 'timeline') {
     const customer = args.shift() ?? '';
     return showTimeline(customer, args.shift());

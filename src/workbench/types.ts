@@ -120,6 +120,21 @@ export interface RiskAssessment {
   generatedAt: string;
 }
 
+/** ONES 工作项完成率（按 field005.category==='done' 判定；stale=存在缺状态类型的旧记录，待刷新）。 */
+export interface CompletionRate {
+  type: string;
+  done: number;
+  total: number;
+  pct: number;
+  stale: boolean;
+}
+
+/** assessRisk 的完成率输入：需求完成率（建议与反馈）与工单解决率（工单，不含运维）。 */
+export interface RiskStats {
+  suggestionRate?: CompletionRate | null;
+  ticketRate?: CompletionRate | null;
+}
+
 export interface OpportunityHypothesis {
   id: string;
   customerId: string;

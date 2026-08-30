@@ -171,11 +171,11 @@
 
   const HEALTH_LABEL = { high: '高风险', medium: '中风险', low: '低风险', unknown: '待补数据' };
   const RISK_DIMENSION_LABEL = {
-    renewal: '续约',
-    contract: '合同',
+    suggestion: '需求完成',
+    ticket: '工单解决',
     engagement: '互动',
-    delivery: '交付',
     voice: '客户声音',
+    web: '公开动态',
   };
   const SOURCE_TYPE_LABEL = {
     customer_snapshot: 'CRM 客户资料',
@@ -2002,16 +2002,20 @@
 
   /**
    * 「数据概览」统计卡条：只给数量与比率，明细留在各自 tab。
-   * 完成率/解决率一律按状态类型（category === 'done'）判定；旧数据缺 category → 待刷新，
-   * 绝不拿状态名冒充类别（用户明确口径）。
+   * 完成率/解决率用服务端全量口径（overview.completionRates，按状态类型 category==='done' 判定），
+   * 与续约风险维度同源；服务端未返回时回退截断窗口本地计算（兼容旧 API）。
+   * 旧数据缺 category → 待刷新，绝不拿状态名冒充类别（用户明确口径）。
    */
-  function renderOverviewStats({ timeline, actions, fragments, workhours }) {
+  function renderOverviewStats({ timeline, actions, fragments, workhours, completionRates }) {
     const byType = (type) => timeline.filter((event) => event.sourceSystem === 'ones' && event.sourceType === type);
-    const rateOf = (events) => {
+    const rateOf = (events, serverRate) => {
+      if (serverRate && serverRate.total) {
+        return { done: serverRate.done, total: serverRate.total, pct: serverRate.pct, stale: !!serverRate.stale };
+      }
       if (!events.length) return null;
       if (events.some((event) => statusCategoryOf(event) == null)) return 'stale';
       const done = events.filter((event) => statusCategoryOf(event) === 'done').length;
-      return { done, total: events.length, pct: Math.round((done / events.length) * 100) };
+      return { done, total: events.length, pct: Math.round((done / events.length) * 100), stale: false };
     };
     const statCard = ({ label, value, sub, extra, rate, subClass, hint }) => {
       const card = el('article', 'stat-card');
@@ -2031,19 +2035,22 @@
       }
       return card;
     };
-    const rateCard = (label, events, rateLabel, doneLabel, hint) => {
-      const rate = rateOf(events);
+    const rateCard = (label, events, rateLabel, doneLabel, hint, serverRate) => {
+      const rate = rateOf(events, serverRate);
+      const total = rate && rate !== 'stale' ? rate.total : events.length;
       let sub = '暂无已归属记录';
-      let extra = null;
-      if (events.length) {
-        sub = rate === 'stale' ? `${rateLabel}待刷新（「刷新三套系统」后按状态类型出数）` : `${rateLabel} ${rate.pct}%（${doneLabel} ${rate.done}/${rate.total}）`;
+      if (total) {
+        sub = rate === 'stale' || (rate && rate !== 'stale' && rate.stale)
+          ? `${rateLabel}待刷新（「刷新三套系统」后按状态类型出数）`
+          : `${rateLabel} ${rate.pct}%（${doneLabel} ${rate.done}/${rate.total}）`;
       }
-      return statCard({ label, value: `${events.length} 条`, sub, extra, rate: rate && rate !== 'stale' ? rate : null, hint });
+      return statCard({ label, value: `${total} 条`, sub, extra: null, rate: rate && rate !== 'stale' ? rate : null, hint });
     };
 
     const strip = el('div', 'stat-strip');
     const tickets = byType('support_ticket');
-    const ticketCard = rateCard('工单', tickets, '解决率', '已完成', '明细见「工单」tab');
+    const serverRates = completionRates || {};
+    const ticketCard = rateCard('工单', tickets, '解决率', '已完成', '明细见「工单」tab', serverRates.support_ticket);
     if (tickets.length) {
       const blocked = tickets.filter((event) => /阻塞|挂起|blocked/i.test(nestedName(event.payload?.field005))).length;
       if (blocked) {
@@ -2052,9 +2059,9 @@
       }
     }
     strip.append(
-      rateCard('需求', byType('suggestion_feedback'), '完成率', '已完成', '明细见「建议」tab'),
+      rateCard('需求', byType('suggestion_feedback'), '完成率', '已完成', '明细见「建议」tab', serverRates.suggestion_feedback),
       ticketCard,
-      rateCard('运维', byType('operations_ticket'), '解决率', '已执行', '明细见「运维」tab'),
+      rateCard('运维', byType('operations_ticket'), '解决率', '已执行', '明细见「运维」tab', serverRates.operations_ticket),
     );
 
     const manhourIssue = timeline.find((event) => event.sourceSystem === 'ones' && event.sourceType === 'customer_manhour');
@@ -2742,6 +2749,20 @@
     const commands = el('div', 'row-actions');
     const refresh = el('button', 'quiet-command', '刷新三套系统');
     refresh.onclick = async () => { const run = await api(`/api/customers/${encodeURIComponent(customerId)}/refresh`, { method: 'POST' }); await pollSync(run.id); await openCustomer(customerId); };
+    // 公开动态：强制检索（忽略 7 天节流门），落库后服务端已重算风险/机会，整页刷新可见。
+    const webIntel = el('button', 'quiet-command', '刷新公开动态');
+    webIntel.onclick = async () => {
+      try {
+        webIntel.disabled = true;
+        webIntel.textContent = '检索中…';
+        const result = await api(`/api/customers/${encodeURIComponent(customerId)}/web-intel`, { method: 'POST' });
+        await openCustomer(customerId);
+        await alertDialog(result.saved
+          ? `已落库 ${result.saved} 条最近三个月公开动态，续约风险与增购机会已重算。`
+          : `检索了 ${result.searched} 个角度，未找到可落库的最近三个月公开动态（未搜到不构成任何正面或负面信号）。`);
+      } catch (error) { await alertDialog(`公开动态检索失败：${error.message}`); }
+      finally { webIntel.disabled = false; webIntel.textContent = '刷新公开动态'; }
+    };
     const generate = el('button', 'primary-command', '生成案例');
     generate.onclick = async () => {
       try {
@@ -2769,7 +2790,7 @@
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
     };
-    commands.append(refresh, generate, ask); head.append(title, commands); customerOverview.append(head);
+    commands.append(refresh, webIntel, generate, ask); head.append(title, commands); customerOverview.append(head);
 
     const summary = el('div', 'definition-grid');
     summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)),
@@ -2818,7 +2839,7 @@
 
     const overview = el('div');
     overview.append(sectionBlock('续约风险', renderRisk(data.risk)), sectionBlock('增购机会', opportunities),
-      sectionBlock('数据概览', renderOverviewStats({ timeline, actions: data.actions || [], fragments: hemoryFragmentsData.fragments || [], workhours: workhoursData })));
+      sectionBlock('数据概览', renderOverviewStats({ timeline: data.timeline, completionRates: data.completionRates, actions: data.actions || [], fragments: hemoryFragmentsData.fragments || [], workhours: workhoursData })));
     addTab('overview', '概览', overview);
     addTab('suggestion_feedback', '建议', renderOnesWorkItems(timeline, 'suggestion_feedback'), draftCommand(c, 'suggestion_feedback', timeline, data.identities));
     addTab('support_ticket', '工单', renderOnesWorkItems(timeline, 'support_ticket'), draftCommand(c, 'support_ticket', timeline, data.identities));

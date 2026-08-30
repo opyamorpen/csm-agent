@@ -18,6 +18,8 @@ import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent }
 import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
+import { WebIntelService } from './workbench/webintel.js';
+import { RISK_RULE_VERSION } from './workbench/risk.js';
 import { CaseService } from './workbench/cases.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate, draftEditContract, applyDraftEdits, confirmDraftEditContract, applyConfirmDraftEdits } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
@@ -278,7 +280,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     });
     const recordWebIntelligence = makeRecordWebIntelligenceHandler({
       getCustomer: boundCustomer,
-      addEvidence: (input) => workbench.db.addEvidence(input),
+      // 落库即重算：web_signal 证据直接参与风险「公开动态」维度与增购机会假设，
+      // 此前不重算导致 agent 落库后风险/机会视图滞后到下一次同步。
+      addEvidence: (input) => {
+        const id = workbench.db.addEvidence(input);
+        if (input.customerId) workbench.sync.recompute(input.customerId);
+        return id;
+      },
     });
     return new AgentSession({
       models: runtime.models,
@@ -539,6 +547,20 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         if (req.method === 'POST' && sub === '/refresh') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
           return json(res, 202, workbench.sync.refreshCustomer(customerId));
+        }
+        // 公开动态检索：强制刷新（忽略 7 天门），检索+落库+重算风险/机会，同步返回结果。
+        if (req.method === 'POST' && sub === '/web-intel') {
+          const customer = workbench.db.getCustomer(customerId);
+          if (!customer) return json(res, 404, { error: 'customer not found' });
+          try {
+            const result = await workbench.sync.runWebIntelForCustomer(customerId, { force: true });
+            workbench.sync.recompute(customerId);
+            const body: Record<string, unknown> = { ...result, risk: workbench.db.latestRisk(customerId) };
+            if (result.status === 'failed') return json(res, 502, body);
+            return json(res, 200, body);
+          } catch (error) {
+            return json(res, 502, { error: (error as Error).message });
+          }
         }
       }
 
@@ -1258,7 +1280,13 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
       sync.recompute(customerId);
     }
   });
-  sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording));
+  sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording),
+    // 公开动态检索注入（同步路径与 agent 工具同源）：key/keyless 与 web_search 工具共用同一配置。
+    (customer, options) => new WebIntelService(db, runtime, {
+      getApiKey: () => loadSearchConfig().apiKey,
+      getMaxResults: () => loadSearchConfig().maxResults ?? 5,
+      getKeylessEnabled: () => loadSearchConfig().keylessFallback,
+    }).refresh(customer, options));
   const cases = new CaseService(db, runtime.mcp, runtime);
   const wiki = new WikiService(runtime.mcp);
   // 工时注入：读已同步的工时登记（payload 缓存优先），生成路径不打实时 MCP。
@@ -1268,6 +1296,11 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   });
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
+  // 风险模型升级（ruleVersion 变化）后启动即全量重算：纯本地计算，无外部调用，
+  // 否则升级部署后库里还压着旧版评分（UI 维度标签对不上 key）。
+  for (const customer of db.listCustomers()) {
+    if (db.latestRisk(customer.id)?.ruleVersion !== RISK_RULE_VERSION) sync.recompute(customer.id);
+  }
   const resumeTimer = setTimeout(() => {
     hemorySegments.resumePending();
     drafts.resumePending();

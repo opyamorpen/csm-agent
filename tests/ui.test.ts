@@ -17,11 +17,13 @@ test('renewal risk dimensions use Chinese business labels', () => {
   const renderer = source.match(/function renderRisk[\s\S]*?\n  }\n\n  function renderTimeline/)?.[0];
 
   assert.ok(labels, 'risk dimension labels were not found');
-  assert.match(labels, /renewal: '续约'/);
-  assert.match(labels, /contract: '合同'/);
+  // v3 五维度：需求完成/工单解决/互动/客户声音/公开动态（续约、合同退出计分）。
+  assert.match(labels, /suggestion: '需求完成'/);
+  assert.match(labels, /ticket: '工单解决'/);
   assert.match(labels, /engagement: '互动'/);
-  assert.match(labels, /delivery: '交付'/);
   assert.match(labels, /voice: '客户声音'/);
+  assert.match(labels, /web: '公开动态'/);
+  assert.doesNotMatch(labels, /renewal:|contract:|delivery:/);
   assert.ok(renderer, 'renderRisk source was not found');
   assert.match(renderer, /RISK_DIMENSION_LABEL\[key\] \|\| key/);
 });
@@ -1032,6 +1034,7 @@ test('customer overview data section renders count-only stat cards with status-c
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
   const sync = readFileSync(new URL('../src/workbench/sync.ts', import.meta.url), 'utf8');
+  const database = readFileSync(new URL('../src/workbench/database.ts', import.meta.url), 'utf8');
 
   // 显示契约：「数据概览」是统一节奏统计卡（需求/工单/运维/工时/待办/沟通），只给数量与比率，明细留在各自 tab。
   const renderer = source.match(/function renderOverviewStats[\s\S]*?\n  \}\n\n  function renderBusinessRecords/)?.[0];
@@ -1039,6 +1042,11 @@ test('customer overview data section renders count-only stat cards with status-c
   for (const label of ['需求', '工单', '运维', '工时', '待办', '沟通']) {
     assert.match(renderer, new RegExp(`'${label}'`));
   }
+  // 完成率用服务端全量口径（overview.completionRates，与风险维度同源）；本地只作旧 API 回退。
+  assert.match(renderer, /completionRates/);
+  assert.match(renderer, /serverRates\.support_ticket/);
+  assert.match(renderer, /serverRates\.suggestion_feedback/);
+  assert.match(renderer, /serverRates\.operations_ticket/);
   // 完成判定只认状态类型（category === 'done'），不用状态名猜；旧数据缺 category → 待刷新。
   assert.match(renderer, /statusCategoryOf\(event\) === 'done'/);
   assert.match(renderer, /return 'stale'/);
@@ -1049,8 +1057,11 @@ test('customer overview data section renders count-only stat cards with status-c
   assert.doesNotMatch(source, /function renderOnesSources/);
   assert.doesNotMatch(source, /source-summary|source-record/);
   assert.doesNotMatch(styles, /\.source-summary|\.source-record/);
-  // 调用点带齐三个数据源（ONES 时间线 + 行动 + Hemory 片段 + 工时）。
-  assert.match(source, /renderOverviewStats\(\{ timeline, actions: data\.actions \|\| \[\], fragments: hemoryFragmentsData\.fragments \|\| \[\], workhours: workhoursData \}\)/);
+  // 调用点带齐数据源（ONES 时间线 + 行动 + Hemory 片段 + 工时 + 服务端全量完成率）。
+  assert.match(source, /renderOverviewStats\(\{ timeline: data\.timeline, completionRates: data\.completionRates, actions: data\.actions \|\| \[\], fragments: hemoryFragmentsData\.fragments \|\| \[\], workhours: workhoursData \}\)/);
+  // 服务端全量口径：database.onesCompletionRates 按 category==='done' 判定、缺 category 标 stale。
+  assert.match(database, /onesCompletionRates/);
+  assert.match(database, /category === 'done'/);
   // 同步层取回状态类型：ONESQL SELECT 含 field005.category，支撑统计 category 优先。
   assert.match(sync, /field005\.category/);
   assert.match(sync, /onesStatusCategory/);
@@ -1062,6 +1073,17 @@ test('customer overview data section renders count-only stat cards with status-c
   assert.match(styles, /\.stat-card \{/);
   assert.match(styles, /\.stat-bar \{/);
   assert.match(styles, /\.stat-bar i \{/);
+});
+
+test('customer page exposes web intelligence refresh next to full sync', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  // 展示契约：客户头部命令行有「刷新公开动态」，强制检索后整页刷新；未搜到是 unknown 话术，不是健康信号。
+  assert.match(source, /'刷新公开动态'/);
+  assert.match(source, /\/web-intel/, '前端应调用 /web-intel 端点');
+  assert.match(source, /未搜到不构成任何正面或负面信号/);
+  assert.match(server, /sub === '\/web-intel'/);
+  assert.match(server, /runWebIntelForCustomer\(customerId, \{ force: true \}\)/);
 });
 
 test('send button doubles as stop control while a turn is running', () => {

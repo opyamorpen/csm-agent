@@ -86,7 +86,8 @@ csm-agent doctor
 csm-agent customers 青岛高测
 csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
-csm-agent customer <CRM客户ID>
+csm-agent customer <CRM客户ID> # 概览含续约风险五维度明细与全量完成率
+csm-agent webintel <CRM客户ID> # 强制检索该客户最近三个月公开动态（8 角度），落库并重算风险/机会
 csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent workhours <CRM客户ID> # 总工时和登记明细，按工时日期倒序
 csm-agent actions [CRM客户ID]

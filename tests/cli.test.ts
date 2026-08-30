@@ -26,9 +26,11 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
+  // 公开动态检索能力：CLI 命令与强制刷新端点同源。
+  assert.ok(capabilities.some((item) => item.workflow === 'web-intelligence-refresh' && item.api.includes('/api/customers/:id/web-intel')));
   // 企业微信待办同步能力已整体移除：命令、工作流与 API 都不得再出现。
   assert.ok(!commands.has('wecom'), 'wecom CLI command should be removed');
   assert.ok(!capabilities.some((item) => item.workflow === 'wecom-todo' || item.api.some((api) => api.includes('/api/wecom/'))),
