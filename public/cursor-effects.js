@@ -19,7 +19,7 @@
     ringR1: 16, // 细环终止半径 px
     ringDur: 400, // 细环寿命 ms
     ringAlpha: 0.45, // 细环峰值透明度
-    clickR1: 110, // 点击同心环终止半径 px
+    clickR1: 70, // 点击同心环终止半径 px（2026-08-30 用户反馈 110 偏大 → 收敛）
     clickDur: 650, // 点击环寿命 ms
     clickAlpha: 0.55, // 点击环峰值透明度
     clickStagger: 80, // 三层错峰间隔 ms
