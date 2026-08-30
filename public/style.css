@@ -569,20 +569,41 @@ footer {
 }
 
 #composer { width: 100%; max-width: var(--chat-width); margin: 0 auto; display: flex; gap: 10px; }
+/* 输入框壳：承载嵌入在框内的「＋」附件按钮（ZCode/Codex 式内嵌入口）。 */
+.input-shell { position: relative; flex: 1; display: flex; }
 #attach {
-  flex: 0 0 auto;
-  width: 41px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 18px;
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
   line-height: 1;
   cursor: pointer;
 }
-#attach:hover { border-color: var(--accent); }
-/* 拖拽文件进入输入区时整个表单高亮，指示可释放。 */
-#composer.dragover { outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 12px; }
+#attach:hover { background: var(--panel-2); color: var(--text); }
+#attach:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+#input {
+  flex: 1;
+  width: 100%;
+  padding: 10px 14px 10px 42px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 15px;
+}
+/* 拖拽文件进入输入区时输入框高亮，指示可释放。 */
+.input-shell.dragover #input { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 10px; }
 
 /* 待发附件条：composer 上方的可移除 chip 列表，与 #composer 同宽对齐。 */
 #attachmentChips {
@@ -629,15 +650,6 @@ footer {
   background: var(--panel-2);
   font-size: 12px;
   align-self: flex-start;
-}
-#input {
-  flex: 1;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  font-size: 15px;
 }
 #input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 #send {

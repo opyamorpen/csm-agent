@@ -6,6 +6,7 @@
   const form = document.getElementById('composer');
   const attachEl = document.getElementById('attach');
   const attachFileEl = document.getElementById('attachFile');
+  const attachShell = document.querySelector('.input-shell');
   const attachmentChipsEl = document.getElementById('attachmentChips');
   const sessionListEl = document.getElementById('sessionList');
   const newSessionBtn = document.getElementById('newSession');
@@ -3216,11 +3217,11 @@
       addAttachmentFiles(files).catch(() => {});
     }
   });
-  footerEl.addEventListener('dragover', (ev) => { ev.preventDefault(); form.classList.add('dragover'); });
-  footerEl.addEventListener('dragleave', (ev) => { if (!footerEl.contains(ev.relatedTarget)) form.classList.remove('dragover'); });
+  footerEl.addEventListener('dragover', (ev) => { ev.preventDefault(); attachShell.classList.add('dragover'); });
+  footerEl.addEventListener('dragleave', (ev) => { if (!footerEl.contains(ev.relatedTarget)) attachShell.classList.remove('dragover'); });
   footerEl.addEventListener('drop', (ev) => {
     ev.preventDefault();
-    form.classList.remove('dragover');
+    attachShell.classList.remove('dragover');
     addAttachmentFiles(ev.dataTransfer?.files).catch(() => {});
   });
 

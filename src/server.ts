@@ -434,7 +434,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     try {
       // ── static ──
       if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        // 磁盘即真相（调样式即刷即生效）：主文档不落任何中间层缓存。
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(await readFile(join(publicDir, 'index.html'), 'utf8'));
       }
       if (req.method === 'GET' && ['/app.js', '/style.css', '/app-icon.svg', '/build-info.js', '/cursor-effects.js'].includes(path)) {
@@ -442,9 +443,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const type = path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
           : path.endsWith('.svg') ? 'image/svg+xml; charset=utf-8' : 'text/html; charset=utf-8';
         // 构建戳必须每次取最新且不被中间层缓存：前端靠它发现「页面新、进程旧」的分裂。
-        // cursor-effects.js 同理：磁盘即真相（调参即刷即生效），无 Last-Modified/ETag 时内核仍可能启发式缓存。
+        // app.js/style.css 同理：无 Last-Modified/ETag 时内核仍可能启发式缓存，改版后旧壳里跑新 API。
         const headers: Record<string, string> = { 'Content-Type': type };
-        if (path === '/build-info.js' || path === '/cursor-effects.js') headers['Cache-Control'] = 'no-store';
+        if (path !== '/app-icon.svg') headers['Cache-Control'] = 'no-store';
         res.writeHead(200, headers);
         return res.end(await readFile(join(publicDir, file), 'utf8'));
       }

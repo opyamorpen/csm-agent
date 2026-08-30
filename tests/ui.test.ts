@@ -1323,14 +1323,16 @@ test('cursor ripple fx: theme tokens, silky wake guards, header toggle and load 
 
 // ── 对话附件显示契约（纯 UI 改动必须有自动化契约检查，AGENTS.md）──
 
-test('composer exposes the attachment entry: + button first, hidden file input, chips container', () => {
+test('composer exposes the attachment entry embedded inside the input box', () => {
   const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  // 「+」在 #input 之前（左下角），type=button 防表单内提交。
-  const attachIdx = page.indexOf('id="attach"');
-  const inputIdx = page.indexOf('id="input"');
-  assert.ok(attachIdx > -1 && inputIdx > -1 && attachIdx < inputIdx, '「+」按钮必须在输入框左侧（composer 内 #input 之前）');
-  assert.match(page, /<button id="attach" type="button" title="添加附件（文本 \/ PDF \/ 图片，也可拖拽或粘贴截图）">＋<\/button>/);
-  assert.match(page, /<input id="attachFile" type="file" multiple class="hidden" \/>/);
+  // 嵌入式结构（ZCode/Codex 风）：#input 外包 .input-shell，「+」钉在输入框内部左缘（#input 之前）。
+  const shell = page.match(/<div class="input-shell">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(shell, '.input-shell wrapper was not found');
+  const attachIdx = shell.indexOf('id="attach"');
+  const inputIdx = shell.indexOf('id="input"');
+  assert.ok(attachIdx > -1 && inputIdx > -1 && attachIdx < inputIdx, '「+」按钮必须在 .input-shell 内、#input 之前');
+  assert.match(shell, /<button id="attach" type="button" title="添加附件（文本 \/ PDF \/ 图片，也可拖拽或粘贴截图）">＋<\/button>/);
+  assert.match(shell, /<input id="attachFile" type="file" multiple class="hidden" \/>/);
   assert.match(page, /<div id="attachmentChips" class="hidden" aria-live="polite"><\/div>/);
 });
 
@@ -1340,6 +1342,7 @@ test('attachment intake: click / paste / drop all feed addAttachmentFiles with l
   assert.match(source, /attachEl\.addEventListener\('click', \(\) => attachFileEl\.click\(\)\);/);
   assert.match(source, /form\.addEventListener\('paste', \(ev\) => \{\s*const files = ev\.clipboardData\?\.files;/);
   assert.match(source, /footerEl\.addEventListener\('drop', \(ev\) => \{/);
+  assert.match(source, /attachShell\.classList\.add\('dragover'\)/);
   // 限制与服务端一致：5 个 / 单文件 8MB / 合计 15MB。
   assert.match(source, /const ATTACH_MAX_COUNT = 5;/);
   assert.match(source, /const ATTACH_MAX_FILE = 8 \* 1024 \* 1024;/);
@@ -1368,9 +1371,13 @@ test('user messages render attachments: image preview via session route, others 
   assert.match(renderer[0], /`\/api\/sessions\/\$\{sessionId\}\/attachments\/\$\{a\.id\}`/);
   assert.match(renderer[0], /el\('span', 'attach-file', '📎 ' \+ \(a\.name \|\| '附件'\)\)/);
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
-  // 新选择器必须走主题变量（深浅双主题零硬编码色值）。
-  assert.match(styles, /#attach \{[^}]*background: var\(--panel-2\)/);
-  assert.match(styles, /#composer\.dragover \{[^}]*outline: 2px dashed var\(--accent\)/);
+  // 嵌入式契约：绝对定位钉在输入框内左缘、透明底（hover 才显色）、#input 左内边距让位。
+  assert.match(styles, /#attach \{[^}]*position: absolute;/s);
+  assert.match(styles, /#attach \{[^}]*background: transparent;/s);
+  assert.match(styles, /#attach:hover \{ background: var\(--panel-2\); color: var\(--text\); \}/);
+  assert.match(styles, /#input \{[^}]*padding: 10px 14px 10px 42px;/s);
+  assert.match(styles, /\.input-shell \{ position: relative; flex: 1; display: flex; \}/);
+  assert.match(styles, /\.input-shell\.dragover #input \{ outline: 2px dashed var\(--accent\)/);
   assert.match(styles, /\.msg img\.attach-image \{[^}]*border: 1px solid var\(--border\)/);
   assert.match(styles, /#attachmentChips \{/);
   assert.match(styles, /\.attach-chip \{/);
@@ -1385,4 +1392,28 @@ test('llm settings expose a vision toggle: editable for custom, auto-detected re
   assert.match(source, /llmVision\.disabled = !isCustom;/);
   assert.match(source, /llmPayload\.vision = llmVision\.checked;/);
   assert.match(source, /visionSupported = data\.vision === true;/);
+});
+
+test('mac app shell implements the WKWebView open-panel delegate (file inputs would be dead without it)', () => {
+  const swift = readFileSync(new URL('../scripts/mac-app/main.swift', import.meta.url), 'utf8');
+  // WKWebView 的 <input type="file"> 点击完全依赖宿主 App 实现 runOpenPanelWith：
+  // 缺了它点击静默无反应（无任何控制台报错），与 confirm/alert 面板缺失是同一类坑。
+  assert.match(swift, /func webView\(_ webView: WKWebView,\s*runOpenPanelWith parameters: WKOpenPanelParameters,/);
+  assert.match(swift, /panel\.allowsMultipleSelection = parameters\.allowsMultipleSelection/);
+  assert.match(swift, /panel\.canChooseFiles = true/);
+  // 三件套 JS 面板代理仍在（历史回归守护）。
+  assert.match(swift, /runJavaScriptAlertPanelWithMessage/);
+  assert.match(swift, /runJavaScriptConfirmPanelWithMessage/);
+});
+
+test('static shell assets are served no-store so a restarted app never runs a stale front-end', () => {
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  // 磁盘即真相：主文档与 app.js/style.css 不落中间层缓存（图标这类稳定资源除外），
+  // 否则 WKWebView/浏览器内核的启发式缓存会让「改完样式看不到」。
+  const indexRoute = server.match(/if \(req\.method === 'GET' && \(path === '\/' \|\| path === '\/index\.html'\)\) \{[\s\S]*?\n      \}/)?.[0];
+  assert.ok(indexRoute, 'index route was not found');
+  assert.match(indexRoute, /'Cache-Control': 'no-store'/);
+  const staticRoute = server.match(/if \(req\.method === 'GET' && \['\/app\.js', '\/style\.css'[\s\S]*?\n      \}/)?.[0];
+  assert.ok(staticRoute, 'static asset route was not found');
+  assert.match(staticRoute, /if \(path !== '\/app-icon\.svg'\) headers\['Cache-Control'\] = 'no-store';/);
 });

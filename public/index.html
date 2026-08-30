@@ -174,9 +174,11 @@
       <footer class="hidden">
         <div id="attachmentChips" class="hidden" aria-live="polite"></div>
         <form id="composer">
-          <button id="attach" type="button" title="添加附件（文本 / PDF / 图片，也可拖拽或粘贴截图）">＋</button>
-          <input id="attachFile" type="file" multiple class="hidden" />
-          <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
+          <div class="input-shell">
+            <button id="attach" type="button" title="添加附件（文本 / PDF / 图片，也可拖拽或粘贴截图）">＋</button>
+            <input id="attachFile" type="file" multiple class="hidden" />
+            <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
+          </div>
           <button id="send" type="submit">发送</button>
         </form>
       </footer>

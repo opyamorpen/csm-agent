@@ -215,6 +215,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
+    // File inputs (对话附件「＋」) present no panel without this delegate —
+    // the same silent-failure class as the JS panels above: the click does
+    // nothing and nothing logs, so it looks like a dead button.
+    func webView(_ webView: WKWebView,
+                 runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.message = "选择要附带到对话的文件"
+        if panel.runModal() == .OK {
+            completionHandler(panel.urls)
+        } else {
+            completionHandler(nil)
+        }
+    }
+
     // Retry until the Node server is up (it takes a moment to boot).
     func webView(_ webView: WKWebView,
                  didFailProvisionalNavigation navigation: WKNavigation?,
