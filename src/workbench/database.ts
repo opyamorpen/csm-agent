@@ -12,6 +12,7 @@ import type {
   CustomerInput,
   DraftBatch,
   DraftGenerationJob,
+  DraftJobKind,
   DraftItem,
   DraftItemType,
   DraftItemStatus,
@@ -500,6 +501,13 @@ export class WorkbenchDatabase {
     }
     if (!draftJobColumns.some((column) => String(column.name) === 'note')) {
       this.db.exec('ALTER TABLE draft_generation_jobs ADD COLUMN note TEXT;');
+    }
+    const caseDraftColumns = this.db.prepare('PRAGMA table_info(case_drafts)').all() as Row[];
+    if (!caseDraftColumns.some((column) => String(column.name) === 'fingerprint')) {
+      this.db.exec('ALTER TABLE case_drafts ADD COLUMN fingerprint TEXT;');
+    }
+    if (!caseDraftColumns.some((column) => String(column.name) === 'generator')) {
+      this.db.exec('ALTER TABLE case_drafts ADD COLUMN generator TEXT;');
     }
     const customerColumns = this.db.prepare('PRAGMA table_info(customers)').all() as Row[];
     if (!customerColumns.some((column) => String(column.name) === 'after_sales_stage')) {
@@ -1020,11 +1028,12 @@ export class WorkbenchDatabase {
     return (this.db.prepare('SELECT * FROM case_candidates WHERE customer_id=?').get(customerId) as Row | undefined) ?? null;
   }
 
-  createCaseDraft(customerId: string, title: string, fields: Record<string, unknown>, evidenceRefs: string[]): CaseDraft {
+  createCaseDraft(customerId: string, title: string, fields: Record<string, unknown>, evidenceRefs: string[], meta?: { fingerprint?: string | null; generator?: string | null }): CaseDraft {
     const now = nowIso();
-    const draft: CaseDraft = { id: randomUUID(), customerId, version: 1, status: 'draft', title, fields, evidenceRefs, createdAt: now, updatedAt: now };
-    this.db.prepare(`INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`)
-      .run(draft.id, customerId, 1, 'draft', title, json(fields), json(evidenceRefs), now, now);
+    const draft: CaseDraft = { id: randomUUID(), customerId, version: 1, status: 'draft', title, fields, evidenceRefs,
+      fingerprint: meta?.fingerprint ?? null, generator: meta?.generator ?? null, createdAt: now, updatedAt: now };
+    this.db.prepare(`INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,fingerprint,generator,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(draft.id, customerId, 1, 'draft', title, json(fields), json(evidenceRefs), meta?.fingerprint ?? null, meta?.generator ?? null, now, now);
     return draft;
   }
 
@@ -1033,6 +1042,7 @@ export class WorkbenchDatabase {
     return row ? {
       id: String(row.id), customerId: String(row.customer_id), version: Number(row.version), status: String(row.status) as CaseDraft['status'],
       title: String(row.title), fields: parseJson(row.fields_json, {}), evidenceRefs: parseJson(row.evidence_refs_json, []),
+      fingerprint: (row.fingerprint as string | null) ?? null, generator: (row.generator as string | null) ?? null,
       publishedPageId: row.published_page_id as string | null, publishedAt: row.published_at as string | null,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     } : undefined;
@@ -1139,7 +1149,7 @@ export class WorkbenchDatabase {
     return !!this.db.prepare("SELECT 1 FROM sync_runs WHERE scope=? AND status='succeeded' LIMIT 1").get(scope);
   }
 
-  createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob {
+  createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: DraftJobKind = 'hemory'): DraftGenerationJob {
     const existing = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     if (existing) return this.draftJobFromRow(existing);
     const now = nowIso();
@@ -1153,7 +1163,7 @@ export class WorkbenchDatabase {
     return { id: String(row.id), customerId: String(row.customer_id), fingerprint: String(row.fingerprint),
       sourceEventIds: parseJson(row.source_event_ids_json, []), status: String(row.status) as DraftGenerationJob['status'],
       attempts: Number(row.attempts), error: row.error as string | null,
-      kind: (String(row.kind ?? 'hemory') === 'weekly_report' ? 'weekly_report' : 'hemory'),
+      kind: (String(row.kind ?? 'hemory') === 'weekly_report' ? 'weekly_report' : String(row.kind ?? 'hemory') === 'case_report' ? 'case_report' : 'hemory'),
       note: row.note as string | null,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
   }
@@ -1168,19 +1178,19 @@ export class WorkbenchDatabase {
     return row ? this.draftJobFromRow(row) : undefined;
   }
 
-  listPendingDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob[] {
+  listPendingDraftJobs(kind: DraftJobKind = 'hemory'): DraftGenerationJob[] {
     const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status IN ('pending','running','failed') ORDER BY updated_at").all(kind) as Row[];
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
   /** 进行中（pending/running）任务：草稿列表「重新生成中」标记的数据源；与含 failed 的 resume 语义分开。 */
-  listActiveDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory'): DraftGenerationJob[] {
+  listActiveDraftJobs(kind: DraftJobKind = 'hemory'): DraftGenerationJob[] {
     const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status IN ('pending','running') ORDER BY created_at").all(kind) as Row[];
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
   /** 失败任务清单（最近 limit 条，默认 50）：失败明细展示与 CLI 入口；不含已被新任务取代的 superseded。 */
-  listFailedDraftJobs(kind: 'hemory' | 'weekly_report' = 'hemory', limit = 50): DraftGenerationJob[] {
+  listFailedDraftJobs(kind: DraftJobKind = 'hemory', limit = 50): DraftGenerationJob[] {
     const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status='failed' ORDER BY updated_at DESC LIMIT ?").all(kind, limit) as Row[];
     return rows.map((row) => this.draftJobFromRow(row));
   }

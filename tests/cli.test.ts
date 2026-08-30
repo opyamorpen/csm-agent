@@ -39,6 +39,7 @@ test('CLI exposes machine-readable core capability coverage without a running se
     'bulk-accept API should be removed from capabilities');
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-complete')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
+  assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/regenerate')));
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/ignore')));
@@ -71,6 +72,10 @@ test('CLI provides standard global help and version commands', () => {
   // 两态模型：批量完成仅未完成生效，已完成跳过。
   assert.match(help.stdout, /仅未完成状态生效，已完成跳过/);
   assert.doesNotMatch(help.stdout, /待处理\/进行中/);
+  assert.match(help.stdout, /csm-agent case generate <客户ID或名称> \[--force\] \[--wait\]/);
+  assert.match(help.stdout, /csm-agent case show <草稿ID> \[--json\]/);
+  assert.match(help.stdout, /csm-agent case regenerate <草稿ID> \[--wait\]/);
+  assert.match(help.stdout, /默认输出客户版案例叙事 Markdown（与复制\/Wiki 发布同源）/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
   assert.match(help.stdout, /默认输出客户版周报 Markdown（与复制\/Wiki 发布同源）/);

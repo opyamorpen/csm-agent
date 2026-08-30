@@ -134,6 +134,15 @@ function editedDraft(original: ConfirmDraft, value: unknown): ConfirmDraft | nul
   };
 }
 
+/** 案例精修提交里允许合并回 case_drafts.fields 的叙事键（五段正文 + 内部元数据）。 */
+function pickNarrativeFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  for (const key of ['background', 'challenges', 'requirements', 'solution', 'value', 'evidence_map', 'unknowns']) {
+    if (fields[key] !== undefined) picked[key] = fields[key];
+  }
+  return picked;
+}
+
 export function validateCustomerBoundDraft(draft: ConfirmDraft, customer: CustomerContext | null): string | null {
   if (!customer?.crm_customer_id || !customer.customer_name) return '当前 Agent 会话未绑定 CRM 售后客户，不能批准回写';
   const draftCustomerId = draft.fields.customer_id ?? draft.fields.crm_customer_id;
@@ -667,7 +676,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (req.method === 'POST' && path === '/api/case-drafts') {
         const body = await readBody(req);
         try {
-          return json(res, 201, workbench.cases.generate(String(body.customerId ?? '')));
+          return json(res, 202, workbench.cases.generate(String(body.customerId ?? ''), Boolean(body.force)));
         } catch (error) {
           return json(res, 400, { error: (error as Error).message });
         }
@@ -676,6 +685,16 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (caseMatch) {
         const draftId = caseMatch[1];
         const sub = caseMatch[2] ?? '';
+        if (req.method === 'GET' && sub === '') {
+          const detail = workbench.cases.detail(draftId);
+          return detail ? json(res, 200, detail) : json(res, 404, { error: '案例草稿不存在' });
+        }
+        if (req.method === 'POST' && sub === '/regenerate') {
+          const draft = workbench.db.getCaseDraft(draftId);
+          if (!draft) return json(res, 404, { error: '案例草稿不存在' });
+          try { return json(res, 202, workbench.cases.generate(draft.customerId, true)); }
+          catch (error) { return json(res, 400, { error: (error as Error).message }); }
+        }
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
           const draft = workbench.db.updateCaseDraft(draftId, Number(body.version), String(body.title ?? ''), body.fields ?? {});
@@ -1120,6 +1139,44 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               approvedDraft = body.draft ? editedDraft(session.pending.draft, body.draft) : session.pending.draft;
               if (!approvedDraft) return json(res, 400, { error: '编辑后的草稿无效，目标系统和目标工具不可修改' });
             }
+            // 案例对话精修分支：confirm_write 带 case_draft_id 即本地草稿更新（case_drafts 表），
+            // 不是外部写——跳过 MCP 写工具校验，批准即应用，版本乐观锁防并发编辑。
+            const caseDraftId = approvedDraft.fields?.case_draft_id;
+            if (approvedDraft.record_type === 'case' && typeof caseDraftId === 'string' && caseDraftId) {
+              const caseDraft = workbench.db.getCaseDraft(caseDraftId);
+              if (!caseDraft) return json(res, 400, { error: `案例草稿不存在: ${caseDraftId}` });
+              if (caseDraft.customerId !== session.customer?.crm_customer_id) {
+                return json(res, 400, { error: '案例草稿不属于当前会话绑定的客户' });
+              }
+              if (caseDraft.status !== 'draft') return json(res, 400, { error: '案例草稿已发布，不可再精修' });
+              const expectedVersion = Number(approvedDraft.fields?.case_version ?? caseDraft.version);
+              if (expectedVersion !== caseDraft.version) {
+                return json(res, 400, { error: `案例草稿版本已变化（当前 v${caseDraft.version}），请重新发起精修` });
+              }
+              const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer);
+              if (bindingError) return json(res, 400, { error: bindingError });
+              const fields = { ...caseDraft.fields, ...pickNarrativeFields(approvedDraft.fields) };
+              const updated = workbench.db.updateCaseDraft(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title, fields);
+              if (!updated) return json(res, 400, { error: '案例草稿更新失败（版本已变化或已发布）' });
+              workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id });
+              session.pending.resolve(approvedDraft);
+              session.pending = null;
+              const refineRecord = session.lastRecordId
+                ? store.records.find((r) => r.id === session.lastRecordId)
+                : undefined;
+              if (refineRecord) {
+                refineRecord.status = 'written';
+                refineRecord.type = approvedDraft.record_type;
+                refineRecord.title = approvedDraft.title;
+                refineRecord.customer = customerOf(approvedDraft);
+                refineRecord.target = 'local';
+                refineRecord.fields = approvedDraft.fields;
+                refineRecord.updatedAt = Date.now();
+                store.persistRecords();
+                session.lastRecordId = null;
+              }
+              return json(res, 200, { ok: true, decided: 'approved', refined: true, draft: updated });
+            }
             const target = runtime.mcp.resolve(approvedDraft.target_tool);
             if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {
               return json(res, 400, { error: '目标工具不是已连接的写工具' });
@@ -1202,7 +1259,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     }
   });
   sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording));
-  const cases = new CaseService(db, runtime.mcp);
+  const cases = new CaseService(db, runtime.mcp, runtime);
   const wiki = new WikiService(runtime.mcp);
   // 工时注入：读已同步的工时登记（payload 缓存优先），生成路径不打实时 MCP。
   const weekly = new WeeklyReportService(db, runtime.mcp, runtime, async (customerId: string) => {
@@ -1215,6 +1272,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     hemorySegments.resumePending();
     drafts.resumePending();
     weekly.resumePending();
+    cases.resumePending();
   }, 5_000);
   resumeTimer.unref();
   const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki }));

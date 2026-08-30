@@ -196,7 +196,6 @@
     customer_manhour: { label: '工时', recordType: 'workhour', target: '客户工时管理 / 售后客户' },
     private_cloud_instance: { label: '私有云实例', recordType: 'private_cloud_instance', target: '私有云实例管理 / 私有云实例', projectId: 'GL3ysesF59l5lRH9', issueTypeId: 'GvyPHeW5' },
     followup: { label: '跟进记录', recordType: 'followup', target: 'CRM / CSM 售后客户跟进' },
-    case: { label: '客户案例', recordType: 'case', target: 'ONES Wiki / 客户案例库' },
   };
 
   function badge(text, cls) {
@@ -2238,12 +2237,10 @@
       ? meetings.map((event) => `- ${formatDateTime(event.occurredAt)} [${event.title}] ${event.payload?.summary || ''}\n${event.payload?.transcript || ''}`).join('\n')
       : '- 当前工作台没有已确认归属的会议片段；请使用 Hemory MCP 按客户全称检索，无法唯一归属时停止。';
     const config = target.projectId
-      ? `ONES projectID=${target.projectId}，issueTypeID=${target.issueTypeId}。新建前先调用本地工具 get_ones_desk_required_fields（record_type=${target.recordType}）获取必填字段与完整选项 UUID 表；fieldValues 必须覆盖全部必填规格字段并包含 {"fieldID":"JrvswW8P","value":"${option?.external_id || ''}"}；实例部署类型按返回的当前客户解析值填写（CRM 使用版本=公有云版→公有云，其余→私有云）；证据不足的字段用兜底值。`
+      ? `ONES projectID=${target.projectId}，issueTypeID=${target.issueTypeId}。新建前先调用本地工具 get_ones_desk_required_fields (record_type=${target.recordType}) 获取必填字段与完整选项 UUID 表；fieldValues 必须覆盖全部必填规格字段并包含 {"fieldID":"JrvswW8P","value":"${option?.external_id || ''}"}；实例部署类型按返回的当前客户解析值填写（CRM 使用版本=公有云版→公有云，其余→私有云）；证据不足的字段用兜底值。`
       : targetKey === 'customer_manhour'
         ? `只能向已绑定售后客户工作项 issueID=${manhour?.externalId || ''} 登记工时；先调用 get_manhour_mode，再选择对应写工具。`
-        : targetKey === 'followup'
-          ? `CRM 回写参数必须绑定 CSM 售后客户记录 _id=${customer.id}。`
-          : '案例草稿必须在 fields 中保留 customer_id 和 customer_name，发布到 ONES Wiki 前由 CSM 确认父页面与完整内容。';
+        : `CRM 回写参数必须绑定 CSM 售后客户记录 _id=${customer.id}。`;
     const prompt = `请基于以下已确认归属的 Hemory 沟通证据，为客户生成“${target.label}”回写草稿，并完成 CSM 人工确认流程。\n\n`
       + `客户名称：${customer.name}\nCRM CSM售后客户ID：${customer.id}\nONES客户信息option ID：${option?.external_id || '未解析，禁止回写'}\n目标：${target.target}\n${config}\n\n`
       + `会议证据：\n${excerpts}\n\n`
@@ -2261,6 +2258,57 @@
     const button = el('button', 'primary-command small', `从会议生成${DRAFT_TARGETS[targetKey].label}草稿`);
     button.onclick = () => startAgentDraft(customer, targetKey, timeline, identities).catch(async (error) => { await alertDialog(error.message); });
     return button;
+  }
+
+  /**
+   * 案例对话精修：把黑盒生成的五段叙事草稿注入客户绑定的 Agent 会话，CSM 逐轮反馈打磨；
+   * confirm_write 带 case_draft_id/case_version，服务端批准即写回本地草稿（不触碰外部写）。
+   */
+  async function startCaseRefine(customer, draft) {
+    const fields = draft.fields || {};
+    const narrative = JSON.stringify({
+      case_draft_id: draft.id, case_version: draft.version,
+      customer_id: fields.customer_id, customer_name: fields.customer_name,
+      background: fields.background ?? '', challenges: fields.challenges ?? fields.pain_points ?? [],
+      requirements: fields.requirements ?? [], solution: fields.solution ?? '',
+      value: fields.value ?? fields.results ?? [], unknowns: fields.unknowns ?? [],
+    }, null, 2);
+    const prompt = `请对以下客户案例草稿进行对话精修。我会逐轮给出修改要求（支持整稿重写或只改某一章节）；未要求修改的章节必须原文保留。\n\n`
+      + `客户名称：${customer.name}\nCRM CSM售后客户ID：${customer.id}\n\n`
+      + `当前草稿（v${draft.version}）：\n${narrative}\n\n`
+      + `要求：\n`
+      + `- 先通读草稿并概述五段现状与你发现的待改进点（如证据不足、叙事断裂、内部信息残留），等待我的修改意见。\n`
+      + `- 修改时输出完整五段并调用 confirm_write（target_system=ones, record_type=case）：fields 必须原样保留 case_draft_id="${draft.id}" 和 case_version=${draft.version}，并包含 customer_id="${customer.id}"、customer_name="${customer.name}" 与完整五段字段。\n`
+      + `- 保持客户叙事视角与证据纪律：只写有证据的事实，价值段不虚构数字，正文不出现内部系统名、风险评分、工时统计、联系人信息与合同金额。\n`
+      + `- 本次会话只修改本地草稿，不得调用任何 CRM/ONES 外部写工具；发布到 ONES Wiki 由我在工作台完成。`;
+    const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
+    await switchSession(created.id);
+    renderCustomerCard(created.customer);
+    showView('agent');
+    await showAgentMode('conversation');
+    inputEl.value = prompt;
+    form.requestSubmit();
+  }
+
+  /**
+   * 案例生成轮询：任务到终态后按指纹定位新草稿并回调；超时提示仍在后台运行。
+   * 返回 { draft } 或 { error } / { timeout: true }。
+   */
+  async function pollCaseJob(customerId, jobId, fingerprint) {
+    for (let attempt = 0; attempt < 90; attempt++) {
+      const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
+      const job = (data.jobs || [])[0];
+      if (!job) throw new Error('生成任务不存在');
+      if (job.status === 'succeeded') {
+        const list = await api(`/api/case-drafts?customer_id=${encodeURIComponent(customerId)}`);
+        const draft = (list.drafts || []).find((item) => item.fingerprint === fingerprint)
+          ?? (list.drafts || [])[0];
+        return draft ? { draft } : { error: '任务成功但未找到新草稿' };
+      }
+      if (job.status === 'failed') return { error: job.error || '未知原因' };
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return { timeout: true };
   }
 
   /**
@@ -2694,8 +2742,24 @@
     const commands = el('div', 'row-actions');
     const refresh = el('button', 'quiet-command', '刷新三套系统');
     refresh.onclick = async () => { const run = await api(`/api/customers/${encodeURIComponent(customerId)}/refresh`, { method: 'POST' }); await pollSync(run.id); await openCustomer(customerId); };
-    const generate = el('button', 'primary-command', '生成案例草稿');
-    generate.onclick = async () => { try { const draft = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) }); editCase(draft); } catch (error) { await alertDialog(error.message); } };
+    const generate = el('button', 'primary-command', '生成案例');
+    generate.onclick = async () => {
+      try {
+        generate.disabled = true;
+        generate.textContent = '生成中…';
+        const result = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) });
+        if (result.reused && result.draftId) {
+          const detail = await api(`/api/case-drafts/${encodeURIComponent(result.draftId)}`);
+          editCase(detail.draft);
+          return;
+        }
+        const outcome = await pollCaseJob(customerId, result.jobId, result.fingerprint);
+        if (outcome.error) await alertDialog(`案例生成失败：${outcome.error}`);
+        else if (outcome.timeout) await alertDialog('生成超时，任务仍在后台运行；稍后重新打开客户详情可查看结果。');
+        else editCase(outcome.draft);
+      } catch (error) { await alertDialog(error.message); }
+      finally { generate.disabled = false; generate.textContent = '生成案例'; }
+    };
     const ask = el('button', 'quiet-command', '询问 Agent');
     ask.onclick = async () => {
       try {
@@ -2725,7 +2789,7 @@
 
     const drafts = el('div', 'case-list');
     if (!(data.caseDrafts || []).length) drafts.append(el('div', 'workspace-empty', data.caseCandidate?.eligible ? '已识别为案例候选，尚未生成草稿' : '尚未满足案例候选条件'));
-    for (const draft of data.caseDrafts || []) drafts.append(caseCard(draft));
+    for (const draft of data.caseDrafts || []) drafts.append(await caseCard(draft, true, customerId));
 
     const tabBar = el('div', 'customer-tabs');
     tabBar.setAttribute('role', 'tablist');
@@ -2764,12 +2828,7 @@
     addTab('followup', '跟进记录', renderFollowups(timeline), draftCommand(c, 'followup', timeline, data.identities));
     addTab('hemory_fragments', 'Hemory 片段', buildCustomerHemoryPanel(c, hemoryFragmentsData.fragments || []));
     const casePanel = el('div');
-    const caseCommands = el('div', 'row-actions');
-    caseCommands.append(draftCommand(c, 'case', timeline, data.identities));
-    const structuredCase = el('button', 'quiet-command small', '生成结构化案例草稿');
-    structuredCase.onclick = () => generate.onclick();
-    caseCommands.append(structuredCase);
-    casePanel.append(caseCommands, drafts);
+    casePanel.append(drafts);
     addTab('cases', '客户案例', casePanel);
     addTab('weekly_report', '实施周报', buildWeeklyPanel(c));
     addTab('actions', '行动事项', actions);
@@ -2885,11 +2944,51 @@
     finally { setActionBulkBusy(false); }
   };
 
-  function caseCard(draft) {
+  /**
+   * 案例草稿卡。customerMode（客户详情）：草稿态附 编辑/对话精修/重新生成 三操作与
+   * 数据更新徽章；全局案例库只读展示。contextStale 由详情接口实时比对指纹得出。
+   */
+  async function caseCard(draft, customerMode = false, customerId = null) {
     const card = el('article', 'case-card-item');
     card.append(el('strong', null, draft.title), el('div', 'cell-sub', `${draft.status === 'published' ? '已发布' : `草稿 v${draft.version}`} · ${formatDateTime(draft.updatedAt)}`));
     const buttons = el('div', 'row-actions');
-    if (draft.status === 'draft') { const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editCase(draft); buttons.append(edit); }
+    if (draft.status === 'draft') {
+      const edit = el('button', 'quiet-command small', '编辑');
+      edit.onclick = () => editCase(draft);
+      buttons.append(edit);
+      if (customerMode && customerId) {
+        const refine = el('button', 'quiet-command small', '对话精修');
+        refine.onclick = async () => {
+          try {
+            const cached = customersCache.find((item) => item.id === customerId)
+              ?? (await api('/api/customers')).customers.find((item) => item.id === customerId);
+            if (!cached) return alertDialog('未找到客户信息，无法发起精修');
+            await startCaseRefine(cached, draft);
+          } catch (error) { await alertDialog(error.message); }
+        };
+        buttons.append(refine);
+        const regenerate = el('button', 'quiet-command small', '重新生成');
+        regenerate.onclick = async () => {
+          try {
+            regenerate.disabled = true;
+            regenerate.textContent = '重新生成中…';
+            const result = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}/regenerate`, { method: 'POST' });
+            const outcome = await pollCaseJob(draft.customerId, result.jobId, result.fingerprint);
+            if (outcome.error) await alertDialog(`重新生成失败：${outcome.error}`);
+            else if (outcome.timeout) await alertDialog('生成超时，任务仍在后台运行；稍后重新打开客户详情可查看结果。');
+            else editCase(outcome.draft);
+          } catch (error) { await alertDialog(error.message); }
+          finally { regenerate.disabled = false; regenerate.textContent = '重新生成'; }
+        };
+        buttons.append(regenerate);
+      }
+      if (customerMode && customerId) {
+        try {
+          const detail = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
+          if (detail.contextStale) buttons.append(badge('数据已更新', 'warning'));
+        } catch { /* 详情失败不阻塞卡片渲染 */ }
+      }
+    }
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
     card.append(buttons);
     return card;
@@ -2899,30 +2998,32 @@
     const data = await api('/api/case-drafts');
     caseList.innerHTML = '';
     if (!(data.drafts || []).length) caseList.append(el('div', 'workspace-empty', '暂无案例草稿'));
-    for (const draft of data.drafts || []) caseList.append(caseCard(draft));
+    for (const draft of data.drafts || []) caseList.append(await caseCard(draft));
   }
 
+  /** 五段叙事编辑弹窗：列表章节每行一项；存量草稿旧键（pain_points/results）读取时回退映射。 */
   function editCase(draft) {
     openWorkbenchModal('编辑客户案例');
     const title = inputField('案例标题', draft.title);
     const fields = draft.fields || {};
-    const background = inputField('客户背景', fields.background, 'textarea');
-    const pain = inputField('业务痛点（每行一项）', (fields.pain_points || []).join('\n'), 'textarea');
-    const solution = inputField('解决方案', fields.solution, 'textarea');
-    const implementation = inputField('实施过程', fields.implementation, 'textarea');
-    const results = inputField('成果（每行一项）', (fields.results || []).map((item) => typeof item === 'string' ? item : `${item.metric || ''}: ${item.value || ''}`).join('\n'), 'textarea');
-    const quote = inputField('客户原话', fields.customer_quote, 'textarea');
-    const lessons = inputField('可复用经验（每行一项）', (fields.reusable_lessons || []).join('\n'), 'textarea');
-    const redaction = inputField('脱敏检查', fields.redaction_review, 'textarea');
+    const asList = (value, legacy) => {
+      const source = Array.isArray(value) ? value : (Array.isArray(legacy) ? legacy : []);
+      return source.map((item) => typeof item === 'string' ? item : `${item.metric || ''}: ${item.value || ''}`.trim()).filter(Boolean).join('\n');
+    };
+    const background = inputField('一、客户背景（行业、业务概况与合作起点的连贯叙述）', fields.background, 'textarea');
+    const challenges = inputField('二、痛点、现状与挑战（每行一项）', asList(fields.challenges, fields.pain_points), 'textarea');
+    const requirements = inputField('三、需求与要求（每行一项）', asList(fields.requirements), 'textarea');
+    const solution = inputField('四、解决方案（问题如何被分析、设计、实施与协同解决）', fields.solution, 'textarea');
+    const value = inputField('五、价值与成效（每行一项；量化优先，无量化写有据定性价值）', asList(fields.value, fields.results), 'textarea');
     const actions = el('div', 'row-actions');
     const save = el('button', 'primary-command', '保存草稿');
     const publish = el('button', 'quiet-command', '预览并发布');
+    const lines = (input) => input.value.split('\n').map((x) => x.trim()).filter(Boolean);
     async function saveDraft() {
       return api(`/api/case-drafts/${draft.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        version: draft.version, title: title.input.value.trim(), fields: { ...fields, background: background.input.value.trim(),
-          pain_points: pain.input.value.split('\n').map((x) => x.trim()).filter(Boolean), solution: solution.input.value.trim(),
-          implementation: implementation.input.value.trim(), results: results.input.value.split('\n').map((x) => x.trim()).filter(Boolean),
-          customer_quote: quote.input.value.trim(), reusable_lessons: lessons.input.value.split('\n').map((x) => x.trim()).filter(Boolean), redaction_review: redaction.input.value.trim() },
+        version: draft.version, title: title.input.value.trim(), fields: { ...fields,
+          background: background.input.value.trim(), challenges: lines(challenges.input),
+          requirements: lines(requirements.input), solution: solution.input.value.trim(), value: lines(value.input) },
       }) });
     }
     save.onclick = async () => { draft = await saveDraft(); closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases(); };
@@ -2933,13 +3034,14 @@
         if (!target) return;
         const parentPageID = target.pageID;
         const preview = await api(`/api/case-drafts/${draft.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID }) });
-        if (!await confirmDialog(`确认将“${draft.title}”发布到 ONES Wiki「${target.title}」下？\n\n${preview.args.content.slice(0, 800)}`)) return;
+        const warningText = (preview.warnings || []).length ? `\n\n${(preview.warnings || []).join('\n')}` : '';
+        if (!await confirmDialog(`确认将“${draft.title}”发布到 ONES Wiki「${target.title}」下？${warningText}\n\n${preview.args.content.slice(0, 800)}`)) return;
         draft = await api(`/api/case-drafts/${draft.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: draft.version, parentPageID, approvalHash: preview.approvalHash }) });
         closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases();
       } catch (error) { await alertDialog(error.message); }
     };
     actions.append(save, publish);
-    workbenchModalBody.append(title.field, background.field, pain.field, solution.field, implementation.field, results.field, quote.field, lessons.field, redaction.field, actions);
+    workbenchModalBody.append(title.field, background.field, challenges.field, requirements.field, solution.field, value.field, actions);
   }
 
   async function pollSync(id) {

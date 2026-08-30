@@ -3196,3 +3196,232 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
   assert.ok(bad.errors.length > 0);
   assert.equal(bad.draft, null);
 });
+
+// ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, caseFingerprint, caseContentWarnings, caseSectionTexts, parseCaseContent, renderCaseMarkdown } from '../src/workbench/cases.js';
+
+function fakeCaseModel(content: unknown): any {
+  return {
+    llm: { provider: 'fake', model: 'fake-model' },
+    models: { complete: async () => ({ content: [{ type: 'text', text: JSON.stringify(content) }], stopReason: 'stop' }) },
+  };
+}
+
+const CASE_CONTENT = {
+  title: '制造客户数字化实践案例',
+  background: '客户戊属于装备制造行业，2025 年 3 月启动研发管理数字化建设，目标是一体化管理研发项目与交付流程。',
+  challenges: ['跨部门项目进度缺乏统一视图，依赖人工汇总', '工单处理状态不透明，客户反复催问'],
+  requirements: ['统一项目与工单管理平台，覆盖研发与售后两条线', '关键节点自动提醒与汇报'],
+  solution: '项目组从流程调研切入，先梳理研发与售后协同断点，再分阶段部署项目管理与工单模块，通过双周对齐机制持续校准方案。',
+  value: ['项目进度汇总从人工周报升级为实时看板', '工单平均响应时间显著缩短'],
+  evidence_map: { background: '客户档案与 03 月启动会议', challenges: '工单 T-2001~T-2004 与 05-12 会议' },
+  unknowns: ['量化基线数据待客户确认'],
+};
+
+function caseMcp(pageId = 'page-c1'): any {
+  return { listTools: () => [], call: async () => ({ text: `{"result":"SUCCESS","data":{"pageID":"${pageId}"}}`, isError: false }) } as any;
+}
+
+function seedCaseCustomer(db: WorkbenchDatabase): void {
+  db.upsertCustomer({ id: 'crm-c1', name: '案例客户一' });
+  db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
+    externalId: 'case-T-1', displayId: 'T-2001', title: '导出超时', occurredAt: '2026-03-10T03:00:00Z',
+    payload: { field005: { name: '已完成' }, field009: '2026-03-10 11:00:00', field010: '2026-03-12 11:00:00' } });
+  segment(db, 'crm-c1', 'case-r1:t1', 'case-r1', '启动会', '2026-03-05T05:00:00Z', '客户提出希望统一管理研发项目');
+  const recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
+    externalId: 'case-r1', title: '录音 case-r1', occurredAt: '2026-03-05T05:00:00Z', payload: {} });
+  db.activateHemoryFragments(recording.id, 'fp-case-r1', [db.findSourceEvent('hemory', 'ai_topic_segment', 'case-r1:t1')!.id]);
+}
+
+test('workbench: case generation runs full-context model job and persists narrative draft', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    assert.ok(result.jobId, '首次生成必须返回任务');
+    assert.equal(result.fingerprint.length, 64);
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '案例草稿必须落库');
+    assert.equal(draft.title, CASE_CONTENT.title, '标题取模型 title');
+    assert.equal(draft.status, 'draft');
+    assert.equal(draft.version, 1);
+    assert.equal(draft.generator, 'fake/fake-model');
+    assert.equal((draft.fields as any).customer_id, 'crm-c1');
+    assert.equal((draft.fields as any).customer_name, '案例客户一');
+    assert.equal((draft.fields as any).background, CASE_CONTENT.background);
+    assert.deepEqual((draft.fields as any).challenges, CASE_CONTENT.challenges);
+    assert.deepEqual((draft.fields as any).evidence_map, CASE_CONTENT.evidence_map);
+    assert.deepEqual((draft.fields as any).unknowns, CASE_CONTENT.unknowns);
+    // 证据引用含时间线事件与片段。
+    assert.ok(draft.evidenceRefs.length >= 2);
+    // 全量上下文注入：工单记录、片段转写、客户档案都在 prompt 里。
+    assert.match(capturedPrompt, /导出超时/);
+    assert.match(capturedPrompt, /统一管理研发项目/);
+    assert.match(capturedPrompt, /案例客户一/);
+    // 叙事契约关键规则。
+    assert.match(capturedPrompt, /客户叙事视角/);
+    assert.match(capturedPrompt, /禁止会议流水账与工单流水账/);
+    assert.match(capturedPrompt, /禁止虚构 ROI/);
+    assert.match(capturedPrompt, /待确认/);
+    assert.match(capturedPrompt, /五段叙事|五个章节/);
+    // 幂等：同指纹再次生成复用最新草稿。
+    const again = service.generate('crm-c1');
+    assert.equal(again.jobId, null);
+    assert.equal(again.reused, true);
+    assert.equal(again.draftId, draft.id);
+    // force 重新生成：新任务落新草稿。
+    const forced = service.generate('crm-c1', true);
+    assert.ok(forced.jobId);
+    await waitForJob(db, forced.jobId!);
+    assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
+    // 生成版本锁定。
+    assert.equal(CASE_GENERATION_VERSION, 'case-v1-narrative');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case detail marks context stale and summarize sources', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT));
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const detail = service.detail(draft.id)!;
+    assert.equal(detail.contextStale, false, '数据未变不提示过期');
+    assert.ok(detail.markdown.includes('## 一、客户背景'));
+    assert.ok(detail.contextSummary.some((entry) => entry.system === 'ones'));
+    // 数据变化后提示过期（非阻断）。
+    db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'case-T-2', title: '新工单', occurredAt: '2026-04-01T03:00:00Z' });
+    const stale = service.detail(draft.id)!;
+    assert.equal(stale.contextStale, true, '数据变化必须提示重新生成');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case generation failure marks job failed without draft', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const failing = {
+      llm: { provider: 'fake', model: 'relay' },
+      models: { complete: async () => ({ stopReason: 'error', errorMessage: 'Request timed out.', content: [] }) },
+    } as any;
+    const service = new CaseService(db, caseMcp(), failing);
+    const result = service.generate('crm-c1');
+    // 指数退避 5s+15s：等待窗口放宽到 75 秒。
+    for (let i = 0; i < 3750 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'failed');
+    assert.match(job.error ?? '', /模型调用失败（第 3\/3 次）: Request timed out\./);
+    assert.equal(db.listCaseDrafts('crm-c1').length, 0, '失败不落草稿');
+    // 失败任务无墓碑指纹：重新 generate 会创建新任务（不因旧任务指纹被幂等短路）——只断言任务创建，
+    // 不触发执行（退避中的后台 process 会活过测试关库窗口）。
+    const failingDraftsBefore = db.listCaseDrafts('crm-c1').length;
+    const jobBefore = db.getDraftJob(result.jobId!)!;
+    assert.equal(jobBefore.status, 'failed');
+    assert.equal(failingDraftsBefore, 0);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case renderContract five sections, ordered numbering, legacy fallback and warnings', () => {
+  // 新契约草稿：五章节中文数字标题 + 条目阿拉伯编号；内部键不渲染。
+  const draft = { id: 'd1', customerId: 'crm-x', version: 1, status: 'draft' as const, title: '案例标题',
+    fields: { ...CASE_CONTENT }, evidenceRefs: ['evt-1'], createdAt: '', updatedAt: '' };
+  const markdown = renderCaseMarkdown(draft as any);
+  assert.match(markdown, /# 案例标题/);
+  assert.match(markdown, /## 一、客户背景/);
+  assert.match(markdown, /## 二、痛点、现状与挑战/);
+  assert.match(markdown, /## 三、需求与要求/);
+  assert.match(markdown, /## 四、解决方案/);
+  assert.match(markdown, /## 五、价值与成效/);
+  assert.match(markdown, /^1\. 跨部门项目进度缺乏统一视图/m);
+  assert.doesNotMatch(markdown, /^- /m);
+  assert.ok(!markdown.includes('evidence_map'), '内部键不得渲染');
+  assert.ok(!markdown.includes('量化基线'), 'unknowns 不得渲染');
+  assert.ok(!markdown.includes('evt-1'), '证据引用不得渲染');
+  // 存量草稿兼容：旧键 pain_points/results 回退映射（results 为 {metric,value} 数组）。
+  const legacy = { ...draft, fields: { customer_id: 'crm-x', customer_name: '旧客户', background: '旧背景',
+    pain_points: ['旧痛点'], solution: '旧方案', results: [{ metric: '上线时间', value: '2026-03' }] } };
+  const legacyTexts = caseSectionTexts(legacy.fields);
+  assert.deepEqual(legacyTexts.challenges, ['旧痛点']);
+  assert.deepEqual(legacyTexts.value, ['上线时间: 2026-03']);
+  const legacyMarkdown = renderCaseMarkdown(legacy as any);
+  assert.match(legacyMarkdown, /旧痛点/);
+  assert.match(legacyMarkdown, /上线时间: 2026-03/);
+  // 空章节渲染「待补充」。
+  const empty = renderCaseMarkdown({ ...draft, fields: { background: '', solution: '' } } as any);
+  assert.match(empty, /待补充/);
+  // 内部信息残留告警：干净内容不告警，残留命中。
+  assert.deepEqual(caseContentWarnings(draft as any), []);
+  const dirty = { ...draft, fields: { ...CASE_CONTENT, value: ['工时 12 小时已节省', '客户不满情绪缓解'] } };
+  const warnings = caseContentWarnings(dirty as any);
+  assert.ok(warnings.some((warning) => /内部工时统计/.test(warning)), '必须检出工时统计残留');
+  assert.ok(warnings.some((warning) => /客户情绪内部记录/.test(warning)), '必须检出客户情绪记录残留');
+  // parseCaseContent 校验：缺 background/solution 报错，数组与内部键容错缺省。
+  assert.throws(() => parseCaseContent({ solution: 'x' }), /客户背景/);
+  assert.throws(() => parseCaseContent({ background: 'x' }), /解决方案/);
+  const minimal = parseCaseContent({ background: 'b', solution: 's' });
+  assert.deepEqual([minimal.challenges, minimal.requirements, minimal.value], [[], [], []]);
+  assert.equal(minimal.evidence_map, undefined);
+  // 章节契约锁定。
+  assert.deepEqual(CASE_SECTIONS.map((section) => section.key), ['background', 'challenges', 'requirements', 'solution', 'value']);
+});
+
+test('workbench: case fingerprint is deterministic per customer-eventset', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-c2', name: '案例客户二' });
+  const a = segment(db, 'crm-c2', 'c2:t1', 'c2-r1', '话题', '2026-03-25T05:00:00Z', '内容');
+  const b = segment(db, 'crm-c2', 'c2:t2', 'c2-r1', '话题二', '2026-03-26T05:00:00Z', '内容二');
+  const same = db.getSourceEvent(a.id)!;
+  assert.equal(caseFingerprint('crm-c2', [a], []), caseFingerprint('crm-c2', [same], []));
+  assert.notEqual(caseFingerprint('crm-c2', [a], []), caseFingerprint('crm-c2', [a, b], []));
+  assert.notEqual(caseFingerprint('crm-c2', [a], []), caseFingerprint('crm-c3', [a], []));
+  // timeline 与片段去重后合并。
+  assert.equal(caseFingerprint('crm-c2', [a, a], [a]), caseFingerprint('crm-c2', [a], []));
+}));
+
+test('workbench: case jobs are isolated from herory and weekly jobs by kind', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-c3', name: '案例客户三' });
+  const heroryJob = db.createDraftJob('crm-c3', 'fp-h-c3', ['evt-1']);
+  const caseJob = db.createDraftJob('crm-c3', 'fp-c3', ['evt-2'], 'case_report');
+  assert.equal(caseJob.kind, 'case_report');
+  assert.ok(db.listPendingDraftJobs().every((job) => job.kind === 'hemory'), 'hemory resume 不得认领案例任务');
+  assert.ok(db.listPendingDraftJobs('case_report').every((job) => job.kind === 'case_report'));
+  assert.ok(!db.listPendingDraftJobs('case_report').some((job) => job.id === heroryJob.id));
+  assert.ok(!db.listPendingDraftJobs().some((job) => job.id === caseJob.id));
+}));
+
+test('workbench: case publish hash gate works with narrative markdown', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp('page-pub-1'), fakeCaseModel(CASE_CONTENT));
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const preview = service.publishPreview(draft.id, 'parent-1');
+    assert.equal(preview.tool, 'mcp__ones__create_page');
+    assert.match(preview.args.content as string, /## 一、客户背景/);
+    // 篡改版本后旧批准哈希失效。
+    await assert.rejects(() => service.publish(draft.id, draft.version + 1, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
+    const published = await service.publish(draft.id, draft.version, 'parent-1', preview.approvalHash);
+    assert.equal(published.status, 'published');
+    assert.equal(published.publishedPageId, 'page-pub-1');
+    // 已发布不可再发布。
+    assert.throws(() => service.publishPreview(draft.id, 'parent-1'), /不可发布/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});

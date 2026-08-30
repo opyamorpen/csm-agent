@@ -56,7 +56,7 @@ const CLI_CAPABILITIES = [
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
-  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
+  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -125,7 +125,10 @@ function help(): void {
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
-  csm-agent case generate <客户ID或名称>
+  csm-agent case generate <客户ID或名称> [--force] [--wait]
+  csm-agent case show <草稿ID> [--json]
+    （默认输出客户版案例叙事 Markdown（与复制/Wiki 发布同源）；--json 输出含 evidence_map/unknowns 的完整对象）
+  csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
   csm-agent case preview <草稿ID> [ONES父页面ID]
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
@@ -378,16 +381,64 @@ function parseObject(input: string, label: string): Record<string, unknown> {
     throw new Error('action 子命令只允许 list/update/complete');
   }
 
+function printCaseDraft(draft: any, markdown = ''): void {
+  console.log(`${draft.title} · ${draft.status === 'published' ? `已发布(${draft.publishedPageId ?? ''})` : `草稿 v${draft.version}`} · ${draft.generator ?? 'unknown'}`);
+  // 正文 = 服务端 renderCaseMarkdown 权威渲染的客户版 Markdown（与 Web 复制、Wiki 发布同源）；
+  // evidence_map/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
+  if (markdown) console.log(`\n${markdown}`);
+  console.log(`\n（完整内部证据：csm-agent case show ${draft.id} --json）`);
+}
+
 async function caseCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'list') return showCases(values.join(' ') || undefined);
   if (subcommand === 'generate') {
-    const customer = await resolveCustomer(values.join(' '));
-    return print(await request('/api/case-drafts', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }),
-    }));
+    const positional = values.filter((value) => !value.startsWith('--'));
+    const customer = await resolveCustomer(positional[0] ?? '');
+    const result = await request<any>('/api/case-drafts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customerId: customer.id, force: values.includes('--force') }),
+    });
+    if (!jsonOutput) {
+      if (result.reused) console.log(`已存在同数据指纹的案例草稿（${result.draftId}），幂等复用。`);
+      else console.log(`案例生成任务已提交（任务 ${result.jobId}）。`);
+    }
+    if (values.includes('--wait') && result.jobId) {
+      const jobs = await waitDraftJobs([result.jobId]);
+      printDraftJobSummary(jobs);
+      if (jobs.every((job) => job.status === 'succeeded')) {
+        const body = await request<any>(`/api/case-drafts?customer_id=${encodeURIComponent(customer.id)}`);
+        const draft = (body.drafts ?? []).find((item: any) => item.fingerprint === result.fingerprint)
+          ?? (body.drafts ?? [])[0];
+        if (draft) {
+          const detail = await request<any>(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
+          printCaseDraft(detail.draft, detail.markdown ?? '');
+        }
+      }
+      return;
+    }
+    return print(result);
+  }
+  if (subcommand === 'regenerate') {
+    const draftId = values.shift() ?? '';
+    if (!draftId) throw new Error('case regenerate 缺少草稿 ID');
+    const result = await request<any>(`/api/case-drafts/${encodeURIComponent(draftId)}/regenerate`, { method: 'POST' });
+    if (!jsonOutput) console.log(`案例重新生成任务已提交（任务 ${result.jobId}）。`);
+    if (values.includes('--wait') && result.jobId) {
+      const jobs = await waitDraftJobs([result.jobId]);
+      printDraftJobSummary(jobs);
+    }
+    return print(result);
   }
   const draftId = values.shift() ?? '';
   if (!draftId) throw new Error(`case ${subcommand || '(空)'} 缺少草稿 ID`);
+  if (subcommand === 'show') {
+    const body = await request<any>(`/api/case-drafts/${encodeURIComponent(draftId)}`);
+    if (jsonOutput) return print(body);
+    printCaseDraft(body.draft, body.markdown ?? '');
+    for (const warning of body.warnings ?? []) console.log(`⚠ ${warning}`);
+    if (body.contextStale) console.log('⚠ 生成后客户数据已更新，建议重新生成后再发布');
+    return;
+  }
   if (subcommand === 'update') {
     const version = Number(values.shift());
     if (!Number.isInteger(version) || version < 1) throw new Error('case update 版本必须是正整数');
@@ -411,7 +462,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, parentPageID, approvalHash }),
     }));
   }
-  throw new Error('case 子命令只允许 list/generate/update/preview/publish');
+  throw new Error('case 子命令只允许 list/generate/show/regenerate/update/preview/publish');
 }
 
 function printWeeklyReport(report: any, markdown = '', customerName = ''): void {

@@ -171,6 +171,10 @@ export interface CaseDraft {
   title: string;
   fields: Record<string, unknown>;
   evidenceRefs: string[];
+  /** 生成时上下文指纹（CASE_GENERATION_VERSION:客户:事件集）：详情接口实时重算比对得 contextStale。 */
+  fingerprint?: string | null;
+  /** 生成器标识（provider/model），追溯用。 */
+  generator?: string | null;
   publishedPageId?: string | null;
   publishedAt?: string | null;
   createdAt: string;
@@ -255,6 +259,8 @@ export interface DraftItem {
   updatedAt: string;
 }
 
+export type DraftJobKind = 'hemory' | 'weekly_report' | 'case_report';
+
 export interface DraftGenerationJob {
   id: string;
   customerId: string;
@@ -263,8 +269,8 @@ export interface DraftGenerationJob {
   status: DraftGenerationStatus;
   attempts: number;
   error?: string | null;
-  /** 生成任务种类：hemory 日草稿（默认）或 weekly_report 实施周报；resume 与轮询按 kind 认领。 */
-  kind?: 'hemory' | 'weekly_report';
+  /** 生成任务种类：hemory 日草稿（默认）、weekly_report 实施周报或 case_report 客户案例；resume 与轮询按 kind 认领。 */
+  kind?: DraftJobKind;
   /** 任务备注：零提案跳过等非失败结论的人读解释（如「当天证据片段均已被已写入草稿消费」）。 */
   note?: string | null;
   createdAt: string;

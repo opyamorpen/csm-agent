@@ -1133,3 +1133,59 @@ test('agent replies stream as deltas and thinking collapses into a fold', () => 
   assert.match(css, /\.think-block\.open \.think-body \{ display: block; \}/);
   assert.match(css, /\.think-block\.open \.think-head::before \{ content: '▾ '; \}/);
 });
+
+test('case narrative generation contract: five-section editor, refine entry, single generation path', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+  // 五段叙事编辑弹窗：五章节标签 + 每行一项列表段；读取旧键回退（pain_points/results）。
+  const editCase = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
+  assert.ok(editCase, 'editCase source was not found');
+  assert.match(editCase, /一、客户背景/);
+  assert.match(editCase, /二、痛点、现状与挑战（每行一项）/);
+  assert.match(editCase, /三、需求与要求（每行一项）/);
+  assert.match(editCase, /四、解决方案/);
+  assert.match(editCase, /五、价值与成效（每行一项/);
+  assert.match(editCase, /fields\.pain_points/);
+  assert.match(editCase, /fields\.results/);
+  // 旧字段编辑入口不再出现（客户原话/可复用经验/脱敏检查/实施过程）。
+  assert.doesNotMatch(editCase, /客户原话/);
+  assert.doesNotMatch(editCase, /可复用经验/);
+  assert.doesNotMatch(editCase, /脱敏检查/);
+  assert.doesNotMatch(editCase, /实施过程/);
+  // 发布确认透出 warnings。
+  assert.match(editCase, /preview\.warnings/);
+
+  // 生成入口收敛：头部「生成案例」异步任务式（202 + draft-jobs 轮询），旧的同步直开弹窗与
+  // 案例 tab 双按钮（draftCommand + 生成结构化案例草稿）移除。
+  assert.match(source, /'生成案例'/);
+  assert.doesNotMatch(source, /生成案例草稿/);
+  assert.doesNotMatch(source, /生成结构化案例草稿/);
+  const caseTab = source.match(/const casePanel = el\('div'\);[\s\S]*?addTab\('cases', '客户案例', casePanel\);/)?.[0];
+  assert.ok(caseTab, 'case panel source was not found');
+  assert.doesNotMatch(caseTab, /draftCommand/);
+  // DRAFT_TARGETS 不再有 case 项（会话生成入口收敛到其他业务类型）。
+  const targets = source.match(/const DRAFT_TARGETS = \{[\s\S]*?\n  \};/)?.[0];
+  assert.ok(targets, 'DRAFT_TARGETS source was not found');
+  assert.doesNotMatch(targets, /case:/);
+
+  // 轮询与定位：draft-jobs 轮询 + 指纹定位新草稿。
+  const pollCase = source.match(/async function pollCaseJob[\s\S]*?\n  \}\n\n/)?.[0];
+  assert.ok(pollCase, 'pollCaseJob source was not found');
+  assert.match(pollCase, /\/api\/draft-jobs\?ids=/);
+  assert.match(pollCase, /item\.fingerprint === fingerprint/);
+
+  // 对话精修入口：草稿卡按钮 + 种子消息契约（case_draft_id/case_version 注入 + 禁外部写）。
+  const refine = source.match(/async function startCaseRefine[\s\S]*?\n  \}\n\n/)?.[0];
+  assert.ok(refine, 'startCaseRefine source was not found');
+  assert.match(refine, /case_draft_id: draft\.id/);
+  assert.match(refine, /case_version: draft\.version/);
+  assert.match(refine, /record_type=case/);
+  assert.match(refine, /不得调用任何 CRM\/ONES 外部写工具/);
+  assert.match(refine, /未要求修改的章节必须原文保留/);
+  const caseCard = source.match(/async function caseCard[\s\S]*?\n  \}\n\n  async function loadCases/)?.[0];
+  assert.ok(caseCard, 'caseCard source was not found');
+  assert.match(caseCard, /'对话精修'/);
+  assert.match(caseCard, /'重新生成'/);
+  assert.match(caseCard, /contextStale/);
+  assert.match(caseCard, /'数据已更新'/);
+});
