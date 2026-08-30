@@ -1090,6 +1090,20 @@ test('composer width matches the conversation column via shared token', () => {
   assert.match(css, /#composer \{ width: 100%; max-width: var\(--chat-width\)/);
   assert.doesNotMatch(css, /#messages[^\n]*860px/);
   assert.doesNotMatch(css, /#composer[^\n]*860px/);
+  // footer 与 main 同参照系：让出侧栏（194）与产出记录面板（280），否则输入条按全窗口居中、与对话列错位。
+  const footerRule = css.match(/^footer \{[^}]*\}/m)?.[0];
+  assert.ok(footerRule, 'footer rule was not found');
+  assert.match(footerRule, /margin-left: 194px/);
+  assert.match(footerRule, /margin-right: 280px/);
+  assert.match(footerRule, /box-sizing: border-box/);
+  // 980px 断点侧栏收窄到 156：footer 让位同步收窄。
+  const narrow = css.match(/@media \(max-width: 980px\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(narrow, '980px media block was not found');
+  assert.match(narrow, /footer \{ margin-left: 156px; \}/);
+  // 720px 断点撤销让位（侧栏 sticky 通栏、记录面板隐藏）。
+  const mobile = css.match(/@media \(max-width: 720px\) \{[\s\S]*\n\}/)?.[0];
+  assert.ok(mobile, '720px media block was not found');
+  assert.match(mobile, /footer \{ position: sticky; bottom: 0; margin-left: 0; margin-right: 0; \}/);
 });
 
 test('agent replies stream as deltas and thinking collapses into a fold', () => {
