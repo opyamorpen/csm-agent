@@ -880,6 +880,12 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(styles, /\.weekly-toolbar \{/);
   assert.match(styles, /\.weekly-week-select \{/);
   assert.match(styles, /\.weekly-evidence \{/);
+  // 有序列表序号可见契约：条目 li 必须恢复 list-item 显示（grid/块化会吞掉序号），保持 5px 间距，空占位不编号。
+  assert.match(styles, /\.weekly-list \{ margin: 4px 0; padding-left: 24px; font-size: 13\.5px; \}/);
+  assert.match(styles, /\.weekly-item \{ display: list-item; \}/);
+  assert.doesNotMatch(styles, /\.weekly-item \{ display: block; \}/);
+  assert.doesNotMatch(styles, /\.weekly-list \{[^}]*display: grid/);
+  assert.match(styles, /\.weekly-list > li:not\(\.weekly-item\)/);
 });
 
 test('wiki page picker replaces manual page id input for case and weekly publishing', () => {

@@ -1024,8 +1024,12 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .weekly-report-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .weekly-stats { margin: 6px 0 12px; padding: 8px 12px; border-radius: 6px; background: var(--panel-2); color: var(--text-2); font-size: 13px; }
 .weekly-section { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.weekly-list { margin: 4px 0 4px 20px; display: grid; gap: 5px; font-size: 13.5px; }
-.weekly-item { display: block; }
+/* 有序列表序号约束：grid/block 显示模式会吞掉 ::marker 序号框，编号必须渲染。 */
+.weekly-list { margin: 4px 0; padding-left: 24px; font-size: 13.5px; }
+.weekly-item { display: list-item; }
+.weekly-item + .weekly-item { margin-top: 5px; }
+/* 空占位（（无条目）li 无 .weekly-item 类）不编号。 */
+.weekly-list > li:not(.weekly-item) { display: block; color: var(--faint); }
 .weekly-item-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .weekly-evidence { color: var(--faint); font-size: 12px; overflow-wrap: anywhere; }
 .weekly-failure { background: var(--error-bg-2); border: 1px solid var(--error-border); border-radius: 10px; padding: 14px; display: grid; gap: 8px; }
