@@ -1083,9 +1083,26 @@ test('send button doubles as stop control while a turn is running', () => {
   assert.match(css, /#send\.stopping:hover \{ background: var\(--danger-btn-hover\); filter: none; \}/);
 });
 
-test('composer width matches the conversation column via shared token', () => {
+test('composer lives inside the chat column and aligns with the conversation list', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
+  // 结构契约：footer 在 #chat 中栏内部（对话页=左中右三块竖向区域，输入条属于中栏底部，
+  // 不再有横贯全窗的底栏）；.layout 直接子级只剩侧栏/两个 main/记录面板。
+  const chatHtml = html.match(/<main id="chat"[\s\S]*?<\/main>/)?.[0];
+  assert.ok(chatHtml, '#chat block was not found');
+  assert.match(chatHtml, /<footer class="hidden">[\s\S]*?<form id="composer">/);
+  // footer 必须在 #chat 内部：body 直下不允许出现（旧通栏底栏结构已废除）。
+  const bodyLevel = html.match(/\n  <footer[\s\S]*?\n  <\/footer>/);
+  assert.ok(!bodyLevel, 'footer must not be a body-level element');
+  // 中栏 flex 列：tab 条不滚、面板滚动、footer 钉底；#chat 清零 padding 让 tabs/输入条铺满。
+  assert.match(css, /#chat \{ display: flex; flex-direction: column; overflow: hidden; padding: 0; \}/);
+  assert.match(css, /#chat \.agent-mode-panel \{ flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 14px 18px; \}/);
+  const footerRule = css.match(/^footer \{[^}]*\}/m)?.[0];
+  assert.ok(footerRule, 'footer rule was not found');
+  assert.match(footerRule, /flex: 0 0 auto/);
+  assert.match(footerRule, /background: var\(--panel\)/);
+  assert.doesNotMatch(footerRule, /linear-gradient|padding: 12px 298px/);
   // 对话列与输入区共用 --chat-width（两块主题都定义），左右边缘严格对齐。
   const lightTokens = css.match(/:root, \[data-theme="light"\] \{[\s\S]*?\n\}/)?.[0];
   const darkTokens = css.match(/\[data-theme="dark"\] \{[\s\S]*?\n\}/)?.[0];
@@ -1096,21 +1113,6 @@ test('composer width matches the conversation column via shared token', () => {
   assert.match(css, /#composer \{ width: 100%; max-width: var\(--chat-width\)/);
   assert.doesNotMatch(css, /#messages[^\n]*860px/);
   assert.doesNotMatch(css, /#composer[^\n]*860px/);
-  // footer 通栏一条底色（无左右 margin，三栏底部不分段色差），内容区用左右 padding
-  // 与 main 内容区对齐：左让侧栏 194+18，右让记录面板 280+18。
-  const footerRule = css.match(/^footer \{[^}]*\}/m)?.[0];
-  assert.ok(footerRule, 'footer rule was not found');
-  assert.match(footerRule, /padding: 12px 298px 12px 212px/);
-  assert.match(footerRule, /box-sizing: border-box/);
-  assert.doesNotMatch(footerRule, /margin-left|margin-right/);
-  // 980px 断点侧栏收窄到 156：footer 内容区 padding 同步收窄（156+18）。
-  const narrow = css.match(/@media \(max-width: 980px\) \{[\s\S]*?\n\}/)?.[0];
-  assert.ok(narrow, '980px media block was not found');
-  assert.match(narrow, /footer \{ padding-left: 174px; \}/);
-  // 720px 断点撤销让位（侧栏 sticky 通栏、记录面板隐藏），恢复常规内边距。
-  const mobile = css.match(/@media \(max-width: 720px\) \{[\s\S]*\n\}/)?.[0];
-  assert.ok(mobile, '720px media block was not found');
-  assert.match(mobile, /footer \{ position: sticky; bottom: 0; padding: 12px 18px; \}/);
 });
 
 test('records panel explains itself as the external-write approval ledger', () => {

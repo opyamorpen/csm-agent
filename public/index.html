@@ -167,6 +167,15 @@
           </div>
         </div>
       </section>
+
+      <!-- 输入条属于中栏（对话列）自己的底部：与侧栏、写入审批面板构成左中右三块竖向区域，
+           各自延伸到窗口底部，不再有横贯全窗的底栏。 -->
+      <footer class="hidden">
+        <form id="composer">
+          <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
+          <button id="send" type="submit">发送</button>
+        </form>
+      </footer>
     </main>
 
     <aside id="records" class="hidden">
@@ -174,13 +183,6 @@
       <div id="recordList"></div>
     </aside>
   </div>
-
-  <footer class="hidden">
-    <form id="composer">
-      <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
-      <button id="send" type="submit">发送</button>
-    </form>
-  </footer>
 
   <div id="settingsModal" class="modal hidden">
     <div class="modal-box">
