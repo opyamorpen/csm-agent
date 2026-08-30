@@ -1040,7 +1040,7 @@ export class PortfolioSyncService {
         recommendedAction: '结合公开动态与客户确认扩张计划，评估增购切入点。' });
     }
 
-    const delivered = this.db.listTimeline(customerId, 200).filter((item) => item.sourceSystem === 'ones' && /完成|关闭|上线|交付/.test(`${item.title} ${JSON.stringify(item.payload)}`));
+    const delivered = this.db.listTimeline(customerId, 200).filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item));
     const outcomes = evidence.filter((item) => item.kind === 'outcome');
     const eligible = delivered.length > 0 && outcomes.length > 0;
     this.db.setCaseCandidate(customerId, eligible, eligible ? '存在已完成交付及客户成果反馈' : '需要同时具备完成交付和客户成果反馈',
@@ -1050,6 +1050,11 @@ export class PortfolioSyncService {
 
 export function shanghaiDateKey(now = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+/** ONES 事件是否属「已完成交付」：案例候选判定与案例生成 delivered_records 共用的单一口径。 */
+export function isDeliveredOnesEvent(event: { sourceType: string; title: string; payload?: Record<string, unknown> }): boolean {
+  return /完成|关闭|上线|交付/.test(`${event.title} ${JSON.stringify(event.payload ?? {})}`);
 }
 
 /** ONES 工时登记的 startTime 要求 ISO 8601 带时区偏移；按上海时区输出 YYYY-MM-DDTHH:mm:ss+08:00。 */

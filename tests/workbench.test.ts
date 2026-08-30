@@ -3291,7 +3291,8 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, caseFingerprint, caseContentWarnings, caseSectionTexts, parseCaseContent, renderCaseMarkdown } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseFragmentSignals, caseSectionTexts, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
+import type { HttpPost } from '../src/tools/websearch.js';
 
 function fakeCaseModel(content: unknown): any {
   return {
@@ -3368,6 +3369,19 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.match(capturedPrompt, /禁止虚构 ROI/);
     assert.match(capturedPrompt, /待确认/);
     assert.match(capturedPrompt, /五段叙事|五个章节/);
+    // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律、交付记录底料。
+    assert.match(capturedPrompt, /pain_point_signals/);
+    assert.match(capturedPrompt, /value_signals/);
+    assert.match(capturedPrompt, /delivered_records/);
+    assert.match(capturedPrompt, /web_context/);
+    assert.match(capturedPrompt, /招投标、采购公告、制度要求类信息属公开权威事实/);
+    assert.match(capturedPrompt, /同名公司/);
+    assert.match(capturedPrompt, /以「我们为客户提供了什么方案」为主线/);
+    assert.match(capturedPrompt, /不得写成功能点罗列/);
+    assert.ok(capturedPrompt.includes('"pain_point_signals":'), '上下文须含痛点信号块');
+    assert.ok(capturedPrompt.includes('"value_signals":'), '上下文须含价值信号块');
+    assert.ok(capturedPrompt.includes('"delivered_records":'), '上下文须含已交付记录块');
+    assert.ok(capturedPrompt.includes('本次生成未联网检索'), '未注入检索依赖时明确告知模型无联网信息');
     // 幂等：同指纹再次生成复用最新草稿。
     const again = service.generate('crm-c1');
     assert.equal(again.jobId, null);
@@ -3379,7 +3393,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v1-narrative');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v2-narrative');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -3516,5 +3530,185 @@ test('workbench: case publish hash gate works with narrative markdown', async ()
     assert.equal(published.publishedPageId, 'page-pub-1');
     // 已发布不可再发布。
     assert.throws(() => service.publishPreview(draft.id, 'parent-1'), /不可发布/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 案例 v2：痛点/价值信号提取 + 联网检索 + 交付记录注入 ──
+
+/** 片段带结构化 evidence 数组（生产切片 v3.2 形态），转写文本即 evidence[].text。 */
+function segmentWithEvidence(db: WorkbenchDatabase, customerId: string, externalId: string, recordingId: string, title: string, occurredAt: string, lines: string[]) {
+  return db.upsertSourceEvent({ customerId, sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId,
+    title, occurredAt, attributionStatus: 'confirmed',
+    payload: { recordingId, speakers: ['CSM', '客户'], transcript: lines.map((line, index) => `${index === 0 ? '客户' : 'CSM'}: ${line}`).join('\n'),
+      evidence: lines.map((text, index) => ({ spokenAt: occurredAt, speaker: index === 0 ? '客户' : 'CSM', text })) } });
+}
+
+test('workbench: caseFragmentSignals extracts pain/value themes from full fragment text', () => {
+  // 前缀填充 300+ 字符把痛点句顶到片段中后部：验证信号扫描的是全文而非 prompt 注入的头部截断。
+  const filler = '项目周会上各方对齐了本季度目标与节奏，'.repeat(20);
+  const painLine = '我们现在系统和系统之间没打通，数据孤岛很严重，还在通过表格人工管理，协作效率不高';
+  const valueLine = '这套需求池用起来挺好的，效率提升了不少，进度也透明多了';
+  const noiseLine = '下周三下午三点例会照常进行';
+  const fragment = {
+    id: 'frag-sig-1', customerId: 'crm-x', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'sig:t1',
+    title: '痛点与反馈', occurredAt: '2026-05-12T05:00:00Z', syncedAt: '2026-05-12T06:00:00Z', payloadHash: 'h1',
+    attributionStatus: 'confirmed' as const, confidence: 1,
+    payload: { recordingId: 'sig-r1', speakers: ['CSM'], transcript: [filler, painLine, noiseLine, valueLine].join('\n'),
+      evidence: [filler, painLine, noiseLine, valueLine].map((text, index) => ({ spokenAt: '2026-05-12T05:00:00Z', speaker: index % 2 ? 'CSM' : '客户', text })) },
+  } as any;
+  const signals = caseFragmentSignals([fragment]);
+  // 痛点句命中多主题时取第一个命中主题；信号摘录含原话关键内容。
+  assert.equal(signals.painPoints.length, 1, '一条痛点句只记一条信号（首个命中主题）');
+  assert.equal(signals.painPoints[0].theme, '系统未打通/数据孤岛');
+  assert.ok(signals.painPoints[0].excerpt.includes('没打通'));
+  assert.equal(signals.painPoints[0].date, '2026-05-12');
+  assert.equal(signals.painPoints[0].fragment_id, 'frag-sig-1');
+  assert.equal(signals.values.length, 1, '正面反馈句记一条价值信号');
+  assert.equal(signals.values[0].theme, '正面评价');
+  assert.ok(signals.values[0].excerpt.includes('挺好'));
+  // 无关句不入信号。
+  assert.ok(!JSON.stringify(signals).includes('例会'));
+  // 转写回退路径（无 evidence 数组）同样可提取：逐行剥离说话人前缀。
+  const transcriptOnly = { ...fragment, id: 'frag-sig-2', payload: { recordingId: 'sig-r1', transcript: `客户: 信息不透明，看不到整体进度\nCSM: 我们来梳理一下` } } as any;
+  const fallback = caseFragmentSignals([transcriptOnly]);
+  assert.equal(fallback.painPoints.length, 1);
+  assert.equal(fallback.painPoints[0].theme, '信息不透明');
+  // 空片段集返回空信号。
+  assert.deepEqual(caseFragmentSignals([]), { painPoints: [], values: [] });
+});
+
+test('workbench: case generation injects web search context and persists audit snapshot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-web-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-web-1', name: '案例客户甲', shortName: '客户甲' });
+    db.upsertSourceEvent({ customerId: 'crm-web-1', sourceSystem: 'ones', sourceType: 'suggestion_feedback',
+      externalId: 'web-S-1', displayId: 'S-100', title: '需求池功能已完成交付', occurredAt: '2026-03-01T03:00:00Z',
+      payload: { field005: { name: '已完成' } } });
+    const queries: string[] = [];
+    const fetcher: HttpPost = async (url, headers, body) => {
+      void url; void headers;
+      queries.push(String(body.query));
+      return JSON.stringify({ results: [
+        { title: '案例客户甲信息化制度建设招标公告', url: 'https://bid.example.com/1', published_date: '2026-01-15', content: '案例客户甲就研发项目管理平台建设公开招标' },
+        { title: '某无关公司中标公告', url: 'https://bid.example.com/2', published_date: '2026-02-01', content: 'Another company procurement' },
+      ] });
+    };
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime, {
+      getApiKey: () => 'tvly-test', getMaxResults: () => 5, getKeylessEnabled: () => true, fetcher,
+    });
+    const result = service.generate('crm-web-1');
+    await waitForJob(db, result.jobId!);
+    // 5 个角度各检索一次，查询 = 客户名（简称优先）+ 角度词。
+    assert.equal(queries.length, CASE_WEB_ANGLES.length);
+    for (const angle of CASE_WEB_ANGLES) assert.ok(queries.includes(`客户甲 ${angle.query}`));
+    // mentionsCustomer 预过滤：无关公司结果不进上下文。
+    assert.ok(capturedPrompt.includes('信息化制度建设招标公告'));
+    assert.ok(!capturedPrompt.includes('Another company'));
+    assert.ok(capturedPrompt.includes('"web_context"'), '上下文须含 web_context 块');
+    // 已交付记录进上下文（isDeliveredOnesEvent 口径：标题含「完成」）。
+    assert.ok(capturedPrompt.includes('"delivered_records"'));
+    assert.ok(capturedPrompt.includes('需求池功能已完成交付'));
+    // 检索审计快照随草稿落库。
+    const draft = db.listCaseDrafts('crm-web-1')[0];
+    const webSearch = (draft.fields as any).web_search;
+    assert.equal(webSearch.searched, CASE_WEB_ANGLES.length);
+    assert.equal(webSearch.results.length, CASE_WEB_ANGLES.length, '每角度各保留 1 条命中客户名的结果');
+    assert.ok(webSearch.results.every((item: any) => item.title.includes('案例客户甲')));
+    assert.equal(webSearch.errors.length, 0);
+    // detail 的 contextSummary 含 web 检索行。
+    const detail = service.detail(draft.id)!;
+    assert.ok(detail.contextSummary.some((entry) => entry.system === 'web' && entry.count === CASE_WEB_ANGLES.length));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case web search failure is isolated and never blocks generation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-werr-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    let searchCalls = 0;
+    // 首角度抛错、其余角度正常返回：单角度失败只记 error，不阻断。
+    const fetcher: HttpPost = async (url, headers, body) => {
+      void url; void headers;
+      const query = String(body.query);
+      searchCalls += 1;
+      if (query.includes('项目管理')) throw new Error('HTTP 429: rate limit');
+      return JSON.stringify({ results: [
+        { title: '案例客户一需求管理实践报道', url: 'https://news.example.com/1', published_date: '2026-02-01', content: '案例客户一引入需求管理平台' },
+      ] });
+    };
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT), {
+      getApiKey: () => 'tvly-test', getMaxResults: () => 5, getKeylessEnabled: () => true, fetcher,
+    });
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '检索部分失败仍须产出草稿');
+    const webSearch = (draft.fields as any).web_search;
+    assert.equal(searchCalls, CASE_WEB_ANGLES.length, '失败后继续检索其余角度');
+    assert.equal(webSearch.searched, CASE_WEB_ANGLES.length - 1, 'searched 只计成功角度');
+    assert.equal(webSearch.errors.length, 1);
+    assert.match(webSearch.errors[0], /项目管理: HTTP 429/);
+    assert.equal(webSearch.results.length, CASE_WEB_ANGLES.length - 1, '其余角度结果保留');
+    // 检索全挂也不阻断：恒抛错的 fetcher 下任务仍成功。
+    const dir2 = mkdtempSync(join(tmpdir(), 'csm-case-werr2-'));
+    const db2 = new WorkbenchDatabase(dir2);
+    try {
+      seedCaseCustomer(db2);
+      const failingFetcher: HttpPost = async () => { throw new Error('connection refused'); };
+      const service2 = new CaseService(db2, caseMcp(), fakeCaseModel(CASE_CONTENT), {
+        getApiKey: () => 'tvly-test', getMaxResults: () => 5, getKeylessEnabled: () => true, fetcher: failingFetcher,
+      });
+      const result2 = service2.generate('crm-c1');
+      await waitForJob(db2, result2.jobId!);
+      const draft2 = db2.listCaseDrafts('crm-c1')[0];
+      assert.ok(draft2, '检索全失败不阻断生成');
+      const webSearch2 = (draft2.fields as any).web_search;
+      assert.equal(webSearch2.searched, 0);
+      assert.equal(webSearch2.errors.length, CASE_WEB_ANGLES.length);
+      assert.equal(webSearch2.results.length, 0);
+    } finally { db2.close(); rmSync(dir2, { recursive: true, force: true }); }
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: delivered_records only includes delivered ones records', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-deliv-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-deliv', name: '交付客户' });
+    db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'ones', sourceType: 'suggestion_feedback',
+      externalId: 'deliv-S-1', displayId: 'S-200', title: '需求池模块上线', occurredAt: '2026-03-02T03:00:00Z', payload: { field005: { name: '已完成' } } });
+    db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'deliv-T-1', displayId: 'T-300', title: '统计报表报错', occurredAt: '2026-03-03T03:00:00Z', payload: { field005: { name: '进行中' } } });
+    db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'crm', sourceType: 'crm_followup',
+      externalId: 'deliv-F-1', title: '完成季度回访', occurredAt: '2026-03-04T03:00:00Z', payload: { active_record_content: '完成季度回访并记录' } });
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-deliv');
+    await waitForJob(db, result.jobId!);
+    const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
+    assert.equal(context.delivered_records.length, 1, '只含已交付的 ONES 记录');
+    assert.equal(context.delivered_records[0].title, '需求池模块上线');
+    // 「完成」出现于 CRM 跟进与工单标题但非 ONES 源/非交付态，不得混入。
+    assert.ok(!context.delivered_records.some((item: any) => item.title === '统计报表报错'));
+    assert.ok(!context.delivered_records.some((item: any) => item.title === '完成季度回访'));
+    // v2 新上下文键齐备。
+    for (const key of ['delivered_records', 'pain_point_signals', 'value_signals', 'web_context']) assert.ok(key in context);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

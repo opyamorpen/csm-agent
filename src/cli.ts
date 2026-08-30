@@ -131,6 +131,7 @@ function help(): void {
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
+    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标）
   csm-agent case show <草稿ID> [--json]
     （默认输出客户版案例叙事 Markdown（与复制/Wiki 发布同源）；--json 输出含 evidence_map/unknowns 的完整对象）
   csm-agent case regenerate <草稿ID> [--wait]

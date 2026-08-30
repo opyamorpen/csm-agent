@@ -1370,7 +1370,12 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
       getMaxResults: () => loadSearchConfig().maxResults ?? 5,
       getKeylessEnabled: () => loadSearchConfig().keylessFallback,
     }).refresh(customer, options));
-  const cases = new CaseService(db, runtime.mcp, runtime);
+  const cases = new CaseService(db, runtime.mcp, runtime, {
+    // 案例生成时联网检索（与 web_search 工具/公开动态同步同源配置）。
+    getApiKey: () => loadSearchConfig().apiKey,
+    getMaxResults: () => loadSearchConfig().maxResults ?? 5,
+    getKeylessEnabled: () => loadSearchConfig().keylessFallback,
+  });
   const wiki = new WikiService(runtime.mcp);
   // 工时注入：读已同步的工时登记（payload 缓存优先），生成路径不打实时 MCP。
   const weekly = new WeeklyReportService(db, runtime.mcp, runtime, async (customerId: string) => {

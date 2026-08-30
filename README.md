@@ -94,7 +94,7 @@ csm-agent actions [CRM客户ID]
 csm-agent action complete <行动ID...> --outcome "已与客户确认下一步" # 批量完成，--outcome 支持空格或=传值
 csm-agent action update <行动ID> '{"status":"completed"}'
 csm-agent cases [CRM客户ID]
-csm-agent case generate <CRM客户ID> [--force] [--wait] # 客户案例（五段叙事）：基于该客户全部已同步信息后台生成
+csm-agent case generate <CRM客户ID> [--force] [--wait] # 客户案例（五段叙事）：基于该客户全部已同步信息后台生成（生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标）
 csm-agent case show <草稿ID> # 默认输出客户版叙事 Markdown（与复制/Wiki 发布同源）；--json 查看含 evidence_map/unknowns 的完整内部证据
 csm-agent case regenerate <草稿ID> [--wait] # 数据更新后强制重建（新增草稿，不覆盖旧稿）
 csm-agent case update <草稿ID> <版本> '{"title":"案例标题","fields":{}}'

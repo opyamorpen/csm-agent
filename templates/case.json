@@ -7,22 +7,22 @@
   "properties": {
     "customer_id": { "type": "string", "description": "CRM 中客户唯一 ID" },
     "customer_name": { "type": "string", "description": "客户名称" },
-    "background": { "type": "string", "description": "客户背景：行业、业务概况与合作起点的一段连贯叙述" },
+    "background": { "type": "string", "description": "客户背景：行业、业务概况与合作起点的一段连贯叙述，可含可信的公开信息" },
     "challenges": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "痛点、现状与挑战"
+      "description": "痛点、现状与挑战（优先从客户原话痛点线索归纳）"
     },
     "requirements": {
       "type": "array",
       "items": { "type": "string" },
       "description": "需求与要求"
     },
-    "solution": { "type": "string", "description": "解决方案：问题如何被分析、设计、实施与协同解决" },
+    "solution": { "type": "string", "description": "解决方案：以「我们为客户提供了什么方案」为主线的方案级举措叙述" },
     "value": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "价值与成效（量化优先，无量化写有据定性价值）"
+      "description": "价值与成效（量化优先，无量化写有据定性价值，客户正面反馈可转述）"
     },
     "evidence_map": {
       "type": "object",
