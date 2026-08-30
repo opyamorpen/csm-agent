@@ -172,7 +172,10 @@
       <!-- 输入条属于中栏（对话列）自己的底部：与侧栏、写入审批面板构成左中右三块竖向区域，
            各自延伸到窗口底部，不再有横贯全窗的底栏。 -->
       <footer class="hidden">
+        <div id="attachmentChips" class="hidden" aria-live="polite"></div>
         <form id="composer">
+          <button id="attach" type="button" title="添加附件（文本 / PDF / 图片，也可拖拽或粘贴截图）">＋</button>
+          <input id="attachFile" type="file" multiple class="hidden" />
           <input id="input" type="text" placeholder="例如：帮我整理 XX 客户本周的跟进记录" autocomplete="off" />
           <button id="send" type="submit">发送</button>
         </form>
@@ -215,6 +218,15 @@
             <div class="field">
               <label>API Key（留空则不修改，可用 ${ENV_VAR}）</label>
               <input id="llmKey" type="password" placeholder="sk-..." autocomplete="off" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label class="vision-toggle" id="llmVisionLabel">
+                <input id="llmVision" type="checkbox" />
+                支持图片输入（视觉模型，开启后对话可带图片附件）
+              </label>
+              <div class="hint-inline" id="llmVisionHint">内置服务商按模型目录自动判定；自定义端点无法探测，请按实际模型勾选</div>
             </div>
           </div>
         </div>

@@ -398,3 +398,19 @@ test('AgentSession.send: abort mid-batch skips the rest and keeps toolResult pai
   assert.equal(toolResults[1].content[0]?.text, '（对话已停止，本调用未执行）',
     '被跳过的调用应合成停止说明 toolResult');
 });
+
+test('AgentSession: send() 接受文本+图片内容块并原样入上下文（附件消息持久化形态）', async () => {
+  const { faux, models, model } = buildContext();
+  const { gw } = makeGateway();
+  faux.setResponses([fauxAssistantMessage('收到')]);
+  const session = new AgentSession({ models, model, mcp: gw, tools: [], systemPrompt: 'test' });
+  const blocks = [
+    { type: 'text' as const, text: '看这张图' },
+    { type: 'image' as const, data: 'aGk=', mimeType: 'image/png' },
+  ];
+  const result = await session.send(blocks, { onEvent() {}, requestConfirm: async () => false });
+  assert.equal(result, '收到');
+  const first = session.context.messages[0] as { role: string; content: unknown };
+  assert.equal(first.role, 'user');
+  assert.deepEqual(first.content, blocks, '附件内容块须原样入 context（restore 落盘即为此形态）');
+});

@@ -10,6 +10,7 @@ import { AgentSession, AgentAbortedError, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { CUSTOMER_CONTEXT_TOOL_NAME, mergeCustomerContext, extractCustomerContext, type CustomerContext } from './tools/customer.js';
 import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToolHandlers } from './tools/workbench.js';
+import { CUSTOMER_DETAIL_TOOL_NAME, makeCustomerDetailResult } from './tools/customer-detail.js';
 import { WEB_SEARCH_TOOL_NAME, RECORD_WEB_INTELLIGENCE_TOOL_NAME, makeWebSearchHandler, makeRecordWebIntelligenceHandler } from './tools/websearch.js';
 import { ONES_DESK_FIELDS_TOOL_NAME, makeOnesDeskFieldsHandler } from './tools/onesdesk.js';
 import { missingOnesDeskSpecFields, applyDeploymentTypeOverride, ONES_DESK_DEPLOYMENT_FIELD_ID } from './workbench/drafts.js';
@@ -27,6 +28,7 @@ import { HemorySegmentationService } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
 import { WikiService } from './workbench/wiki.js';
 import { readBuildInfo, serviceVersionInfo, startStalenessWatch, type BuildInfo } from './version.js';
+import { AttachmentError, classifyAttachment, buildContentBlocks, storeAttachments, getStoredAttachment, removeSessionAttachments, attachmentFilePath, type IncomingAttachment } from './attachments.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, '..', 'public');
@@ -73,12 +75,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(data);
 }
 
-function readBody(req: http.IncomingMessage): Promise<any> {
+function readBody(req: http.IncomingMessage, maxBytes = 1_000_000): Promise<any> {
   return new Promise((resolve, reject) => {
     let raw = '';
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 1_000_000) reject(new Error('request body too large'));
+      if (raw.length > maxBytes) reject(new Error('request body too large'));
     });
     req.on('end', () => {
       if (!raw) return resolve({});
@@ -182,6 +184,9 @@ interface WorkbenchServices {
 
 function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices): http.RequestListener {
   const sessions = new Map<string, Session>();
+
+  // 视觉（图片输入）能力：builtin 目录模型自动带，custom 由配置声明；附件图片走 image 块的前提。
+  const visionSupported = () => runtime.model.input.includes('image');
 
   // 草稿确认视图共用最小必填项结构（displayFields），Web 卡片与 CLI 渲染同一份数据。
   const DRAFT_ITEM_STATUS_LABELS: Record<string, string> = { draft: '草稿', ready: '就绪', writing: '写入中', written: '已写入', failed: '失败', dismissed: '已忽略', stale: '已作废' };
@@ -305,6 +310,32 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       localTools: {
         [CUSTOMER_PROFILE_TOOL_NAME]: workbenchHandlers.profile,
         [CUSTOMER_EVENTS_TOOL_NAME]: workbenchHandlers.events,
+        [CUSTOMER_DETAIL_TOOL_NAME]: (args) => makeCustomerDetailResult({
+          getCustomer: boundCustomer,
+          overview: (id) => workbench.db.overview(id),
+          timeline: (id, limit) => workbench.db.listTimeline(id, limit).map((e) => e as unknown as Record<string, unknown>),
+          workhours: async (id) => workbench.sync.listCustomerWorkhours(id) as unknown as Record<string, unknown>,
+          hemoryFragments: (id, limit) => workbench.db.listHemoryFragments({ customerId: id, status: 'confirmed', limit })
+            .map((e) => e as unknown as Record<string, unknown>),
+          // 案例：候选 + 草稿列表 + 最新草稿正文 markdown（客户可读的成品形态）。
+          cases: async (id) => {
+            const drafts = workbench.db.listCaseDrafts(id);
+            const latest = drafts[0] ? workbench.cases.detail(drafts[0].id) : undefined;
+            return {
+              caseCandidate: workbench.db.getCaseCandidate(id),
+              caseDrafts: drafts,
+              latestDraftMarkdown: latest?.markdown ?? null,
+              warnings: latest?.warnings ?? [],
+            } as unknown as Record<string, unknown>;
+          },
+          // 周报：列表 + 最新一期客户版正文 markdown。
+          weeklyReports: async (id) => {
+            const reports = workbench.weekly.list(id);
+            const latest = reports[0] ? workbench.weekly.detailWithMarkdown(reports[0].id) : undefined;
+            return { reports, latestMarkdown: latest?.markdown ?? null, warnings: latest?.warnings ?? [] };
+          },
+          actions: (id) => workbench.db.listActions(id).map((a) => a as unknown as Record<string, unknown>),
+        }, args),
         [WEB_SEARCH_TOOL_NAME]: webSearch,
         [RECORD_WEB_INTELLIGENCE_TOOL_NAME]: recordWebIntelligence,
         [ONES_DESK_FIELDS_TOOL_NAME]: onesDeskFields,
@@ -366,6 +397,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       sessions.delete(id);
     }
     store.deleteSession(id);
+    // 会话附件（落盘文件与 manifest）随会话一并清理。
+    removeSessionAttachments(id).catch(() => {});
   }
 
   // ── load persisted sessions at boot ──
@@ -848,6 +881,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           baseUrl: runtime.llm.baseUrl,
           apiKeyEnv: runtime.llm.apiKeyEnv,
           apiKeyConfigured: !!runtime.llm.apiKey,
+          // 视觉（图片输入）能力：附件图片与设置页开关共用这一权威出口。
+          vision: visionSupported(),
         });
       }
       if (req.method === 'PUT' && path === '/api/config/llm') {
@@ -873,12 +908,15 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             if (!savedKey) return json(res, 400, { error: '自定义端点缺少 API Key（新配置必填；旧配置未保存过 key）' });
             await testCustomEndpoint({ baseUrl, model, apiKey: savedKey });
           }
+          const vision = typeof body.vision === 'boolean' ? body.vision : undefined;
           runtime.setLlm({
             provider,
             model,
             apiKey,
             apiKeyEnv: runtime.llm.apiKeyEnv,
             ...(baseUrl ? { baseUrl } : {}),
+            // custom 端点无法探测视觉能力，靠用户声明；未显式传时沿用旧值（避免换模型/改 key 时静默丢配置）。
+            ...(provider === CUSTOM_PROVIDER_ID ? { vision: vision ?? runtime.llm.vision === true } : {}),
           });
         } catch (err) {
           return json(res, 400, { error: (err as Error).message });
@@ -889,6 +927,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           model: runtime.llm.model,
           baseUrl: runtime.llm.baseUrl,
           apiKeyConfigured: !!runtime.llm.apiKey,
+          vision: visionSupported(),
         });
       }
 
@@ -1054,29 +1093,71 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           return json(res, 200, { ok: true });
         }
 
-        // send a message
+        // 附件内容下载/预览（消息气泡内的图片与附件链接；manifest 权威校验防路径穿越）
+        const attachMatch = sub.match(/^\/attachments\/([0-9A-Za-z._-]+)$/);
+        if (req.method === 'GET' && attachMatch) {
+          const meta = await getStoredAttachment(session.id, attachMatch[1]);
+          if (!meta) return json(res, 404, { error: 'attachment not found' });
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(attachmentFilePath(session.id, meta.id, meta.name));
+          } catch {
+            return json(res, 404, { error: 'attachment not found' });
+          }
+          res.writeHead(200, { 'Content-Type': meta.mimeType, 'Content-Length': bytes.length, 'Cache-Control': 'private, max-age=3600' });
+          return res.end(bytes);
+        }
+
+        // send a message（可带本地附件：文本/PDF 内容注入上下文，图片在视觉模型下走 image 块）
         if (req.method === 'POST' && sub === '/messages') {
           if (session.busy) return json(res, 409, { error: '已有进行中的请求' });
           if (session.archived) return json(res, 409, { error: '会话已归档，请先恢复' });
-          const body = await readBody(req);
+          // 附件内嵌 base64（约 1.33×），20MB 上限 ≈ 15MB 原始文件 + 消息文本；其余路由仍是 1MB。
+          const body = await readBody(req, 20_000_000);
           const text = String(body.message ?? '').trim();
-          if (!text) return json(res, 400, { error: 'message is required' });
+          const incomingAttachments: IncomingAttachment[] = Array.isArray(body.attachments)
+            ? (body.attachments as Array<Record<string, unknown>>).map((item) => ({
+              name: String(item.name ?? ''), mimeType: String(item.mimeType ?? ''), data: String(item.data ?? ''),
+            }))
+            : [];
+          if (!text && !incomingAttachments.length) return json(res, 400, { error: 'message is required' });
+
+          // 视觉预检：含图片且当前模型不支持时早退，避免把注定拒绝的文件先落盘。
+          const vision = visionSupported();
+          for (const item of incomingAttachments) {
+            if (classifyAttachment(item.mimeType, item.name) === 'image' && !vision) {
+              return json(res, 400, { error: `附件「${item.name}」是图片，但当前模型不支持图片输入（视觉模型）。请在设置中切换支持视觉的模型，或勾选「支持图片输入」后重试。` });
+            }
+          }
+
+          let stored: Awaited<ReturnType<typeof storeAttachments>>;
+          let contentForAgent: Awaited<ReturnType<typeof buildContentBlocks>> | string;
+          try {
+            stored = await storeAttachments(session.id, incomingAttachments);
+            contentForAgent = stored.length
+              ? await buildContentBlocks(text, session.id, stored, { vision })
+              : text;
+          } catch (error) {
+            if (error instanceof AttachmentError) return json(res, 400, { error: (error as Error).message });
+            throw error;
+          }
 
           if (session.title === '新对话' && session.events.filter((e) => e.event.type === 'user').length === 0) {
-            session.title = text.slice(0, 30);
+            session.title = (text || stored[0]?.name || '新对话').slice(0, 30);
           }
 
           session.busy = true;
           session.abort = new AbortController();
           const signal = session.abort.signal;
-          broadcast(session, { type: 'user', text });
+          // 展示事件只带附件元信息：base64 不进 SSE 回放，避免会话刷新/重连时重复下行大负载。
+          broadcast(session, { type: 'user', text, ...(stored.length ? { attachments: stored } : {}) });
           broadcast(session, { type: 'turn_start' });
 
           void (async () => {
             let turnUsage: { input: number; output: number; total: number } | undefined;
             let stopped = false;
             try {
-              await session.agent.send(text, {
+              await session.agent.send(contentForAgent, {
                 onEvent: (e) => {
                   // Record state machine (local留痕; does not affect CRM/ONES)
                   if (e.type === 'confirm' && e.draft) {

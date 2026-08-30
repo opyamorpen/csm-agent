@@ -9,6 +9,8 @@ export interface CustomLlmEndpoint {
   baseUrl?: string;
   model: string;
   apiKey?: string;
+  /** 用户声明的视觉（图片输入）能力：custom 端点无法探测，只能靠配置。 */
+  vision?: boolean;
 }
 
 /** Normalize an OpenAI-style base URL (strip trailing slashes) and append the completions path. */
@@ -22,7 +24,7 @@ export function completionsUrl(baseUrl: string): string {
  * matching the "missing data stays unknown" rule; context/maxTokens are safe
  * defaults that only affect usage accounting, not request shape.
  */
-function customModelFor(model: string, baseUrl: string): Model<'openai-completions'> {
+function customModelFor(model: string, baseUrl: string, vision = false): Model<'openai-completions'> {
   return {
     id: model,
     name: model,
@@ -30,7 +32,7 @@ function customModelFor(model: string, baseUrl: string): Model<'openai-completio
     provider: CUSTOM_PROVIDER_ID,
     baseUrl,
     reasoning: false,
-    input: ['text'],
+    input: vision ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 131072,
     maxTokens: 8192,
@@ -53,7 +55,7 @@ export function registerCustomProvider(models: MutableModels, endpoint: CustomLl
     name: '自定义（OpenAI 兼容）',
     baseUrl: endpoint.baseUrl,
     auth: { apiKey: envApiKeyAuth('自定义端点 API Key', [CUSTOM_API_KEY_ENV]) },
-    models: [customModelFor(endpoint.model, endpoint.baseUrl)],
+    models: [customModelFor(endpoint.model, endpoint.baseUrl, endpoint.vision === true)],
     api: openAICompletionsApi(),
   });
   models.setProvider(provider);

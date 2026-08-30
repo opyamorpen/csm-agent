@@ -10,7 +10,7 @@
 - 增购机会：只在非高风险客户中展示至少两个独立证据支持的假设。
 - 客户案例：五段客户叙事（背景→痛点/现状/挑战→需求/要求→解决方案→价值），后台任务基于客户全部已同步信息（客户档案、统一时间线、已确认 Hemory 片段、证据信号）由模型生成；支持对话精修（Agent 会话中按章节迭代打磨、批准即写回草稿）、编辑与哈希审批后写入 ONES Wiki。
 - 行动批量处理：「本周行动」页分「未完成 / 已完成」两个 tab（计数写在 tab 文案里），均按客户分组展示（默认展开、点组标题可折叠）；未完成 tab 支持勾选（全选 + 已选计数，点卡片本体即可选中）后批量完成，批量操作条 sticky 冻结在滚动区顶部，已完成 tab 自动隐藏批量操作条；批量完成弹一次共用「实际结果」输入（留空记「CSM 在工作台确认完成」）。逐项处理互不影响——仅未完成可被完成，已完成跳过，单项失败不回滚其他项，结果按 项数 汇总提示。行动状态只有两态：未完成（`new`）/ 已完成（`completed`）。CLI 同款：`csm-agent action complete <行动ID...> [--outcome]`。
-- Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_profile` / `get_customer_events` 直接读工作台已同步数据（本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。回复以 token 级流式逐字呈现（`text_delta` 瞬态事件只推在线客户端、不落盘不回放，中途刷新重连后回放整段）；推理模型的思考过程以折叠面板展示（流式时实时填充，完成后折叠为「已深度思考（N 字）」一行，可点开），每轮结束显示本轮 token 用量（输入/输出/本会话累计）。对话进行中可随时「停止」（发送按钮切换为红色停止态，点击即停 / `csm-agent sessions stop <会话ID>` / CLI agent 运行中 Ctrl+C）：中断模型调用与后续工具执行，挂起中的确认草稿按拒绝处理（停止即不写），停止留痕进入会话与分享导出；进行中的单个工具调用（含已批准的写调用）允许完成，批内剩余调用跳过。会话支持「分享」（一键复制全文：标题、客户绑定、时间范围与完整对话；Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
+- Agent：保留多轮对话和 MCP 工具调用，任何写入都绑定到批准的目标工具和完整参数哈希。会话每轮自动拾取最新的工具清单与模型配置（服务重启或 MCP 重连后旧会话不再停留在过期清单上）；「询问 Agent」按钮为客户绑定会话。Agent 另有本地工具：`get_customer_detail` 按板块（sections）读取客户详情页数据（概览/建议/工单/运维/工时/私有云实例/跟进记录/Hemory 片段/客户案例/实施周报/行动事项/统一时间线，每轮只取与问题直接相关的板块以节省 token，仅用户明确要求「全部信息」时才整表拉取），`get_customer_profile` / `get_customer_events` 是它的旧版粗粒度等价(本地优先，超过 36 小时未同步提示刷新或用 MCP 兜底），`web_search` 联网检索客户公开动态（Tavily），`record_web_intelligence` 把检索结果落库为 `web_signal` 证据。对话支持本地附件：输入条左下「＋」按钮选择、拖拽文件或粘贴截图皆可；文本类文件（txt/md/csv/json/log/代码等）与 PDF（提取正文文字）内容注入对话上下文，图片在模型支持视觉（图片输入）时作为 image 内容块发给模型——内置服务商按模型目录自动判定，自定义端点须在设置中勾选「支持图片输入（视觉模型）」（或 `csm-agent config llm set ... --vision=on`）；无视觉能力时图片附件被明确拒绝。CLI 同口径：`csm-agent agent <客户> <指令> --attach <文件路径> [--attach ...]`。附件限制：一次最多 5 个、单文件 8MB、合计 15MB、文本/PDF 注入超 5 万字符截断标注；附件文件落盘在 `~/.csm-agent/attachments/<会话ID>/`，删除会话时一并清理。回复以 token 级流式逐字呈现（`text_delta` 瞬态事件只推在线客户端、不落盘不回放，中途刷新重连后回放整段）；推理模型的思考过程以折叠面板展示（流式时实时填充，完成后折叠为「已深度思考（N 字）」一行，可点开），每轮结束显示本轮 token 用量（输入/输出/本会话累计）。对话进行中可随时「停止」（发送按钮切换为红色停止态，点击即停 / `csm-agent sessions stop <会话ID>` / CLI agent 运行中 Ctrl+C）：中断模型调用与后续工具执行，挂起中的确认草稿按拒绝处理（停止即不写），停止留痕进入会话与分享导出；进行中的单个工具调用（含已批准的写调用）允许完成，批内剩余调用跳过。会话支持「分享」（一键复制全文：标题、客户绑定、时间范围与完整对话；Web「分享」按钮与 `csm-agent sessions show <会话ID>` 同源）和「归档」（从会话列表隐藏，网页「已归档」折叠区或 `csm-agent sessions unarchive` 可恢复；归档会话禁止继续发消息）。侧边栏 Agent 导航项显示待办角标 = Hemory 待归属数 + 草稿箱待处理数。
 - 客户标签页：建议、工单、运维、工时、私有云实例、跟进记录、会议沟通、客户案例、行动事项和统一时间线分组查看；建议/工单/运维三个 ONES 工作项列表只展示语义化 ID（`display_id`）、标题、状态、创建时间，标题可点击进入工作项详情，并默认按创建时间倒序。工时页同时展示总工时和登记明细（登记人、工时日期、登记小时、工时描述），明细默认按工时日期倒序。
 - 会议回写：在客户标签页选择目标，Agent 基于已归属 Hemory 证据生成草稿；CSM 可编辑业务字段和实际参数，确认后才写入。
 - Hemory 收件箱：每天中国时间 13:00/20:00 通过 MCP 拉取当天完整逐句转写，按录音持久化后由当前 Agent 大模型整理为话题、摘要和连续证据片段；片段不按客户名称自动归属（转写中提及客户名通常是在引用其他客户案例，不代表在与该客户沟通），全部片段由 CSM 在 Agent 页面批量标记。
@@ -132,6 +132,9 @@ csm-agent service logs
 csm-agent ones fields [--verify] # ONES Desk 必填字段契约：选项 UUID 表、兜底值、实例部署类型规则
 csm-agent agent <CRM客户ID> "基于会议生成工单草稿"
 csm-agent agent <CRM客户ID> "结合已同步数据与最近三个月公开动态分析续约风险和增购机会"
+csm-agent agent <CRM客户ID> "总结这份需求文档，并对比该客户现有建议" --attach ./需求说明.pdf
+                                       # --attach 可重复；文本/PDF 注入上下文，图片要求视觉模型
+                                       # （自定义端点先 config llm set ... --vision=on）
                                        # agent 运行中 Ctrl+C 会先停止服务端本轮对话再退出
 csm-agent sessions [list] [--all] # 会话列表；--all 含已归档
 csm-agent sessions show <会话ID> # 导出会话全文（标题 + 客户 + 时间 + 对话）
@@ -166,7 +169,7 @@ ONES Desk 三类工作项（建议和反馈/工单/运维工单）的人工必�
 ## 本地配置
 
 - `~/.csm-agent/config/mcp.user.yaml`：界面或全局 CLI 服务保存的 MCP 服务器配置。
-- `~/.csm-agent/config/llm.user.yaml`：界面或全局 CLI 服务保存的模型配置。除内置服务商（DeepSeek/OpenAI/Anthropic/Moonshot/Groq）外，支持「自定义（OpenAI 兼容）」服务商：在「设置」页填 Base URL + 模型 + API Key 即可接入任意 OpenAI 兼容端点（如 `https://relay.ones.pro/v1` + `ucloud-deepseek-v4-pro`）。CLI 同口径：`csm-agent config llm` 查看、`csm-agent config llm set --provider=custom --model=<模型> --base-url=<端点> --api-key=<key>` 切换；保存前服务端会向端点发一次真实流式请求验证连通，失败不落盘。API Key 只写入本地配置文件（0600），查询接口只返回是否已配置。
+- `~/.csm-agent/config/llm.user.yaml`：界面或全局 CLI 服务保存的模型配置。除内置服务商（DeepSeek/OpenAI/Anthropic/Moonshot/Groq）外，支持「自定义（OpenAI 兼容）」服务商：在「设置」页填 Base URL + 模型 + API Key 即可接入任意 OpenAI 兼容端点（如 `https://relay.ones.pro/v1` + `ucloud-deepseek-v4-pro`）。CLI 同口径：`csm-agent config llm` 查看、`csm-agent config llm set --provider=custom --model=<模型> --base-url=<端点> --api-key=<key>` 切换；保存前服务端会向端点发一次真实流式请求验证连通，失败不落盘。API Key 只写入本地配置文件（0600），查询接口只返回是否已配置。视觉（图片输入）能力：内置服务商按模型目录自动判定；自定义端点无法探测，须在设置中勾选「支持图片输入（视觉模型）」或 `config llm set ... --vision=on` 声明——它是对话图片附件的放行前提，配置查询接口同时返回解析后的 `vision` 值。
 - `~/.csm-agent/config/search.user.yaml`：联网搜索（Tavily）配置，也可在「设置」页填写或用环境变量 `TAVILY_API_KEY`。未配置 key 时 `web_search` 自动走免费匿名搜索层（Exa/Parallel/Tavily/Firecrawl/Keenable 五家轮换、限流自动切换下一家，匿名请求不带用户身份；`keylessFallback: false` 可停用）；配置 key 后优先走 Tavily 并支持严格时间窗过滤。`GET /api/config/search` 与 `csm-agent doctor` 只返回 key 是否已配置，不返回 key 本身。
 - `~/.csm-agent/.env` 或当前目录 `.env`：凭据和部署变量；可用 `CSM_ENV_FILE` 显式指定。
 - `CSM_CONFIG_DIR`：单独覆盖可写配置目录；`CSM_DATA_DIR` 同时决定默认数据目录和默认配置目录。

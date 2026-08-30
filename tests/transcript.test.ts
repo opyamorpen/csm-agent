@@ -60,3 +60,17 @@ test('transcript: confirm drafts render target system and tool', () => {
   }));
   assert.match(text, /\[待确认草稿\] 本周沟通记录 ｜ 目标: crm ｜ 工具: data_record_create/);
 });
+
+test('transcript: user messages with attachments render a 📎 marker (content stays out of shares)', () => {
+  const text = formatSessionTranscript(session({
+    events: [
+      { seq: 1, event: { type: 'user', text: '帮我分析这份文档', attachments: [{ name: '需求说明.pdf' }, { name: '错误截图.png' }] } },
+      { seq: 2, event: { type: 'text', text: '文档要点如下…' } },
+      { seq: 3, event: { type: 'user', text: '无附件的消息' } },
+    ],
+  }));
+  assert.match(text, /用户：帮我分析这份文档（附件：📎 需求说明.pdf、📎 错误截图.png）/);
+  assert.ok(text.includes('\n用户：无附件的消息'), '无附件消息行应存在');
+  assert.ok(!text.includes('无附件的消息（附件'), '无附件消息不追加附件标记');
+  assert.doesNotMatch(text, /base64|data:application/, '附件内容不进分享文本');
+});

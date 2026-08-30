@@ -25,7 +25,8 @@
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "unpdf": "^1.8.1"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

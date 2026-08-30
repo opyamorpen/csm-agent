@@ -280,3 +280,76 @@ test('tool names are stable contracts', () => {
   assert.equal(CUSTOMER_PROFILE_TOOL_NAME, 'get_customer_profile');
   assert.equal(CUSTOMER_EVENTS_TOOL_NAME, 'get_customer_events');
 });
+
+// ── get_customer_detail：客户详情页 12 板块的按需抓取工具 ──
+import {
+  CUSTOMER_DETAIL_TOOL_NAME,
+  CUSTOMER_DETAIL_SECTIONS,
+  resolveSections,
+  makeCustomerDetailResult,
+  type CustomerDetailToolDeps,
+} from '../src/tools/customer-detail.js';
+
+function detailDeps(overrides: Partial<CustomerDetailToolDeps> = {}): CustomerDetailToolDeps {
+  const event = (sourceType: string, title: string) => ({ id: `${sourceType}-1`, sourceType, title, occurredAt: '2026-08-20T02:00:00.000Z' });
+  return {
+    getCustomer: () => ({ id: 'crm-1', name: '客户甲' }),
+    overview: () => ({
+      customer: { id: 'crm-1', name: '客户甲', syncedAt: new Date().toISOString() },
+      risk: { score: 42, level: 'yellow' },
+      caseDrafts: [{ id: 'cd-1' }],
+      actions: [{ id: 'act-1' }],
+      timeline: [event('support_ticket', '工单（概览时间线切片）')],
+      completionRates: { support_ticket: { done: 9, total: 10 } },
+    }),
+    timeline: () => [event('support_ticket', '工单一'), event('suggestion_feedback', '建议一'), event('crm_followup', '跟进一')],
+    workhours: async () => ({ issueId: 'issue-1', totalHours: 100, records: [{ owner: { name: 'CSM' }, hours: 2 }] }),
+    hemoryFragments: () => [{ id: 'frag-1', title: '沟通片段' }],
+    cases: async () => ({ caseCandidate: null, caseDrafts: [{ id: 'cd-1' }], latestDraftMarkdown: '## 背景…' }),
+    weeklyReports: async () => ({ reports: [{ id: 'wk-1' }], latestMarkdown: '# 周报…' }),
+    actions: () => [{ id: 'act-1', title: '行动一' }],
+    ...overrides,
+  };
+}
+
+test('get_customer_detail: sections 白名单解析 + all 展开', () => {
+  assert.deepEqual(resolveSections(['support_ticket', 'support_ticket', 'bad']), ['support_ticket']);
+  assert.equal(resolveSections(['all'])?.length, CUSTOMER_DETAIL_SECTIONS.length, 'all 应展开为全部板块');
+  assert.equal(resolveSections(['bad']), null);
+  assert.equal(resolveSections('overview'), null, '非数组无效');
+});
+
+test('get_customer_detail: 默认最小选择——只取指定板块，且事件类按类型过滤', async () => {
+  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['support_ticket'] });
+  assert.equal(r.isError, undefined);
+  assert.ok(r.text.includes('## 工单'), '应含板块标题');
+  assert.ok(r.text.includes('工单一'));
+  assert.ok(!r.text.includes('建议一'), '未请求的建议板块不应出现');
+  assert.ok(!r.text.includes('## 建议'));
+});
+
+test('get_customer_detail: overview 剔除 timeline/caseDrafts/actions（由各自板块承担，防重复拉取）', async () => {
+  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['overview'] });
+  assert.ok(r.text.includes('## 概览'));
+  assert.ok(r.text.includes('"score": 42'));
+  assert.ok(!r.text.includes('概览时间线切片'), 'overview 内嵌时间线应被剔除');
+  assert.ok(!r.text.includes('cd-1'), 'caseDrafts 应从 overview 剔除');
+  assert.ok(!r.text.includes('act-1'), 'actions 应从 overview 剔除');
+});
+
+test('get_customer_detail: 工时/周报/案例板块走各自服务层', async () => {
+  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['customer_manhour', 'weekly_report', 'cases', 'actions'] });
+  for (const label of ['## 工时', '## 实施周报', '## 客户案例', '## 行动事项']) assert.ok(r.text.includes(label), `缺少板块 ${label}`);
+  assert.ok(r.text.includes('"totalHours": 100'));
+  assert.ok(r.text.includes('周报…'));
+  assert.ok(r.text.includes('背景…'));
+});
+
+test('get_customer_detail: 未绑定客户返回可读错误，坏 sections 同上', async () => {
+  const unbound = await makeCustomerDetailResult(detailDeps({ getCustomer: () => null }), { sections: ['overview'] });
+  assert.equal(unbound.isError, true);
+  assert.ok(unbound.text.includes('未绑定客户'));
+  const bad = await makeCustomerDetailResult(detailDeps(), { sections: ['bad'] });
+  assert.equal(bad.isError, true);
+  assert.ok(bad.text.includes(CUSTOMER_DETAIL_TOOL_NAME));
+});

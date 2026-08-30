@@ -740,7 +740,8 @@ test('settings modal exposes custom OpenAI-compatible endpoint configuration', (
   assert.match(loader, /llmBaseUrl\.value = data\.baseUrl \|\| ''/);
   const saver = source.match(/saveConfigBtn\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
   assert.ok(saver, 'saveConfigBtn handler was not found');
-  assert.match(saver, /if \(llmPayload\.provider === 'custom'\) llmPayload\.baseUrl = llmBaseUrl\.value\.trim\(\)/);
+  assert.match(saver, /if \(llmPayload\.provider === 'custom'\) \{/);
+  assert.match(saver, /llmPayload\.baseUrl = llmBaseUrl\.value\.trim\(\);/);
 });
 
 test('draft generation shows a loading banner and polls job status after attribution', () => {
@@ -1318,4 +1319,70 @@ test('cursor ripple fx: theme tokens, silky wake guards, header toggle and load 
   assert.match(fx, /window\.csmCursorFx = \{/);
   // 画布不挡交互：pointer-events:none 且压在模态框（z-index 50）之上。
   assert.match(fx, /pointer-events:none;z-index:60/);
+});
+
+// ── 对话附件显示契约（纯 UI 改动必须有自动化契约检查，AGENTS.md）──
+
+test('composer exposes the attachment entry: + button first, hidden file input, chips container', () => {
+  const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  // 「+」在 #input 之前（左下角），type=button 防表单内提交。
+  const attachIdx = page.indexOf('id="attach"');
+  const inputIdx = page.indexOf('id="input"');
+  assert.ok(attachIdx > -1 && inputIdx > -1 && attachIdx < inputIdx, '「+」按钮必须在输入框左侧（composer 内 #input 之前）');
+  assert.match(page, /<button id="attach" type="button" title="添加附件（文本 \/ PDF \/ 图片，也可拖拽或粘贴截图）">＋<\/button>/);
+  assert.match(page, /<input id="attachFile" type="file" multiple class="hidden" \/>/);
+  assert.match(page, /<div id="attachmentChips" class="hidden" aria-live="polite"><\/div>/);
+});
+
+test('attachment intake: click / paste / drop all feed addAttachmentFiles with limits and vision gate', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // 三条入口汇入同一管线。
+  assert.match(source, /attachEl\.addEventListener\('click', \(\) => attachFileEl\.click\(\)\);/);
+  assert.match(source, /form\.addEventListener\('paste', \(ev\) => \{\s*const files = ev\.clipboardData\?\.files;/);
+  assert.match(source, /footerEl\.addEventListener\('drop', \(ev\) => \{/);
+  // 限制与服务端一致：5 个 / 单文件 8MB / 合计 15MB。
+  assert.match(source, /const ATTACH_MAX_COUNT = 5;/);
+  assert.match(source, /const ATTACH_MAX_FILE = 8 \* 1024 \* 1024;/);
+  assert.match(source, /const ATTACH_MAX_TOTAL = 15 \* 1024 \* 1024;/);
+  // 视觉门：无视觉能力时前端直接拦图片并给指引。
+  assert.match(source, /if \(isImage && !visionSupported\)/);
+  assert.match(source, /当前模型不支持图片输入（视觉模型）/);
+  // chips 删除钮 type=button + 阻断冒泡（表单内按钮默认 submit 的坑）。
+  assert.match(source, /remove\.type = 'button';/);
+  assert.match(source, /ev\.stopPropagation\(\);/);
+  // 提交时附件随消息发送；空文本+有附件允许发送。
+  assert.match(source, /attachments\.length \? \{ message: text, attachments \} : \{ message: text \}/);
+  assert.match(source, /if \(\(!text && !attachments\.length\) \|\| busy \|\| !sessionId\) return;/);
+  // 失败回滚：被拒（视觉门/类型/大小）时把内容与附件还给用户。
+  assert.match(source, /if \(!res\.ok\) throw new Error\(result\.error/);
+  assert.match(source, /pendingAttachments = attachments;/);
+});
+
+test('user messages render attachments: image preview via session route, others as file chips', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const renderer = source.match(/function addUserMessage[\s\S]*?\n  }\n/gs);
+  assert.ok(renderer, 'addUserMessage source was not found');
+  assert.match(source, /case 'user': addUserMessage\(e\); break;/);
+  assert.match(renderer[0], /img\.className = 'attach-image';/);
+  assert.match(renderer[0], /img\.src = href;/);
+  assert.match(renderer[0], /`\/api\/sessions\/\$\{sessionId\}\/attachments\/\$\{a\.id\}`/);
+  assert.match(renderer[0], /el\('span', 'attach-file', '📎 ' \+ \(a\.name \|\| '附件'\)\)/);
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 新选择器必须走主题变量（深浅双主题零硬编码色值）。
+  assert.match(styles, /#attach \{[^}]*background: var\(--panel-2\)/);
+  assert.match(styles, /#composer\.dragover \{[^}]*outline: 2px dashed var\(--accent\)/);
+  assert.match(styles, /\.msg img\.attach-image \{[^}]*border: 1px solid var\(--border\)/);
+  assert.match(styles, /#attachmentChips \{/);
+  assert.match(styles, /\.attach-chip \{/);
+});
+
+test('llm settings expose a vision toggle: editable for custom, auto-detected read-only for builtins', () => {
+  const page = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(page, /<input id="llmVision" type="checkbox" \/>/);
+  assert.match(page, /id="llmVisionLabel"/);
+  // 内置服务商按模型目录自动判定（disabled 展示），custom 手动声明并随保存提交。
+  assert.match(source, /llmVision\.disabled = !isCustom;/);
+  assert.match(source, /llmPayload\.vision = llmVision\.checked;/);
+  assert.match(source, /visionSupported = data\.vision === true;/);
 });

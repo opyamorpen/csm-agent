@@ -4,6 +4,9 @@
   const sendEl = document.getElementById('send');
   const statusEl = document.getElementById('status');
   const form = document.getElementById('composer');
+  const attachEl = document.getElementById('attach');
+  const attachFileEl = document.getElementById('attachFile');
+  const attachmentChipsEl = document.getElementById('attachmentChips');
   const sessionListEl = document.getElementById('sessionList');
   const newSessionBtn = document.getElementById('newSession');
   const recordListEl = document.getElementById('recordList');
@@ -23,6 +26,8 @@
   const llmKey = document.getElementById('llmKey');
   const llmBaseUrlRow = document.getElementById('llmBaseUrlRow');
   const llmBaseUrl = document.getElementById('llmBaseUrl');
+  const llmVision = document.getElementById('llmVision');
+  const llmVisionLabel = document.getElementById('llmVisionLabel');
   const searchKey = document.getElementById('searchKey');
   const searchMaxResults = document.getElementById('searchMaxResults');
 
@@ -433,6 +438,34 @@
     scrollDown();
   }
 
+  /** 用户消息：正文 + 附件（图片走会话附件路由预览，其余展示文件 chip；元信息随事件回放）。 */
+  function addUserMessage(e) {
+    const n = el('div', 'msg user');
+    if (e.text) n.appendChild(el('div', null, e.text));
+    const attachments = Array.isArray(e.attachments) ? e.attachments : [];
+    if (attachments.length) {
+      const list = el('div', 'attach-list');
+      for (const a of attachments) {
+        const href = `/api/sessions/${sessionId}/attachments/${a.id}`;
+        if ((a.mimeType || '').startsWith('image/')) {
+          const img = document.createElement('img');
+          img.className = 'attach-image';
+          img.src = href;
+          img.alt = a.name || '图片附件';
+          img.loading = 'lazy';
+          list.appendChild(img);
+        } else {
+          const chip = el('span', 'attach-file', '📎 ' + (a.name || '附件'));
+          chip.title = (a.name || '') + (a.size ? `（${(a.size / 1024).toFixed(0)}KB）` : '');
+          list.appendChild(chip);
+        }
+      }
+      n.appendChild(list);
+    }
+    messagesEl.appendChild(n);
+    scrollDown();
+  }
+
   function addToolLine(name, args) {
     const n = el('div', 'tool');
     const b = document.createElement('b');
@@ -598,7 +631,7 @@
   function handleEvent(e) {
     if (!e) return;
     switch (e.type) {
-      case 'user': addMessage('user', e.text); break;
+      case 'user': addUserMessage(e); break;
       case 'turn_start': busy = true; setThinking(true); startStreaming(); setSendStopping(true); break;
       case 'text_delta': appendTextDelta(e.delta); break;
       case 'thinking_delta': appendThinkingDelta(e.delta); break;
@@ -1001,11 +1034,14 @@
     }
   }
 
-  // 自定义（OpenAI 兼容）服务商需要额外的 Base URL 输入框。
+  // 自定义（OpenAI 兼容）服务商需要额外的 Base URL 输入框；
+  // 视觉开关同理：内置服务商按模型目录自动判定（只读展示），自定义端点无法探测须手动声明。
   function syncLlmProviderUi() {
     const isCustom = llmProvider.value === 'custom';
     llmBaseUrlRow.classList.toggle('hidden', !isCustom);
     llmModel.placeholder = isCustom ? '例如 ucloud-qwen3.8-max' : '例如 deepseek-v4-flash';
+    llmVision.disabled = !isCustom;
+    llmVisionLabel.classList.toggle('disabled', !isCustom);
   }
   llmProvider.addEventListener('change', syncLlmProviderUi);
 
@@ -1020,6 +1056,8 @@
       llmKey.placeholder = data.apiKeyConfigured
         ? '已设置（留空则不修改）'
         : 'sk-... 或用 ${ENV_VAR}';
+      llmVision.checked = data.vision === true;
+      visionSupported = data.vision === true;
       syncLlmProviderUi();
     } catch (err) {
       configResult.className = 'err';
@@ -1058,7 +1096,10 @@
       model: llmModel.value.trim(),
       apiKey: llmKey.value.trim(),
     };
-    if (llmPayload.provider === 'custom') llmPayload.baseUrl = llmBaseUrl.value.trim();
+    if (llmPayload.provider === 'custom') {
+      llmPayload.baseUrl = llmBaseUrl.value.trim();
+      llmPayload.vision = llmVision.checked;
+    }
     saveConfigBtn.disabled = true;
     configResult.className = '';
     configResult.textContent = '保存中…';
@@ -1075,6 +1116,7 @@
         results.push('模型: ' + (llmData.error || llmRes.status));
       } else {
         results.push('模型: ' + llmData.provider + '/' + llmData.model + (llmData.baseUrl ? ` @ ${llmData.baseUrl}` : '') + ' 已生效');
+        if (typeof llmData.vision === 'boolean') visionSupported = llmData.vision;
       }
 
       const searchPayload = { apiKey: searchKey.value.trim(), maxResults: Number(searchMaxResults.value) || 5 };
@@ -3101,6 +3143,87 @@
     });
   }
 
+  // ── 附件（「+」按钮 / 拖拽 / 粘贴三路汇入同一条管线；限制与服务端保持一致）──
+  const ATTACH_MAX_COUNT = 5;
+  const ATTACH_MAX_FILE = 8 * 1024 * 1024;
+  const ATTACH_MAX_TOTAL = 15 * 1024 * 1024;
+  let pendingAttachments = []; // [{name, mimeType, size, data(base64)}]
+  // 视觉（图片输入）能力：GET /api/config/llm 下发，设置保存后同步刷新；无视觉时前端直接拦图片。
+  let visionSupported = false;
+
+  function renderAttachmentChips() {
+    attachmentChipsEl.innerHTML = '';
+    attachmentChipsEl.classList.toggle('hidden', pendingAttachments.length === 0);
+    pendingAttachments.forEach((att, index) => {
+      const chip = el('span', 'attach-chip');
+      chip.title = `${att.name}（${(att.size / 1024).toFixed(0)}KB）`;
+      chip.appendChild(el('span', 'n', '📎 ' + att.name));
+      // 表单内按钮默认 submit：chips 删除钮必须显式 type=button 并阻断冒泡。
+      const remove = el('button', 'x', '✕');
+      remove.type = 'button';
+      remove.title = '移除附件';
+      remove.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        pendingAttachments.splice(index, 1);
+        renderAttachmentChips();
+      });
+      chip.appendChild(remove);
+      attachmentChipsEl.appendChild(chip);
+    });
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('读取文件失败: ' + file.name));
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addAttachmentFiles(fileList) {
+    const files = [...(fileList || [])];
+    if (!files.length) return;
+    for (const file of files) {
+      if (pendingAttachments.length >= ATTACH_MAX_COUNT) { await alertDialog(`一次最多附带 ${ATTACH_MAX_COUNT} 个附件`); break; }
+      const isImage = (file.type || '').startsWith('image/');
+      if (isImage && !visionSupported) {
+        await alertDialog(`「${file.name}」是图片，但当前模型不支持图片输入（视觉模型）。请在设置中切换支持视觉的模型，或勾选「支持图片输入」。`);
+        continue;
+      }
+      if (file.size > ATTACH_MAX_FILE) { await alertDialog(`「${file.name}」超过单文件大小上限 8MB`); continue; }
+      if (pendingAttachments.reduce((sum, a) => sum + a.size, 0) + file.size > ATTACH_MAX_TOTAL) {
+        await alertDialog('附件总大小超过 15MB 上限');
+        break;
+      }
+      const data = await readFileAsBase64(file);
+      pendingAttachments.push({ name: file.name || '未命名附件', mimeType: file.type || 'application/octet-stream', size: file.size, data });
+    }
+    renderAttachmentChips();
+  }
+
+  attachEl.addEventListener('click', () => attachFileEl.click());
+  attachFileEl.addEventListener('change', () => {
+    addAttachmentFiles(attachFileEl.files).catch(() => {});
+    attachFileEl.value = ''; // 清空后再次选择同一文件仍能触发 change
+  });
+  // 粘贴截图与拖拽文件走同一管线（CSM 甩日志/贴截图是高频动作）。
+  form.addEventListener('paste', (ev) => {
+    const files = ev.clipboardData?.files;
+    if (files && files.length) {
+      ev.preventDefault();
+      addAttachmentFiles(files).catch(() => {});
+    }
+  });
+  footerEl.addEventListener('dragover', (ev) => { ev.preventDefault(); form.classList.add('dragover'); });
+  footerEl.addEventListener('dragleave', (ev) => { if (!footerEl.contains(ev.relatedTarget)) form.classList.remove('dragover'); });
+  footerEl.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    form.classList.remove('dragover');
+    addAttachmentFiles(ev.dataTransfer?.files).catch(() => {});
+  });
+
   // ── composer ───────────────────────────────────────────────────
 
   /** 请求服务端停止本轮对话；失败且仍处于 busy 才提示（如恰好已 turn_end，事件流会自然复位）。 */
@@ -3127,23 +3250,32 @@
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const text = inputEl.value.trim();
-    if (!text || busy || !sessionId) return;
+    const attachments = pendingAttachments.map((a) => ({ ...a }));
+    if ((!text && !attachments.length) || busy || !sessionId) return;
     inputEl.value = '';
+    pendingAttachments = [];
+    renderAttachmentChips();
     busy = true;
     inputEl.disabled = true;
     setThinking(true);
     setSendStopping(true);
     try {
-      await fetch(`/api/sessions/${sessionId}/messages`, {
+      const res = await fetch(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify(attachments.length ? { message: text, attachments } : { message: text }),
       });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `发送失败 (${res.status})`);
     } catch (err) {
       busy = false;
       inputEl.disabled = false;
       setThinking(false);
       setSendStopping(false);
+      // 发送被拒（视觉门/类型/大小）时把内容还给用户，避免白打白选。
+      inputEl.value = text;
+      pendingAttachments = attachments;
+      renderAttachmentChips();
       addMessage('assistant', '发送失败: ' + err.message);
     }
   });
@@ -3183,6 +3315,8 @@
     }
     loadRecords();
     await Promise.all([loadPortfolio(), loadActions(), loadCases(), loadHemoryInbox(), loadDraftBatches()]);
+    // 视觉能力决定附件入口是否放行图片（设置页每次保存也会刷新同一状态）。
+    fetch('/api/config/llm').then((r) => r.json()).then((d) => { visionSupported = d.vision === true; }).catch(() => {});
     showView('portfolio');
     startBuildVersionCheck();
   }

@@ -11,9 +11,15 @@ description: 从工作台本地数据库读取客户的已同步数据（档案�
 
 会话绑定客户后（客户详情页发起的对话，或已通过 resolve_customer 锁定身份），回答下列问题**先用本地工具**：
 
-- 客户现状概览（健康度、续约、合同、风险评分、增购机会）→ `get_customer_profile`
-- 历史互动与事件（跟进记录、工单、建议、运维、工时、会议片段）→ `get_customer_events`
-- 续约风险 / 增购机会分析 → 先 `get_customer_profile` 拿全景，再按需 `get_customer_events` 取细节
+- 主入口是 `get_customer_detail`：按板块（sections）抓取客户详情页数据，与客户页 tab 一一对应——
+  `overview` 概览（档案/风险/机会/完成率）、`suggestion_feedback` 建议、`support_ticket` 工单、`operations_ticket` 运维、
+  `customer_manhour` 工时明细、`private_cloud_instance` 私有云实例、`followup` 跟进记录、`hemory_fragments` 会议片段、
+  `cases` 客户案例、`weekly_report` 实施周报、`actions` 行动事项、`timeline` 统一时间线。
+- **默认最小选择**：每轮只取与本轮问题直接相关的 sections（问工单就只取 `["support_ticket"]`），节省 token；
+  仅当用户明确要求「全部信息 / 完整情况」时才传 `["all"]`。
+- 客户现状概览（健康度、续约、合同、风险评分、增购机会）→ `["overview"]`
+- 续约风险 / 增购机会分析 → 先 `["overview"]` 拿全景，再按需追加相关板块（如 `support_ticket`、`followup`、`hemory_fragments`）
+- `get_customer_profile` / `get_customer_events` 仍可用（旧版粗粒度等价），新代码优先 `get_customer_detail`。
 
 ## 什么时候改用 MCP 实时查询
 

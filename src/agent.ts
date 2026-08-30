@@ -1,4 +1,4 @@
-import type { AssistantMessage, Context, Model, Models, Tool, ToolCall } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Context, ImageContent, Model, Models, TextContent, Tool, ToolCall } from '@earendil-works/pi-ai';
 import { CONFIRM_TOOL_NAME, type ConfirmDraft } from './tools/confirm.js';
 import type { CustomerContext } from './tools/customer.js';
 import { argumentsHash } from './approval.js';
@@ -263,8 +263,8 @@ export class AgentSession {
     };
   }
 
-  /** Append a user message and run the loop. Returns the final assistant text. */
-  async send(userInput: string, hooks: AgentHooks, signal?: AbortSignal): Promise<string> {
+  /** Append a user message (plain text or text+image blocks) and run the loop. Returns the final assistant text. */
+  async send(userInput: string | (TextContent | ImageContent)[], hooks: AgentHooks, signal?: AbortSignal): Promise<string> {
     if (this.cfg.live) {
       this.context.systemPrompt = this.cfg.live.getSystemPrompt();
       this.context.tools = this.cfg.live.getTools();

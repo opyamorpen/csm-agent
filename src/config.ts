@@ -127,6 +127,11 @@ export interface LlmConfig {
   apiKeyEnv: string;
   /** OpenAI-compatible base URL; only meaningful for the 'custom' provider. */
   baseUrl?: string;
+  /**
+   * 视觉（图片输入）能力。builtin 目录模型按 pi-ai 目录自动判定（此字段忽略）；
+   * custom 端点无法探测，须用户显式声明——决定附件图片是否作为 image 块发给模型。
+   */
+  vision?: boolean;
 }
 
 /** Provider id → { label, apiKeyEnv, defaultModel }. */
@@ -167,6 +172,7 @@ export function loadLlmConfig(): LlmConfig {
       apiKey: typeof raw?.apiKey === 'string' ? raw.apiKey : undefined,
       apiKeyEnv: typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : p.apiKeyEnv,
       ...(provider === 'custom' && baseUrl ? { baseUrl } : {}),
+      ...(raw?.vision === true ? { vision: true } : {}),
     };
   } catch {
     const p = providerFor('deepseek')!;
@@ -182,6 +188,7 @@ export function saveLlmConfig(cfg: LlmConfig): void {
     apiKeyEnv: p.apiKeyEnv,
   };
   if (cfg.provider === 'custom' && cfg.baseUrl?.trim()) out.baseUrl = cfg.baseUrl.trim().replace(/\/+$/, '');
+  if (cfg.vision === true) out.vision = true;
   if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
   mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
   atomicWriteYaml(userConfigPath('llm.user.yaml'), out);

@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, extname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
@@ -68,7 +68,7 @@ const CLI_CAPABILITIES = [
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
-  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
+  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/attachments/:attId', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_detail', 'get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
   { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export', '/api/sessions/:id/stop'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
@@ -113,9 +113,10 @@ function help(): void {
   csm-agent doctor
     （健康自检，含旧进程探测：服务端构建 vs 本地 dist 构建，stale 会提示重启）
   csm-agent config llm [--json]
-  csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>]
+  csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>] [--vision=on|off]
     （查看/切换大模型；provider=custom 需 --base-url（OpenAI 兼容端点），
-     保存时自动发一次真实请求验证连通，失败则不落盘；API Key 只写本地配置文件）
+     保存时自动发一次真实请求验证连通，失败则不落盘；API Key 只写本地配置文件；
+     --vision 声明自定义端点的图片输入能力（内置服务商按模型目录自动判定，无需设置））
   csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
   csm-agent customer <客户ID或名称> [--json]
   csm-agent webintel <客户ID或名称> [--json]
@@ -195,10 +196,13 @@ function help(): void {
     （ONES Desk 建议/工单/运维工单必填字段契约：选项 UUID 表、兜底值、
      实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
      --verify 经 get_issue_fields 实时核对选项 UUID 漂移）
-  csm-agent agent <客户ID或名称> <指令>
-    （客户绑定会话；agent 可读本地已同步数据 get_customer_profile/events、
+  csm-agent agent <客户ID或名称> <指令> [--attach <文件路径> ...]
+    （客户绑定会话；agent 可按需抓取客户详情页各板块 get_customer_detail、
+     本地已同步事件 get_customer_events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
-     落库 record_web_intelligence）
+     落库 record_web_intelligence；
+     --attach 附带本地文件（文本类/PDF 内容注入上下文，可重复；图片要求视觉模型，
+     自定义端点先 config llm set ... --vision=on 声明能力））
   csm-agent sessions [list] [--all] [--json]
   csm-agent sessions show <会话ID> [--json]
     （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）
@@ -651,6 +655,39 @@ function flagOf(values: string[], name: string): string | undefined {
   return hit ? hit.slice(prefix.length) : undefined;
 }
 
+/** 摘出可重复选项：同时支持 `--flag 值` 与 `--flag=值` 两种形态，返回其余参数与全部取值。 */
+function extractRepeatableFlag(values: string[], name: string): { kept: string[]; found: string[] } {
+  const kept: string[] = [];
+  const found: string[] = [];
+  const prefix = `--${name}=`;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v === `--${name}`) {
+      const next = values[i + 1];
+      if (next !== undefined) { found.push(next); i++; }
+    } else if (v.startsWith(prefix)) {
+      found.push(v.slice(prefix.length));
+    } else {
+      kept.push(v);
+    }
+  }
+  return { kept, found };
+}
+
+/** 按扩展名猜 MIME：CLI 没有浏览器的 file.type，服务端按 MIME 优先分类，猜错会走错通道。 */
+const CLI_MIME: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
+  '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown',
+  '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.json': 'application/json', '.jsonl': 'application/x-ndjson',
+  '.log': 'text/plain', '.yaml': 'application/yaml', '.yml': 'application/yaml', '.xml': 'application/xml',
+  '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.ts': 'text/plain',
+  '.py': 'text/plain', '.sh': 'text/plain', '.sql': 'text/plain', '.toml': 'text/plain', '.ini': 'text/plain',
+};
+
+function mimeFromName(name: string): string {
+  return CLI_MIME[extname(name).toLowerCase()] ?? 'application/octet-stream';
+}
+
 async function configCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'llm' && !values.length) {
     const cfg = await request<any>('/api/config/llm');
@@ -662,10 +699,17 @@ async function configCommand(subcommand: string, values: string[]): Promise<void
     const model = flagOf(rest, 'model');
     const baseUrl = flagOf(rest, 'base-url');
     const apiKey = flagOf(rest, 'api-key');
-    if (!provider || !model) throw new Error('config llm set 需要 --provider=<id> --model=<id>，可选 --base-url=<url> --api-key=<key>');
-    const payload: Record<string, string> = { provider, model };
+    const visionRaw = flagOf(rest, 'vision');
+    if (!provider || !model) throw new Error('config llm set 需要 --provider=<id> --model=<id>，可选 --base-url=<url> --api-key=<key> --vision=on|off');
+    const payload: Record<string, string | boolean> = { provider, model };
     if (baseUrl !== undefined) payload.baseUrl = baseUrl;
     if (apiKey !== undefined) payload.apiKey = apiKey;
+    if (visionRaw !== undefined) {
+      const vision = ['on', 'true', '1', 'yes'].includes(visionRaw.toLowerCase()) ? true
+        : ['off', 'false', '0', 'no'].includes(visionRaw.toLowerCase()) ? false : null;
+      if (vision === null) throw new Error('--vision 只接受 on/off（视觉=图片输入；仅自定义端点需要显式声明，内置服务商按模型目录自动判定）');
+      payload.vision = vision;
+    }
     const result = await request<any>('/api/config/llm', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -1187,8 +1231,20 @@ async function streamAgent(sessionId: string): Promise<void> {
   }
 }
 
-async function runCustomerAgent(customerInput: string, prompt: string): Promise<void> {
+async function runCustomerAgent(customerInput: string, prompt: string, attachPaths: string[] = []): Promise<void> {
   const customer = await resolveCustomer(customerInput);
+  // 附件与网页「+」按钮同一 API/校验/落盘：CLI 只负责读文件 + base64 + 猜 MIME。
+  const attachments = attachPaths.map((path) => {
+    let raw: Buffer;
+    try {
+      raw = readFileSync(path);
+    } catch {
+      throw new Error(`附件读取失败: ${path}`);
+    }
+    const name = path.split('/').pop() ?? path;
+    return { name, mimeType: mimeFromName(name), data: raw.toString('base64') };
+  });
+  if (attachments.length) console.log(`附件 ${attachments.length} 个：${attachments.map((a) => a.name).join('、')}`);
   const session = await request<any>('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1208,7 +1264,7 @@ async function runCustomerAgent(customerInput: string, prompt: string): Promise<
     await request(`/api/sessions/${session.id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: prompt }),
+      body: JSON.stringify(attachments.length ? { message: prompt, attachments } : { message: prompt }),
     });
     await stream;
     if (interrupted) process.exitCode = 130;
@@ -1359,10 +1415,12 @@ async function main(): Promise<void> {
     throw new Error('ones 子命令只允许 fields');
   }
   if (command === 'agent') {
-    const customer = args.shift() ?? '';
-    const prompt = args.join(' ').trim();
-    if (!prompt) throw new Error('agent 命令需要客户和指令');
-    return runCustomerAgent(customer, prompt);
+    // --attach <路径>（可重复、--attach=路径 亦可）从指令文本中摘除，不拼进 message。
+    const { kept, found: attachPaths } = extractRepeatableFlag(args, 'attach');
+    const customer = kept.shift() ?? '';
+    const prompt = kept.join(' ').trim();
+    if (!prompt && !attachPaths.length) throw new Error('agent 命令需要客户和指令（或 --attach 附件）');
+    return runCustomerAgent(customer, prompt, attachPaths);
   }
   if (command === 'api') return rawApi(args.shift() ?? '', args.shift() ?? '', args.join(' ') || undefined);
   throw new Error(`未知命令: ${command}；运行 npm run cli -- help 查看用法`);

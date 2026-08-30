@@ -8,6 +8,8 @@ export interface TranscriptEvent {
   arguments?: Record<string, unknown>;
   draft?: ConfirmDraft;
   result?: string;
+  /** 用户消息携带的附件元信息（不落 base64）。 */
+  attachments?: Array<{ name?: string }>;
 }
 
 export interface TranscriptSession {
@@ -33,8 +35,13 @@ function formatTime(epochMs: number): string {
 /** Render one display event as a transcript line; null means skip (not user-visible). */
 function eventLine(event: TranscriptEvent): string | null {
   switch (event.type) {
-    case 'user':
-      return `用户：${event.text ?? ''}`;
+    case 'user': {
+      const attachmentNames = Array.isArray(event.attachments)
+        ? event.attachments.map((a) => (a?.name ?? '').trim()).filter(Boolean)
+        : [];
+      const suffix = attachmentNames.length ? `（附件：${attachmentNames.map((n) => `📎 ${n}`).join('、')}）` : '';
+      return `用户：${event.text ?? ''}${suffix}`;
+    }
     case 'text':
       return `助手：${event.text ?? ''}`;
     case 'confirm': {

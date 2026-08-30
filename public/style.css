@@ -569,6 +569,67 @@ footer {
 }
 
 #composer { width: 100%; max-width: var(--chat-width); margin: 0 auto; display: flex; gap: 10px; }
+#attach {
+  flex: 0 0 auto;
+  width: 41px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+#attach:hover { border-color: var(--accent); }
+/* 拖拽文件进入输入区时整个表单高亮，指示可释放。 */
+#composer.dragover { outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 12px; }
+
+/* 待发附件条：composer 上方的可移除 chip 列表，与 #composer 同宽对齐。 */
+#attachmentChips {
+  width: 100%;
+  max-width: var(--chat-width);
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  max-width: 260px;
+}
+.attach-chip .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip .x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+}
+.attach-chip .x:hover { color: var(--text); }
+
+/* 消息气泡内的附件：图片直接预览，其余展示文件 chip。 */
+.msg .attach-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.msg img.attach-image { max-width: 320px; max-height: 240px; border-radius: 10px; border: 1px solid var(--border); display: block; }
+.msg .attach-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  font-size: 12px;
+  align-self: flex-start;
+}
 #input {
   flex: 1;
   padding: 10px 14px;
@@ -676,6 +737,10 @@ footer {
   font-size: 13.5px;
 }
 .llm-editor input:focus, .llm-editor select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+/* 视觉开关：checkbox 行内跟随文字，覆盖 .llm-editor label 的 block 布局与通用 input 100% 宽。 */
+.vision-toggle { display: flex !important; align-items: center; gap: 8px; cursor: pointer; color: var(--text) !important; font-size: 13px !important; }
+.vision-toggle input { width: auto !important; margin: 0; }
+.vision-toggle.disabled { opacity: 0.6; cursor: not-allowed; }
 
 .server-editor {
   border: 1px solid var(--border);

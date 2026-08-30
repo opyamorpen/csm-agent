@@ -347,3 +347,30 @@ test('CLI draft edit exposes the structured editing workflow in help and capabil
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr + bad.stdout, /review\/edit\/retry/);
 });
+
+test('agent CLI exposes attachments and the customer-detail tool; config llm set accepts vision', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const help = runCli('help');
+
+  // --attach：可重复、与指令文本分离、读取本地文件 → base64 → 同一 messages API。
+  assert.match(help.stdout, /csm-agent agent <客户ID或名称> <指令> \[--attach <文件路径> \.\.\.\]/);
+  assert.match(help.stdout, /--vision=on\|off/);
+  const agentDispatch = source.match(/if \(command === 'agent'\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(agentDispatch, 'agent dispatch was not found');
+  assert.match(agentDispatch, /extractRepeatableFlag\(args, 'attach'\)/);
+  assert.match(agentDispatch, /if \(!prompt && !attachPaths\.length\) throw new Error/);
+  const runner = source.match(/async function runCustomerAgent[\s\S]*?\n}\n\nasync function main/)?.[0];
+  assert.ok(runner, 'runCustomerAgent was not found');
+  assert.match(runner, /raw\.toString\('base64'\)/);
+  assert.match(runner, /attachments\.length \? \{ message: prompt, attachments \} : \{ message: prompt \}/);
+
+  // --vision 白名单校验 + 仅随 payload 提交。
+  assert.match(source, /--vision 只接受 on\/off/);
+  assert.match(source, /payload\.vision = vision;/);
+
+  // 能力清单：客户详情按需抓取工具 + 附件下载路由。
+  const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string; workflow: string; api: string[]; tools?: string[] }>;
+  const agent = capabilities.find((item) => item.workflow === 'customer-agent');
+  assert.ok(agent?.tools?.includes('get_customer_detail'), 'agent capability must list get_customer_detail');
+  assert.ok(agent?.api.includes('/api/sessions/:id/attachments/:attId'), 'agent capability must list the attachment route');
+});
