@@ -409,8 +409,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const type = path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
           : path.endsWith('.svg') ? 'image/svg+xml; charset=utf-8' : 'text/html; charset=utf-8';
         // 构建戳必须每次取最新且不被中间层缓存：前端靠它发现「页面新、进程旧」的分裂。
+        // cursor-effects.js 同理：磁盘即真相（调参即刷即生效），无 Last-Modified/ETag 时内核仍可能启发式缓存。
         const headers: Record<string, string> = { 'Content-Type': type };
-        if (path === '/build-info.js') headers['Cache-Control'] = 'no-store';
+        if (path === '/build-info.js' || path === '/cursor-effects.js') headers['Cache-Control'] = 'no-store';
         res.writeHead(200, headers);
         return res.end(await readFile(join(publicDir, file), 'utf8'));
       }
