@@ -7,11 +7,11 @@
   --chat-width: 860px;
   /* 表面 */
   --bg: #f1f4f8;
-  --body-bg: linear-gradient(180deg, #f3f6fa 0%, #edf0f5 100%);
-  /* 背景光晕层：body::before 的漂移渐变，低透明度 pastel，勿用于组件。 */
-  --body-aurora: radial-gradient(52vw 42vw at 16% 18%, rgba(80, 126, 220, 0.1), rgba(80, 126, 220, 0) 62%),
-    radial-gradient(48vw 40vw at 84% 12%, rgba(34, 184, 207, 0.09), rgba(34, 184, 207, 0) 60%),
-    radial-gradient(58vw 46vw at 52% 96%, rgba(156, 122, 224, 0.08), rgba(156, 122, 224, 0) 64%);
+  --body-bg: linear-gradient(180deg, #e9f0fa 0%, #dfe6f2 100%);
+  /* 背景光晕层：body::before 的漂移渐变，勿用于组件。 */
+  --body-aurora: radial-gradient(58vw 50vh at 20% 14%, rgba(80, 126, 220, 0.4), rgba(80, 126, 220, 0) 100%),
+    radial-gradient(52vw 46vh at 82% 16%, rgba(34, 184, 207, 0.34), rgba(34, 184, 207, 0) 100%),
+    radial-gradient(64vw 52vh at 50% 96%, rgba(156, 122, 224, 0.32), rgba(156, 122, 224, 0) 100%);
   --workbench-bg: transparent;
   --panel: #ffffff;
   --panel-2: #f7f9fc;
@@ -67,10 +67,10 @@
   --header-sub: #a8b4c6;
   --header-btn-border: rgba(255, 255, 255, 0.28);
   --brand-mark: linear-gradient(135deg, #4f8cff, #22d3ee);
-  --sidebar-bg: rgba(245, 247, 250, 0.62);
+  --sidebar-bg: rgba(245, 247, 250, 0.45);
   --sidebar-border: #e2e7ee;
   /* 右侧审批栏：半透明实底，配合外壳毛玻璃透出背景光晕。 */
-  --records-bg: rgba(247, 249, 252, 0.72);
+  --records-bg: rgba(247, 249, 252, 0.55);
   --nav-text: #3b4757;
   --nav-hover-bg: #e9edf3;
   --nav-active-bg: #ffffff;
@@ -115,11 +115,11 @@
   --chat-width: 860px;
   /* 表面 */
   --bg: #0a1120;
-  --body-bg: #0a1120;
+  --body-bg: linear-gradient(180deg, #0a1120 0%, #101a3a 100%);
   /* 背景光晕层：body::before 的漂移渐变（原静态霓虹晕迁入此层 + 居中紫晕），勿用于组件。 */
-  --body-aurora: radial-gradient(1100px 620px at 88% -12%, rgba(34, 211, 238, 0.1), rgba(34, 211, 238, 0) 55%),
-    radial-gradient(900px 560px at -8% 112%, rgba(79, 140, 255, 0.12), rgba(79, 140, 255, 0) 55%),
-    radial-gradient(760px 520px at 46% 52%, rgba(139, 92, 246, 0.07), rgba(139, 92, 246, 0) 60%);
+  --body-aurora: radial-gradient(60vw 55vh at 78% 6%, rgba(34, 211, 238, 0.38), rgba(34, 211, 238, 0) 100%),
+    radial-gradient(58vw 55vh at 12% 92%, rgba(79, 140, 255, 0.4), rgba(79, 140, 255, 0) 100%),
+    radial-gradient(55vw 50vh at 50% 45%, rgba(139, 92, 246, 0.28), rgba(139, 92, 246, 0) 100%);
   --workbench-bg: transparent;
   --panel: #101a2e;
   --panel-2: #15213a;
@@ -175,10 +175,10 @@
   --header-sub: #93a0b8;
   --header-btn-border: rgba(148, 163, 184, 0.38);
   --brand-mark: linear-gradient(135deg, #22d3ee, #4f8cff);
-  --sidebar-bg: rgba(11, 18, 34, 0.66);
+  --sidebar-bg: rgba(11, 18, 34, 0.45);
   --sidebar-border: rgba(148, 163, 184, 0.16);
   /* 右侧审批栏：半透明实底，配合外壳毛玻璃透出背景光晕。 */
-  --records-bg: rgba(21, 33, 58, 0.72);
+  --records-bg: rgba(21, 33, 58, 0.55);
   --nav-text: #a9b6cb;
   --nav-hover-bg: rgba(148, 163, 184, 0.12);
   --nav-active-bg: rgba(79, 140, 255, 0.18);
@@ -248,17 +248,17 @@ body::before {
   z-index: -1;
   pointer-events: none;
   background: var(--body-aurora);
-  animation: bg-aurora-drift 38s ease-in-out infinite alternate, bg-aurora-breathe 26s ease-in-out infinite alternate;
+  animation: bg-aurora-drift 30s ease-in-out infinite alternate, bg-aurora-breathe 20s ease-in-out infinite alternate;
 }
 @keyframes bg-aurora-drift {
-  from { transform: translate3d(-2.5%, 1.5%, 0) scale(1); }
-  50% { transform: translate3d(2%, -2%, 0) scale(1.03); }
-  to { transform: translate3d(3%, 2%, 0) scale(1.05); }
+  from { transform: translate3d(-4%, 2.5%, 0) scale(1); }
+  50% { transform: translate3d(3%, -3%, 0) scale(1.04); }
+  to { transform: translate3d(4%, 2.5%, 0) scale(1.07); }
 }
 @keyframes bg-aurora-breathe {
-  from { opacity: 0.85; }
+  from { opacity: 0.78; }
   50% { opacity: 1; }
-  to { opacity: 0.9; }
+  to { opacity: 0.86; }
 }
 
 /* 微动效：视图/面板入场（.hidden 移除时触发一次），180–220ms，绝不遮挡交互。 */
