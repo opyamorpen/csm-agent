@@ -1096,20 +1096,32 @@ test('composer width matches the conversation column via shared token', () => {
   assert.match(css, /#composer \{ width: 100%; max-width: var\(--chat-width\)/);
   assert.doesNotMatch(css, /#messages[^\n]*860px/);
   assert.doesNotMatch(css, /#composer[^\n]*860px/);
-  // footer 与 main 同参照系：让出侧栏（194）与产出记录面板（280），否则输入条按全窗口居中、与对话列错位。
+  // footer 通栏一条底色（无左右 margin，三栏底部不分段色差），内容区用左右 padding
+  // 与 main 内容区对齐：左让侧栏 194+18，右让记录面板 280+18。
   const footerRule = css.match(/^footer \{[^}]*\}/m)?.[0];
   assert.ok(footerRule, 'footer rule was not found');
-  assert.match(footerRule, /margin-left: 194px/);
-  assert.match(footerRule, /margin-right: 280px/);
+  assert.match(footerRule, /padding: 12px 298px 12px 212px/);
   assert.match(footerRule, /box-sizing: border-box/);
-  // 980px 断点侧栏收窄到 156：footer 让位同步收窄。
+  assert.doesNotMatch(footerRule, /margin-left|margin-right/);
+  // 980px 断点侧栏收窄到 156：footer 内容区 padding 同步收窄（156+18）。
   const narrow = css.match(/@media \(max-width: 980px\) \{[\s\S]*?\n\}/)?.[0];
   assert.ok(narrow, '980px media block was not found');
-  assert.match(narrow, /footer \{ margin-left: 156px; \}/);
-  // 720px 断点撤销让位（侧栏 sticky 通栏、记录面板隐藏）。
+  assert.match(narrow, /footer \{ padding-left: 174px; \}/);
+  // 720px 断点撤销让位（侧栏 sticky 通栏、记录面板隐藏），恢复常规内边距。
   const mobile = css.match(/@media \(max-width: 720px\) \{[\s\S]*\n\}/)?.[0];
   assert.ok(mobile, '720px media block was not found');
-  assert.match(mobile, /footer \{ position: sticky; bottom: 0; margin-left: 0; margin-right: 0; \}/);
+  assert.match(mobile, /footer \{ position: sticky; bottom: 0; padding: 12px 18px; \}/);
+});
+
+test('records panel explains itself as the external-write approval ledger', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+  // 面板头从「产出记录」改为「写入审批」；空态说明写的是什么、何时出现。
+  assert.match(html, /<div class="panel-head">写入审批 <span id="recordCount"/);
+  assert.doesNotMatch(html, /产出记录/);
+  assert.match(app, /Agent 生成的外部写入草稿（跟进\/工单\/工时等）及你的确认\/拒绝记录会显示在这里/);
+  assert.doesNotMatch(app, /暂无产出/);
 });
 
 test('agent replies stream as deltas and thinking collapses into a fold', () => {

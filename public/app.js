@@ -821,7 +821,7 @@
       const records = data.records || [];
       recordCountEl.textContent = records.length ? `(${records.length})` : '';
       if (!records.length) {
-        recordListEl.innerHTML = el('div', 'empty', '暂无产出').outerHTML;
+        recordListEl.innerHTML = el('div', 'empty', 'Agent 生成的外部写入草稿（跟进/工单/工时等）及你的确认/拒绝记录会显示在这里').outerHTML;
         return;
       }
       recordListEl.innerHTML = '';
