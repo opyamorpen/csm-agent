@@ -708,6 +708,18 @@ test('agent nav item shows the sum of hemory pending and draft counts', () => {
   assert.match(draftsLoader, /updateAgentNavCount\(\)/);
 });
 
+test('sidebar nav order puts Agent on top', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 显示契约：Agent 恒为侧边栏导航第一项，其余依次为客户组合→本周行动→案例库；
+  // 默认激活视图仍是客户组合（顺序调整不改变落地页）。
+  const nav = html.match(/<nav class="product-nav"[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(nav, 'product-nav block was not found');
+  const order = [...nav.matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['agent', 'portfolio', 'actions', 'cases']);
+  assert.match(nav, /class="nav-item active" data-view="portfolio"/);
+});
+
 test('settings modal exposes Tavily web search configuration', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
