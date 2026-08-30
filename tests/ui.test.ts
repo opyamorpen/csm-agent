@@ -1030,6 +1030,38 @@ test('dual theme tokens stay in sync and the theme switch is wired', () => {
   assert.match(html, /localStorage\.setItem\('csm-theme', next\)/);
 });
 
+test('system background aurora layer loops in both themes behind translucent shell bars', () => {
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 显示契约：两套主题都提供光晕渐变层与半透明审批栏令牌（同名全集由双主题契约测试守护）。
+  const lightBlock = styles.match(/\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1];
+  const darkBlock = styles.match(/\[data-theme="dark"\] \{([\s\S]*?)\n\}/)?.[1];
+  for (const block of [lightBlock, darkBlock]) {
+    assert.match(block, /--body-aurora: radial-gradient/);
+    assert.match(block, /--records-bg: rgba\(/);
+  }
+  // 深色基础底不再内嵌静态光晕（已迁入动效层，防双层叠加过亮）。
+  assert.doesNotMatch(darkBlock, /--body-bg: radial-gradient/);
+
+  // body::before 承载循环动效：固定铺满、内容之下、不挡交互；reduced-motion 由全局降级收敛。
+  const aurora = styles.match(/body::before \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(aurora, 'body::before aurora layer was not found');
+  assert.match(aurora, /position: fixed/);
+  assert.match(aurora, /background: var\(--body-aurora\)/);
+  assert.match(aurora, /pointer-events: none/);
+  assert.match(aurora, /z-index: -1/);
+  assert.match(aurora, /bg-aurora-drift \d+s ease-in-out infinite alternate/);
+  assert.match(aurora, /bg-aurora-breathe \d+s ease-in-out infinite alternate/);
+  assert.match(styles, /@keyframes bg-aurora-drift \{/);
+  assert.match(styles, /@keyframes bg-aurora-breathe \{/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+
+  // 外壳三栏（顶栏/侧栏/右栏）半透明毛玻璃双主题一致生效，透出漂移光晕。
+  assert.match(styles, /#records \{[^}]*background: var\(--records-bg\)/);
+  assert.match(styles, /header, #sidebar, #records \{[^}]*backdrop-filter:/);
+  assert.doesNotMatch(styles, /\[data-theme="dark"\] header/);
+});
+
 test('customer overview data section renders count-only stat cards with status-category rates', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
