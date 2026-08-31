@@ -1463,3 +1463,25 @@ test('static shell assets are served no-store so a restarted app never runs a st
   assert.ok(staticRoute, 'static asset route was not found');
   assert.match(staticRoute, /if \(path !== '\/app-icon\.svg'\) headers\['Cache-Control'\] = 'no-store';/);
 });
+
+test('Hemory sync waits for terminal state and refreshes the inbox only after completion', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const poller = source.match(/async function pollHemorySync[\s\S]*?\n  \}\n\n  async function startGlobalSync/)?.[0];
+  const trigger = source.match(/document\.getElementById\('hemorySync'\)\.onclick = async \(\) => \{[\s\S]*?\n  \};/)?.[0];
+
+  // 契约：Hemory 同步不再走 120s 就放弃的 pollSync，而是专用长轮询（2s×900 ≈ 30 分钟，覆盖退避+分段最坏路径）。
+  assert.ok(poller, 'pollHemorySync source was not found');
+  assert.match(poller, /for \(let i = 0; i < 900; i\+\+\)/);
+  assert.match(poller, /setTimeout\(resolve, 2000\)/);
+  assert.match(poller, /if \(run\.status !== 'running'\) return run;/);
+  // 到上限不再是「超时」报错弹窗：提示仍在后台运行、完成后手动刷新，返回 null 让调用方不刷列表。
+  assert.match(poller, /仍在后台运行（超过 30 分钟），完成后请手动刷新收件箱/);
+  assert.doesNotMatch(poller, /同步超时/);
+  // 按钮在轮询期间禁用并显示同步中，结束恢复原标签。
+  assert.match(poller, /button\.disabled = true; button\.textContent = '同步中…'/);
+  // 触发侧：终态（含 partial）才刷新收件箱；partial 文案与全局 pollSync 区分。
+  assert.ok(trigger, 'hemorySync onclick handler was not found');
+  assert.match(trigger, /pollHemorySync\(run\.id\)/);
+  assert.match(trigger, /if \(finished\) await loadHemoryInbox\(\)/);
+  assert.match(poller, /run\.status === 'partial' \? '部分完成' : '失败'/);
+});

@@ -451,13 +451,13 @@ export type ParsedCaseContent = { title?: string } & CaseNarrativeFields & {
 };
 
 /** 模型输出契约校验；公开生成路径额外要求五章完整、无占位词且每条主张可追溯。 */
-/** 摘录校验的第二查找源：注入片段的 summary+transcript（catalog 的 hermory 条目只带角色摘要）。 */
+/** 摘录校验的第二查找源：注入片段的 summary+transcript（catalog 的 hemory 条目只带角色摘要）。 */
 interface CaseCommunicationSource { id: string; transcript: string; summary: string; csmName?: string | null; evidence?: Array<{ speaker: string; text: string }> }
 
 function sourceSupportsExcerpt(source: CaseEvidenceSnapshotItem, excerpt: string, communications?: CaseCommunicationSource[]): boolean {
   if (`${source.title}\n${source.excerpt}`.includes(excerpt)
     || !!source.speaker_lines?.some((line) => line.text.includes(excerpt))) return true;
-  // catalog 的 hermory 条目只带角色摘要行——摘录的逐字定位回退到注入片段全文（communications）。
+  // catalog 的 hemory 条目只带角色摘要行——摘录的逐字定位回退到注入片段全文（communications）。
   if (communications?.length && source.source_system === 'hemory') {
     const fragment = communications.find((item) => item.id === source.id);
     if (fragment && (`${fragment.summary}\n${fragment.transcript}`.includes(excerpt))) return true;
@@ -856,7 +856,7 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
 }
 
 async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, onProgress?: (text: string) => void): Promise<ParsedCaseContent> {
-  // 摘录校验的第二查找源：catalog 的 hermory 条目只带角色摘要，逐句定位回退到注入片段正文。
+  // 摘录校验的第二查找源：catalog 的 hemory 条目只带角色摘要，逐句定位回退到注入片段正文。
   const communications = caseCommunicationSources(input);
   const prompt = `为客户「${input.customer.name}」生成一篇客户成功案例草稿。这份案例经 CSM 审核后会用于对外展示与复用，是正式的客户叙事型案例。你只能基于下面提供的上下文证据写作，不执行任何工具或外部写入。\n`
     + `按固定叙事路径输出五个章节，只输出 JSON：\n`

@@ -150,7 +150,7 @@ test('hemory CLI covers ignore restore and incremental sync semantics', () => {
   assert.match(handler, /hemory\/fragments\/ignore/);
   assert.match(handler, /\/api\/hemory\/sync/);
   assert.match(handler, /--days=/);
-  assert.match(handler, /sync\/resegment\/inbox\/assign\/clear\/ignore\/regenerate/);
+  assert.match(handler, /sync\/resegment\/jobs\/inbox\/assign\/clear\/ignore\/regenerate/);
 });
 
 test('hemory inbox filters by customer and status; regenerate rebuilds per customer-day', () => {

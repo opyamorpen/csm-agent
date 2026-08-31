@@ -64,7 +64,7 @@ const CLI_CAPABILITIES = [
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
-  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
+  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/resegment?recordingId=', '/api/hemory/segmentation-jobs', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory'] },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-items/:id (PATCH edits 结构化编辑)', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
@@ -159,7 +159,9 @@ function help(): void {
     （ONES Wiki 只读浏览：页面组列表与页面树，发布位置可用 csm-agent wiki pages 查 ID）
   csm-agent sync [客户ID或名称]
   csm-agent hemory sync [YYYY-MM-DD]
-  csm-agent hemory resegment --all
+  csm-agent hemory resegment --all | --recording <录音ID>
+  csm-agent hemory jobs [--json]
+    （分段任务只读视图：排查录音卡在最大重试时看 attempts/status/error）
   csm-agent hemory inbox [YYYY-MM-DD] [--days N] [--from HH:MM] [--to HH:MM]
                         [--customer 客户ID或名称] [--status pending|all|confirmed|ignored] [--json]
     （--from/--to 按上海时区收窄到当天时间段，需与日期同用；--customer 按客户过滤，
@@ -799,23 +801,46 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     // 不带日期时为滚动增量同步（最近 7 天去重补新）；带日期则同步该上海自然日。
     const run = await request<any>('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date: values.shift() || undefined }) });
-    return print(await waitSync(run.id));
+    // 整轮含分段模型调用与退避重试（最坏 ~21 分钟），等待上限放宽到 30 分钟等终态。
+    return print(await waitSync(run.id, 1800));
   }
   if (subcommand === 'resegment') {
-    if (!values.includes('--all')) throw new Error('hemory resegment 需要 --all（全量重切库内全部录音）');
+    // --recording <id>：定向重切单条录音（分段失败逃生门）；--all：全量重切库内全部录音。
+    const inlineOption = (flag: string): string | undefined => {
+      const index = values.findIndex((value) => value === flag || value.startsWith(`${flag}=`));
+      if (index < 0) return undefined;
+      const inline = values[index].startsWith(`${flag}=`);
+      const raw = inline ? values[index].slice(flag.length + 1) : values[index + 1];
+      return raw && !raw.startsWith('--') ? raw : undefined;
+    };
+    const recording = inlineOption('--recording');
+    if (recording && values.includes('--all')) throw new Error('--recording 与 --all 不能同时使用');
+    if (!recording && !values.includes('--all')) throw new Error('hemory resegment 需要 --all（全量重切）或 --recording <录音ID>（定向重切）');
     const run = await request<any>('/api/hemory/resegment', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope: 'all' }) });
+      body: JSON.stringify(recording ? { recordingId: recording } : { scope: 'all' }) });
     // 逐录音两阶段模型调用耗时较长，等待上限放宽到 60 分钟。
     const completed = await waitSync(run.id, 3600);
     const summary = completed.sourceStatus?.hemory ?? {};
     if (!jsonOutput) {
-      console.log(`录音总数 ${summary.recordings ?? '?'}，成功 ${summary.recordings != null ? Number(summary.recordings) - Number(summary.failedRecordings ?? 0) : '?'}，`
-        + `失败 ${summary.failedRecordings ?? 0}，新片段 ${summary.count ?? '?'}，丢弃段 ${summary.discardedSegments ?? '?'}。`);
+      if (recording) {
+        console.log(`定向重切录音 ${recording}：${completed.status === 'succeeded' ? '成功' : '失败'}，片段 ${summary.count ?? '?'}。`);
+      } else {
+        console.log(`录音总数 ${summary.recordings ?? '?'}，成功 ${summary.recordings != null ? Number(summary.recordings) - Number(summary.failedRecordings ?? 0) : '?'}，`
+          + `失败 ${summary.failedRecordings ?? 0}，新片段 ${summary.count ?? '?'}，丢弃段 ${summary.discardedSegments ?? '?'}。`);
+      }
       if (summary.backupPath) console.log(`备份：${summary.backupPath}`);
-      console.log('超过 7 个上海自然日的录音，其待归属片段需用 heremory inbox --days=N 或日期过滤查看。');
+      if (!recording) console.log('超过 7 个上海自然日的录音，其待归属片段需用 hemory inbox --days=N 或日期过滤查看。');
     }
     print(completed);
     if (completed.status !== 'succeeded') process.exitCode = 2;
+    return;
+  }
+  if (subcommand === 'jobs') {
+    // 分段任务只读视图：排查「录音卡在最大重试」时看 attempts/status/error。
+    const body = await request<any>('/api/hemory/segmentation-jobs');
+    if (jsonOutput) return print(body.jobs);
+    console.table((body.jobs ?? []).map((job: any) => ({ id: job.id.slice(0, 8), recordingEvent: job.recordingEventId.slice(0, 8),
+      status: job.status, attempts: job.attempts, segments: job.segmentCount, error: String(job.error ?? '').slice(0, 60), updatedAt: job.updatedAt })));
     return;
   }
   if (subcommand === 'inbox') {
@@ -899,7 +924,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     }
     return print(result);
   }
-  throw new Error('hemory 子命令只允许 sync/resegment/inbox/assign/clear/ignore/regenerate');
+  throw new Error('hemory 子命令只允许 sync/resegment/jobs/inbox/assign/clear/ignore/regenerate');
 }
 
 // 草稿确认视图：与 Web 卡片共用服务端 displayFields，按最小必填项逐行结构化输出。

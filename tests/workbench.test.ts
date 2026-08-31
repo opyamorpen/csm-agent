@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
@@ -622,6 +623,161 @@ test('workbench: recent Hemory sync scans a rolling 7-day Shanghai window', asyn
     for (let i = 0; i < 50 && db.getSyncRun(second.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+// Hemory MCP 返回两条录音的分页转写；毒丸录音排在前面（Map 迭代序 = 首次出现序）。
+function hemoryTwoRecordingMcp(): { mcp: any; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    mcp: {
+      call: async () => {
+        calls++;
+        return { text: '# more=false\n'
+          + '## recording-poison\n'
+          + '2026-08-25T05:00:00Z\t客户\t当前上线流程在审批节点经常被阻塞，需要排查权限配置。\n'
+          + '2026-08-25T05:00:20Z\tCSM\t我们会收集报错时间和操作路径，先定位具体失败环节。\n'
+          + '2026-08-25T05:00:40Z\t客户\t请把排查结论和后续处理计划同步给项目负责人。\n'
+          + '## recording-fresh\n'
+          + '2026-08-26T06:00:00Z\t客户\t希望月底前完成新版权限方案的评审。\n'
+          + '2026-08-26T06:00:20Z\tCSM\t我先安排评审材料和时间窗口。\n'
+          + '2026-08-26T06:00:40Z\t客户\t评审通过后再同步实施计划。\n', isError: false } as any;
+      },
+    } as any,
+  };
+}
+
+test('workbench: a poisoned recording fails to partial while later recordings still land', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-isolation-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const { mcp } = hemoryTwoRecordingMcp();
+    // 毒丸录音分段必抛错（含 attempts>=3 的永久失败形态），fresh 录音照常出 1 条片段。
+    // 片段可见性走 activateHemoryFragments 代际门（listHemoryFragments 只认 active=1），fake segmenter 模拟分段服务完成时的两步。
+    const service = new PortfolioSyncService(db, mcp, async (recording) => {
+      if (String(recording.externalId).includes('poison')) throw new Error('Hemory 分段已达到最大重试次数');
+      const event = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'v3.2:fresh:t1',
+        title: '权限方案评审', occurredAt: '2026-08-26T06:00:00Z', payload: { recordingId: 'recording-fresh' }, attributionStatus: 'unattributed' });
+      db.activateHemoryFragments(recording.id, `fp-${recording.externalId}`, [event.id]);
+      return { events: [event], proposedCount: 1, includedCount: 1 };
+    });
+    const run = service.refreshRecentHemory();
+    for (let i = 0; i < 100 && db.getSyncRun(run.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const finished = db.getSyncRun(run.id)!;
+    // 单录音失败 → run=partial、失败明细可见、另一条录音的片段照常入库。
+    assert.equal(finished.status, 'partial');
+    assert.match(finished.error ?? '', /recording-poison.*最大重试/);
+    assert.equal(finished.sourceStatus.hemory?.status, 'partial');
+    assert.match(finished.sourceStatus.hemory?.error ?? '', /recording-poison/);
+    const pending = db.listHemoryFragments({ status: 'pending' });
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].payload?.recordingId, 'recording-fresh');
+    // 两条 raw_transcript 都已入库（毒丸只有分段失败，原始转写不丢）。
+    assert.ok(db.findSourceEvent('hemory', 'raw_transcript', 'recording-poison'));
+    assert.ok(db.findSourceEvent('hemory', 'raw_transcript', 'recording-fresh'));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: startup recovery resets interrupted jobs and fails orphaned runs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-recovery-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const lines = [
+      { spokenAt: '2026-08-25T05:00:00Z', speaker: '客户', text: '当前上线流程在审批节点经常被阻塞，需要排查权限配置。' },
+      { spokenAt: '2026-08-25T05:00:20Z', speaker: 'CSM', text: '我们会收集报错时间和操作路径，先定位具体失败环节。' },
+      { spokenAt: '2026-08-25T05:00:40Z', speaker: '客户', text: '请把排查结论和后续处理计划同步给项目负责人。' },
+    ];
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'recording-recover',
+      title: '原始转写', occurredAt: lines[0].spokenAt, payload: { recordingId: 'recording-recover', lines }, attributionStatus: 'unattributed' });
+    // 场景一：分段 job 被进程重启烧到 attempts=3 且停在 running —— 启动恢复应重置额度并交给 resumePending 重跑成功。
+    const fake = fakeSegmentationRuntime([{ segments: [
+      { start_index: 0, end_index: 2, topic: '审批阻塞排查', summary: '客户反馈审批阻塞，双方约定收集报错证据并同步处理计划。', subject: '上线流程', focus: '审批节点阻塞排查', topic_key: 'approval-block', include: true },
+    ] }]);
+    const segments = new HemorySegmentationService(db, fake.runtime);
+    // 必须用真实指纹建 job：segmentRecording 按指纹找 job，假指纹会导致它另建新 job 绕开场景。
+    const stuck = db.createHemorySegmentationJob(recording.id, hemorySegmentationFingerprintOf(recording));
+    db.updateHemorySegmentationJob(stuck.id, 'running');
+    db.updateHemorySegmentationJob(stuck.id, 'running');
+    db.updateHemorySegmentationJob(stuck.id, 'running');
+    assert.equal(db.getHemorySegmentationJob(stuck.id)?.attempts, 3);
+    // 场景二：真正模型失败 3 次的 job（failed 终态）不被启动恢复触碰。
+    const otherRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'recording-other',
+      title: '原始转写', occurredAt: '2026-08-24T05:00:00Z', payload: { recordingId: 'recording-other', lines: [] }, attributionStatus: 'unattributed' });
+    const genuinelyFailed = db.createHemorySegmentationJob(otherRecording.id, hemorySegmentationFingerprintOf(otherRecording));
+    db.updateHemorySegmentationJob(genuinelyFailed.id, 'running');
+    db.updateHemorySegmentationJob(genuinelyFailed.id, 'running');
+    db.updateHemorySegmentationJob(genuinelyFailed.id, 'running');
+    db.updateHemorySegmentationJob(genuinelyFailed.id, 'failed', { error: '模型未返回有效分段' });
+    // 场景三：内存里未跑完的 SyncRun 落 failed 终态，不再永久 running。
+    const orphan = db.createSyncRun('hemory:recent');
+    assert.equal(db.failOrphanedSyncRuns(), 1);
+    assert.equal(db.getSyncRun(orphan.id)?.status, 'failed');
+    assert.match(db.getSyncRun(orphan.id)?.error ?? '', /服务重启中断/);
+    assert.equal(db.getSyncRun(orphan.id)?.finishedAt != null, true);
+    assert.equal(db.failOrphanedSyncRuns(), 0);
+    // 启动恢复只重置 running 残留：stuck 回 pending/attempts=0；genuinelyFailed 保持 failed/attempts=3。
+    assert.equal(db.resetInterruptedHemorySegmentationJobs(), 1);
+    const resetJob = db.getHemorySegmentationJob(stuck.id)!;
+    assert.equal(resetJob.status, 'pending');
+    assert.equal(resetJob.attempts, 0);
+    const failedJob = db.getHemorySegmentationJob(genuinelyFailed.id)!;
+    assert.equal(failedJob.status, 'failed');
+    assert.equal(failedJob.attempts, 3);
+    // resumePending 对齐生产启动路径：重置后的 job 重跑并成功入库。
+    segments.resumePending();
+    for (let i = 0; i < 100 && db.getHemorySegmentationJob(stuck.id)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(db.getHemorySegmentationJob(stuck.id)?.status, 'succeeded');
+    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: targeted resegment resets the poison job and re-segments the recording', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-targeted-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const lines = [
+      { spokenAt: '2026-08-25T05:00:00Z', speaker: '客户', text: '当前上线流程在审批节点经常被阻塞，需要排查权限配置。' },
+      { spokenAt: '2026-08-25T05:00:20Z', speaker: 'CSM', text: '我们会收集报错时间和操作路径，先定位具体失败环节。' },
+      { spokenAt: '2026-08-25T05:00:40Z', speaker: '客户', text: '请把排查结论和后续处理计划同步给项目负责人。' },
+    ];
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'recording-target',
+      title: '原始转写', occurredAt: lines[0].spokenAt, payload: { recordingId: 'recording-target', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([{ segments: [
+      { start_index: 0, end_index: 2, topic: '审批阻塞排查', summary: '客户反馈审批阻塞，双方约定收集报错证据并同步处理计划。', subject: '上线流程', focus: '审批节点阻塞排查', topic_key: 'approval-block', include: true },
+    ] }]);
+    // 把 job 做成 attempts=3 的 failed 毒丸（segmentRecordingDetailed 直接抛错的那种）。
+    const segments = new HemorySegmentationService(db, fake.runtime);
+    segments.segmentRecording(recording).catch(() => {});
+    for (let i = 0; i < 100 && db.listRecentHemorySegmentationJobs().every((item) => item.status !== 'failed'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const fingerprint = hemorySegmentationFingerprintOf(recording);
+    const job = db.listRecentHemorySegmentationJobs().find((item) => item.fingerprint === fingerprint)!;
+    assert.equal(job.status, 'succeeded');
+    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    // 手工把成功的 job 打回 attempts=3 + failed（真实毒丸形态），验证定向重切的 reset 生效。
+    db.updateHemorySegmentationJob(job.id, 'running');
+    db.updateHemorySegmentationJob(job.id, 'running');
+    db.updateHemorySegmentationJob(job.id, 'running');
+    db.updateHemorySegmentationJob(job.id, 'failed', { error: 'Hemory 分段已达到最大重试次数' });
+    await assert.rejects(() => segments.segmentRecording(recording), /最大重试/);
+    // 定向重切：重置该 job 后重跑成功，run=succeeded、片段入库。
+    const service = new PortfolioSyncService(db, { call: async () => ({ text: '', isError: false }) } as any,
+      (event) => segments.segmentRecordingDetailed(event));
+    const run = service.resegmentHemoryRecording('recording-target');
+    for (let i = 0; i < 100 && db.getSyncRun(run.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(db.getSyncRun(run.id)?.status, 'succeeded');
+    assert.equal(db.getHemorySegmentationJob(job.id)?.status, 'succeeded');
+    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    // 库里不存在的录音：run 直接 failed 并给出可读错误。
+    const missing = service.resegmentHemoryRecording('recording-not-in-db');
+    for (let i = 0; i < 100 && db.getSyncRun(missing.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(db.getSyncRun(missing.id)?.status, 'failed');
+    assert.match(db.getSyncRun(missing.id)?.error ?? '', /不在库内/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+function hemorySegmentationFingerprintOf(recording: any): string {
+  // 测试内联指纹计算（与 hemory.ts 的 hash(`${version}:${externalId}:${payloadHash}`) 一致），避免导出私有 hash。
+  return createHash('sha256').update(`hemory-topic-segments-v3.2:${recording.externalId}:${recording.payloadHash}`).digest('hex');
+}
 
 test('workbench: model failure fails the job without any fallback drafts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-'));

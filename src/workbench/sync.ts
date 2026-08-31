@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
+import { hemorySegmentationFingerprint } from './hemory.js';
 import type { HemorySegmentationResult } from './hemory.js';
 import { assessRisk, summarizeWebSignals } from './risk.js';
 import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceEventInput, type SyncRun, type WorkhourRecord } from './types.js';
@@ -376,6 +377,16 @@ interface TranscriptLine {
   text: string;
 }
 
+export interface HemoryRecordingFailure {
+  recordingId: string;
+  error: string;
+}
+
+export interface HemoryScanOutcome {
+  count: number;
+  failures: HemoryRecordingFailure[];
+}
+
 function parseTranscriptPage(text: string): { lines: TranscriptLine[]; more: boolean; cursor?: string } {
   const header = text.match(/^# .*?more=(true|false)(?:\s*\|\s*cursor=([^\s]+))?/m);
   let recordingId = 'unknown';
@@ -549,6 +560,35 @@ export class PortfolioSyncService {
     return run;
   }
 
+  /** 定向重切单条录音（分段失败逃生门）：按 recordingId 找到库内原始转写，重置分段 job 后重切。 */
+  resegmentHemoryRecording(recordingId: string): SyncRun {
+    const recording = this.db.findSourceEvent('hemory', 'raw_transcript', recordingId)
+      ?? this.db.listHemoryRawTranscriptRecordings().find((event) => event.payload?.recordingId === recordingId);
+    const run = this.db.createSyncRun(`hemory:resegment:${recordingId}`);
+    this.hemoryRun = run;
+    void (async () => {
+      try {
+        if (!recording) {
+          this.db.finishSyncRun(run.id, 'failed', { hemory: { status: 'failed', error: `录音 ${recordingId} 不在库内，请先增量同步拉取` } }, `录音 ${recordingId} 不在库内`);
+          return;
+        }
+        const fingerprint = hemorySegmentationFingerprint(recording);
+        const job = this.db.createHemorySegmentationJob(recording.id, fingerprint);
+        this.db.resetHemorySegmentationJob(job.id);
+        const result = await this.segmentRecording(recording);
+        for (const customer of this.db.listCustomers()) this.recompute(customer.id);
+        this.db.finishSyncRun(run.id, 'succeeded', { hemory: { status: 'succeeded', count: result.includedCount } });
+        this.db.audit('csm', 'resegment_hemory_recording', 'source_event', recording.id,
+          { recordingId, includedSegments: result.includedCount, proposedSegments: result.proposedCount });
+      } catch (error) {
+        this.db.finishSyncRun(run.id, 'failed', { hemory: { status: 'failed', error: (error as Error).message } }, (error as Error).message);
+      } finally {
+        this.hemoryRun = undefined;
+      }
+    })();
+    return run;
+  }
+
   private async executeHemoryResegment(run: SyncRun): Promise<void> {
     interface RecordingOutcome { recordingId: string; status: 'succeeded' | 'failed'; fragments?: number; error?: string }
     const outcomes: RecordingOutcome[] = [];
@@ -595,8 +635,10 @@ export class PortfolioSyncService {
       statuses.crm = { status: 'failed', error: (error as Error).message };
     }
     try {
-      const hemoryCount = await this.syncRecentHemory();
-      statuses.hemory = { status: 'succeeded', count: hemoryCount };
+      const outcome = await this.syncRecentHemory();
+      statuses.hemory = outcome.failures.length
+        ? { status: 'partial', count: outcome.count, error: outcome.failures.map((failure) => `${failure.recordingId}: ${failure.error}`).join('; ') }
+        : { status: 'succeeded', count: outcome.count };
     } catch (error) {
       statuses.hemory = { status: 'failed', error: (error as Error).message };
     }
@@ -625,8 +667,9 @@ export class PortfolioSyncService {
       statuses.web_intelligence = { status: 'failed', error: (error as Error).message };
     }
     const failures = Object.values(statuses).filter((value) => value.status === 'failed');
-    this.db.finishSyncRun(run.id, failures.length === 0 ? 'succeeded' : failures.length === Object.keys(statuses).length ? 'failed' : 'partial', statuses,
-      failures.map((value) => value.error).filter(Boolean).join('; ') || undefined);
+    const errored = Object.values(statuses).filter((value) => value.status !== 'succeeded');
+    this.db.finishSyncRun(run.id, failures.length === 0 ? (errored.length ? 'partial' : 'succeeded') : failures.length === Object.keys(statuses).length ? 'failed' : 'partial', statuses,
+      errored.map((value) => value.error).filter(Boolean).join('; ') || undefined);
   }
 
   private async executePortfolio(run: SyncRun): Promise<void> {
@@ -654,8 +697,15 @@ export class PortfolioSyncService {
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt]) await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
       try {
-        const count = await this.scanHemory([], startedAt, endedAt);
-        this.db.finishSyncRun(run.id, 'succeeded', { hemory: { status: 'succeeded', count } });
+        const { count, failures } = await this.scanHemory([], startedAt, endedAt);
+        // 分段失败已被阶段级重试兜过且按录音隔离，重试整轮也救不回单录音分段——
+        // 直接落 partial 并收尾，让其余录音的片段尽快可见。
+        if (failures.length) {
+          const error = failures.map((failure) => `${failure.recordingId}: ${failure.error}`).join('; ');
+          this.db.finishSyncRun(run.id, 'partial', { hemory: { status: 'partial', count, error } }, error);
+        } else {
+          this.db.finishSyncRun(run.id, 'succeeded', { hemory: { status: 'succeeded', count } });
+        }
         this.hemoryRun = undefined;
         return;
       } catch (error) { lastError = error as Error; }
@@ -676,13 +726,21 @@ export class PortfolioSyncService {
     for (const [source, task] of [
       ['crm', () => this.syncSingleCrmCustomer(customer)],
       ['ones', () => this.syncOnesCustomer(fresh())],
-      ['hemory', () => this.syncHemoryCustomer(fresh())],
     ] as const) {
       try {
         statuses[source] = { status: 'succeeded', count: await task() };
       } catch (error) {
         statuses[source] = { status: 'failed', error: (error as Error).message };
       }
+    }
+    // Hemory 按录音隔离失败：单录音分段失败计 partial，不阻断其余源。
+    try {
+      const outcome = await this.syncHemoryCustomer(fresh());
+      statuses.hemory = outcome.failures.length
+        ? { status: 'partial', count: outcome.count, error: outcome.failures.map((failure) => `${failure.recordingId}: ${failure.error}`).join('; ') }
+        : { status: 'succeeded', count: outcome.count };
+    } catch (error) {
+      statuses.hemory = { status: 'failed', error: (error as Error).message };
     }
     // 单客户手动刷新：公开动态强制检索（忽略 7 天门），失败计 partial 不阻断其余源。
     try {
@@ -693,8 +751,9 @@ export class PortfolioSyncService {
     }
     this.recompute(customerId);
     const failures = Object.values(statuses).filter((value) => value.status === 'failed');
-    this.db.finishSyncRun(run.id, failures.length === 0 ? 'succeeded' : failures.length === Object.keys(statuses).length ? 'failed' : 'partial', statuses,
-      failures.map((value) => value.error).filter(Boolean).join('; ') || undefined);
+    const errored = Object.values(statuses).filter((value) => value.status !== 'succeeded');
+    this.db.finishSyncRun(run.id, failures.length === 0 ? (errored.length ? 'partial' : 'succeeded') : failures.length === Object.keys(statuses).length ? 'failed' : 'partial', statuses,
+      errored.map((value) => value.error).filter(Boolean).join('; ') || undefined);
   }
 
   private async syncCrmCustomers(): Promise<number> {
@@ -949,18 +1008,18 @@ export class PortfolioSyncService {
     return issues.length;
   }
 
-  private async syncHemoryCustomer(customer: Customer): Promise<number> {
+  private async syncHemoryCustomer(customer: Customer): Promise<HemoryScanOutcome> {
     void customer;
     return this.syncRecentHemory();
   }
 
-  private async syncRecentHemory(): Promise<number> {
+  private async syncRecentHemory(): Promise<HemoryScanOutcome> {
     const { startedAt } = shanghaiDayBounds(shanghaiDateKey());
     const windowStart = new Date(new Date(startedAt).getTime() - (HEMORY_SYNC_WINDOW_DAYS - 1) * 86_400_000).toISOString();
     return this.scanHemory([], windowStart, new Date().toISOString());
   }
 
-  private async scanHemory(keywords: string[], startedAt: string, endedAt: string): Promise<number> {
+  private async scanHemory(keywords: string[], startedAt: string, endedAt: string): Promise<HemoryScanOutcome> {
     let after: string | undefined;
     const recordings = new Map<string, TranscriptLine[]>();
     for (let page = 0; page < 100; page++) {
@@ -978,17 +1037,24 @@ export class PortfolioSyncService {
       after = parsed.cursor;
     }
     let count = 0;
+    const failures: HemoryRecordingFailure[] = [];
     for (const [recordingId, lines] of recordings) {
       lines.sort((a, b) => a.spokenAt.localeCompare(b.spokenAt));
       const recording = this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
         externalId: recordingId, title: `Hemory 原始转写 ${recordingId}`, occurredAt: lines[0].spokenAt,
         confidence: 1, attributionStatus: 'unattributed', payload: { recordingId, startedAt: lines[0].spokenAt,
           endedAt: lines.at(-1)!.spokenAt, lines, transcript: lines.map((line) => `${line.speaker}: ${line.text}`).join('\n') } });
-      const { events: fragments } = await this.segmentRecording(recording);
-      count += fragments.length;
+      // 单录音分段失败不得中止整轮扫描：后面的录音（往往是最新的会话）必须照常入库，
+      // 失败明细随 run 上报为 partial，由下一轮同步/定向重切收尾。
+      try {
+        const { events: fragments } = await this.segmentRecording(recording);
+        count += fragments.length;
+      } catch (error) {
+        failures.push({ recordingId, error: (error as Error).message });
+      }
     }
     for (const customer of this.db.listCustomers()) this.recompute(customer.id);
-    return count;
+    return { count, failures };
   }
 
   processHemoryEvidence(event: SourceEvent): void {

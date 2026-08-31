@@ -976,11 +976,39 @@ export class WorkbenchDatabase {
       .map((row) => this.hemorySegmentationJobFromRow(row));
   }
 
+  listRecentHemorySegmentationJobs(limit = 50): HemorySegmentationJob[] {
+    return (this.db.prepare('SELECT * FROM hemory_segmentation_jobs ORDER BY updated_at DESC LIMIT ?').all(limit) as Row[])
+      .map((row) => this.hemorySegmentationJobFromRow(row));
+  }
+
   updateHemorySegmentationJob(id: string, status: HemorySegmentationJob['status'], input: { segmentCount?: number; generator?: string; error?: string | null } = {}): HemorySegmentationJob | undefined {
     this.db.prepare(`UPDATE hemory_segmentation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,
       segment_count=COALESCE(?,segment_count),generator=COALESCE(?,generator),error=?,updated_at=? WHERE id=?`)
       .run(status, status, input.segmentCount ?? null, input.generator ?? null, input.error ?? null, nowIso(), id);
     return this.getHemorySegmentationJob(id);
+  }
+
+  /** 定向重置分段 job（重切逃生门）：清空失败状态与重试额度，回到全新 pending。 */
+  resetHemorySegmentationJob(id: string): HemorySegmentationJob | undefined {
+    this.db.prepare(`UPDATE hemory_segmentation_jobs SET status='pending',attempts=0,error=NULL,updated_at=? WHERE id=?`)
+      .run(nowIso(), id);
+    return this.getHemorySegmentationJob(id);
+  }
+
+  /** 启动恢复：running 分段 job 是进程被杀的残留（执行体只在内存里），额度被重启烧掉不是模型失败，
+   * 重置回 pending/attempts=0 交给 resumePending 重跑；真正 failed 的 job 不被动。 */
+  resetInterruptedHemorySegmentationJobs(): number {
+    const now = nowIso();
+    const result = this.db.prepare(`UPDATE hemory_segmentation_jobs SET status='pending',attempts=0,error=NULL,updated_at=? WHERE status='running'`).run(now);
+    return Number(result.changes);
+  }
+
+  /** 启动恢复：内存里未跑完的 SyncRun 永远不会再推进，落 failed 终态防止永久 running 孤儿。 */
+  failOrphanedSyncRuns(): number {
+    const now = nowIso();
+    const result = this.db.prepare(`UPDATE sync_runs SET status='failed',finished_at=?,error=COALESCE(error,?) WHERE status='running'`)
+      .run(now, '服务重启中断');
+    return Number(result.changes);
   }
 
   activateHemoryFragments(recordingEventId: string, fingerprint: string, eventIds: string[]): string[] {

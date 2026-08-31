@@ -1915,7 +1915,7 @@
   };
   document.getElementById('hemorySync').onclick = async () => {
     // 未选日期时为滚动增量同步（最近 7 天，去重后只补新片段）；选了日期则同步该自然日（取已应用筛选的日期）。
-    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryFilter.date || undefined }) }); await pollSync(run.id); await loadHemoryInbox(); }
+    try { const run = await api('/api/hemory/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: hemoryFilter.date || undefined }) }); const finished = await pollHemorySync(run.id); if (finished) await loadHemoryInbox(); }
     catch (error) { await alertDialog(error.message); }
   };
 
@@ -3189,6 +3189,26 @@
       }
       throw new Error('同步超时，任务仍在后台运行');
     } finally { globalSync.disabled = false; }
+  }
+
+  // Hemory 专用轮询：分段走 LLM、整轮含退避重试可达 20 分钟以上，必须等终态而不是 120s 就放弃。
+  // 到终态（含 partial：部分录音分段失败、其余已入库）后由调用方刷新收件箱；到上限仍未终态只提示，不再报错吓人。
+  async function pollHemorySync(id) {
+    const button = document.getElementById('hemorySync');
+    const label = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = '同步中…'; }
+    try {
+      for (let i = 0; i < 900; i++) {
+        const run = await api(`/api/sync-runs/${id}`);
+        setStatus(run.status === 'failed' ? 'warn' : '', run.status === 'running' ? 'Hemory 同步中（含分段与重试，可能较久）…' : `Hemory 同步${run.status === 'succeeded' ? '完成' : run.status === 'partial' ? '部分完成' : '失败'}`);
+        if (run.status !== 'running') return run;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+      await alertDialog('Hemory 同步仍在后台运行（超过 30 分钟），完成后请手动刷新收件箱。');
+      return null;
+    } finally {
+      if (button) { button.disabled = false; button.textContent = label; }
+    }
   }
 
   async function startGlobalSync() {

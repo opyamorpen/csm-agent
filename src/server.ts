@@ -480,10 +480,17 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           : workbench.sync.refreshRecentHemory());
       }
       // 全量重切：遍历库内全部录音并按当前分段版本重切，与增量同步互斥；内部数据变更，无需外部写审批。
+      // recordingId = 定向重切单条录音（分段失败逃生门）：先重置该录音的分段 job 再重切。
       if (req.method === 'POST' && path === '/api/hemory/resegment') {
         const body = await readBody(req);
-        if (body.scope !== 'all') return json(res, 400, { error: '仅支持 {"scope":"all"}' });
+        if (typeof body.recordingId === 'string' && body.recordingId) {
+          return json(res, 202, workbench.sync.resegmentHemoryRecording(body.recordingId));
+        }
+        if (body.scope !== 'all') return json(res, 400, { error: '仅支持 {"scope":"all"} 或 {"recordingId":"..."}' });
         return json(res, 202, workbench.sync.resegmentAllHemory());
+      }
+      if (req.method === 'GET' && path === '/api/hemory/segmentation-jobs') {
+        return json(res, 200, { jobs: workbench.db.listRecentHemorySegmentationJobs() });
       }
       if (req.method === 'GET' && path === '/api/hemory/fragments') {
         const daysParam = url.searchParams.get('days');
@@ -1407,6 +1414,13 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   });
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
+  // 启动恢复：进程内未跑完的 SyncRun 与被重启烧掉额度的分段 job 都是残留脏数据——
+  // 前者落 failed 终态，后者重置回 pending 交给 5s 后的 resumePending 重跑。
+  const orphanedRuns = db.failOrphanedSyncRuns();
+  const resetJobs = db.resetInterruptedHemorySegmentationJobs();
+  if (orphanedRuns || resetJobs) {
+    db.audit('csm', 'recover_interrupted_sync_jobs', 'sync_run', 'startup', { orphanedRuns, resetSegmentationJobs: resetJobs });
+  }
   // 风险模型升级（ruleVersion 变化）后启动即全量重算：纯本地计算，无外部调用，
   // 否则升级部署后库里还压着旧版评分（UI 维度标签对不上 key）。
   for (const customer of db.listCustomers()) {

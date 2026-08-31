@@ -109,7 +109,8 @@ csm-agent wiki spaces # ONES Wiki 页面组列表（发布位置层级选择器�
 csm-agent wiki pages --space <页面组ID> [--parent <页面ID>] # 页面树，按 parentID 过滤
 csm-agent sync [CRM客户ID]
 csm-agent hemory sync [YYYY-MM-DD]
-csm-agent hemory resegment --all
+csm-agent hemory resegment --all | --recording <录音ID> # 全量重切 / 定向重切单条录音（分段失败逃生门）
+csm-agent hemory jobs # 分段任务只读视图：attempts/status/error，排查录音卡最大重试
 csm-agent hemory inbox [YYYY-MM-DD] [--days N] # 待归属片段；--from/--to 按上海时区收窄到当天时间段（需与日期同用）；consumed 列显示片段已被哪些类型的已写入草稿消费
 csm-agent hemory inbox 2026-08-27 --from=14:00 --to=15:30
 csm-agent hemory inbox --customer <客户ID或名称> --status confirmed # 按客户查看已归属片段（--status 默认 pending）
