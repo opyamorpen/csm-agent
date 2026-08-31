@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -3291,13 +3291,33 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseFragmentSignals, caseSectionTexts, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseFragmentSignals, caseQualityReview, caseSectionTexts, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
+
+function publicCaseModelContent(content: any, prompt: string): any {
+  const contextText = prompt.slice(prompt.indexOf('上下文：') + '上下文：'.length);
+  const context = JSON.parse(contextText);
+  const refs = context.allowed_source_refs as string[];
+  const sourceCatalog = new Map((context.source_catalog as any[]).map((item) => [item.source_ref, item]));
+  const profileRef = refs.find((ref) => ref.startsWith('customer:')) ?? refs[0];
+  const factRef = refs.find((ref) => !ref.startsWith('customer:') && sourceCatalog.get(ref)?.source_type !== 'ai_topic_segment')
+    ?? refs.find((ref) => !ref.startsWith('customer:')) ?? profileRef;
+  const excerptFor = (ref: string) => String(sourceCatalog.get(ref)?.speaker_lines?.[0]?.text ?? sourceCatalog.get(ref)?.excerpt ?? sourceCatalog.get(ref)?.title ?? 'source');
+  const claims = [
+    { section: 'background', claim: content.background, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 },
+    ...content.challenges.map((claim: string) => ({ section: 'challenges', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    ...content.requirements.map((claim: string) => ({ section: 'requirements', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    { section: 'solution', claim: content.solution, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'unknown', status_category: 'done', confidence: 0.8 },
+    ...content.value.map((claim: string) => ({ section: 'value', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+  ];
+  return { ...content, claim_evidence: claims };
+}
 
 function fakeCaseModel(content: unknown): any {
   return {
     llm: { provider: 'fake', model: 'fake-model' },
-    models: { complete: async () => ({ content: [{ type: 'text', text: JSON.stringify(content) }], stopReason: 'stop' }) },
+    models: { complete: async (_model: unknown, input: any) => ({
+      content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(content, input.messages[0].content)) }], stopReason: 'stop' }) },
   };
 }
 
@@ -3308,7 +3328,6 @@ const CASE_CONTENT = {
   requirements: ['统一项目与工单管理平台，覆盖研发与售后两条线', '关键节点自动提醒与汇报'],
   solution: '项目组从流程调研切入，先梳理研发与售后协同断点，再分阶段部署项目管理与工单模块，通过双周对齐机制持续校准方案。',
   value: ['项目进度汇总从人工周报升级为实时看板', '工单平均响应时间显著缩短'],
-  evidence_map: { background: '客户档案与 03 月启动会议', challenges: '工单 T-2001~T-2004 与 05-12 会议' },
   unknowns: ['量化基线数据待客户确认'],
 };
 
@@ -3320,7 +3339,7 @@ function seedCaseCustomer(db: WorkbenchDatabase): void {
   db.upsertCustomer({ id: 'crm-c1', name: '案例客户一' });
   db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
     externalId: 'case-T-1', displayId: 'T-2001', title: '导出超时', occurredAt: '2026-03-10T03:00:00Z',
-    payload: { field005: { name: '已完成' }, field009: '2026-03-10 11:00:00', field010: '2026-03-12 11:00:00' } });
+    payload: { field005: { name: '已完成', category: 'done' }, field009: '2026-03-10 11:00:00', field010: '2026-03-12 11:00:00' } });
   segment(db, 'crm-c1', 'case-r1:t1', 'case-r1', '启动会', '2026-03-05T05:00:00Z', '客户提出希望统一管理研发项目');
   const recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
     externalId: 'case-r1', title: '录音 case-r1', occurredAt: '2026-03-05T05:00:00Z', payload: {} });
@@ -3337,7 +3356,7 @@ test('workbench: case generation runs full-context model job and persists narrat
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -3355,7 +3374,8 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal((draft.fields as any).customer_name, '案例客户一');
     assert.equal((draft.fields as any).background, CASE_CONTENT.background);
     assert.deepEqual((draft.fields as any).challenges, CASE_CONTENT.challenges);
-    assert.deepEqual((draft.fields as any).evidence_map, CASE_CONTENT.evidence_map);
+    assert.equal((draft.fields as any).claim_evidence.length, 8);
+    assert.ok((draft.fields as any).context_snapshot.digest);
     assert.deepEqual((draft.fields as any).unknowns, CASE_CONTENT.unknowns);
     // 证据引用含时间线事件与片段。
     assert.ok(draft.evidenceRefs.length >= 2);
@@ -3367,15 +3387,15 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.match(capturedPrompt, /客户叙事视角/);
     assert.match(capturedPrompt, /禁止会议流水账与工单流水账/);
     assert.match(capturedPrompt, /禁止虚构 ROI/);
-    assert.match(capturedPrompt, /待确认/);
+    assert.match(capturedPrompt, /只能写入 unknowns/);
     assert.match(capturedPrompt, /五段叙事|五个章节/);
     // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律、交付记录底料。
     assert.match(capturedPrompt, /pain_point_signals/);
     assert.match(capturedPrompt, /value_signals/);
     assert.match(capturedPrompt, /delivered_records/);
     assert.match(capturedPrompt, /web_context/);
-    assert.match(capturedPrompt, /招投标、采购公告、制度要求类信息属公开权威事实/);
-    assert.match(capturedPrompt, /同名公司/);
+    assert.match(capturedPrompt, /标题命中客户名不能单独成文/);
+    assert.match(capturedPrompt, /同名或业务不符/);
     assert.match(capturedPrompt, /以「我们为客户提供了什么方案」为主线/);
     assert.match(capturedPrompt, /不得写成功能点罗列/);
     assert.ok(capturedPrompt.includes('"pain_point_signals":'), '上下文须含痛点信号块');
@@ -3393,7 +3413,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v2-narrative');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v3-public-evidence');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -3469,9 +3489,9 @@ test('workbench: case renderContract five sections, ordered numbering, legacy fa
   const legacyMarkdown = renderCaseMarkdown(legacy as any);
   assert.match(legacyMarkdown, /旧痛点/);
   assert.match(legacyMarkdown, /上线时间: 2026-03/);
-  // 空章节渲染「待补充」。
+  // 空章节不再注入内部占位词；质量审查负责提示 CSM。
   const empty = renderCaseMarkdown({ ...draft, fields: { background: '', solution: '' } } as any);
-  assert.match(empty, /待补充/);
+  assert.doesNotMatch(empty, /待补充/);
   // 内部信息残留告警：干净内容不告警，残留命中。
   assert.deepEqual(caseContentWarnings(draft as any), []);
   const dirty = { ...draft, fields: { ...CASE_CONTENT, value: ['工时 12 小时已节省', '客户不满情绪缓解'] } };
@@ -3484,6 +3504,7 @@ test('workbench: case renderContract five sections, ordered numbering, legacy fa
   const minimal = parseCaseContent({ background: 'b', solution: 's' });
   assert.deepEqual([minimal.challenges, minimal.requirements, minimal.value], [[], [], []]);
   assert.equal(minimal.evidence_map, undefined);
+  assert.deepEqual(minimal.claim_evidence, []);
   // 章节契约锁定。
   assert.deepEqual(CASE_SECTIONS.map((section) => section.key), ['background', 'challenges', 'requirements', 'solution', 'value']);
 });
@@ -3525,7 +3546,12 @@ test('workbench: case publish hash gate works with narrative markdown', async ()
     assert.match(preview.args.content as string, /## 一、客户背景/);
     // 篡改版本后旧批准哈希失效。
     await assert.rejects(() => service.publish(draft.id, draft.version + 1, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
-    const published = await service.publish(draft.id, draft.version, 'parent-1', preview.approvalHash);
+    // 新增其他客户后，正文命中跨客户名称警告；即使正文和版本不变，旧预览也必须失效。
+    db.upsertCustomer({ id: 'crm-other-warning', name: '项目管理' });
+    await assert.rejects(() => service.publish(draft.id, draft.version, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
+    const refreshed = service.publishPreview(draft.id, 'parent-1');
+    assert.ok(refreshed.warnings.some((warning) => /其他客户名称/.test(warning)));
+    const published = await service.publish(draft.id, draft.version, 'parent-1', refreshed.approvalHash);
     assert.equal(published.status, 'published');
     assert.equal(published.publishedPageId, 'page-pub-1');
     // 已发布不可再发布。
@@ -3554,7 +3580,7 @@ test('workbench: caseFragmentSignals extracts pain/value themes from full fragme
     title: '痛点与反馈', occurredAt: '2026-05-12T05:00:00Z', syncedAt: '2026-05-12T06:00:00Z', payloadHash: 'h1',
     attributionStatus: 'confirmed' as const, confidence: 1,
     payload: { recordingId: 'sig-r1', speakers: ['CSM'], transcript: [filler, painLine, noiseLine, valueLine].join('\n'),
-      evidence: [filler, painLine, noiseLine, valueLine].map((text, index) => ({ spokenAt: '2026-05-12T05:00:00Z', speaker: index % 2 ? 'CSM' : '客户', text })) },
+      evidence: [filler, painLine, noiseLine, valueLine].map((text, index) => ({ spokenAt: '2026-05-12T05:00:00Z', speaker: index === 2 ? 'CSM' : '客户', text })) },
   } as any;
   const signals = caseFragmentSignals([fragment]);
   // 痛点句命中多主题时取第一个命中主题；信号摘录含原话关键内容。
@@ -3564,7 +3590,7 @@ test('workbench: caseFragmentSignals extracts pain/value themes from full fragme
   assert.equal(signals.painPoints[0].date, '2026-05-12');
   assert.equal(signals.painPoints[0].fragment_id, 'frag-sig-1');
   assert.equal(signals.values.length, 1, '正面反馈句记一条价值信号');
-  assert.equal(signals.values[0].theme, '正面评价');
+  assert.equal(signals.values[0].theme, '效率提升');
   assert.ok(signals.values[0].excerpt.includes('挺好'));
   // 无关句不入信号。
   assert.ok(!JSON.stringify(signals).includes('例会'));
@@ -3574,7 +3600,7 @@ test('workbench: caseFragmentSignals extracts pain/value themes from full fragme
   assert.equal(fallback.painPoints.length, 1);
   assert.equal(fallback.painPoints[0].theme, '信息不透明');
   // 空片段集返回空信号。
-  assert.deepEqual(caseFragmentSignals([]), { painPoints: [], values: [] });
+  assert.deepEqual(caseFragmentSignals([]), { painPoints: [], requirements: [], solutions: [], values: [], review: [] });
 });
 
 test('workbench: case generation injects web search context and persists audit snapshot', async () => {
@@ -3584,7 +3610,7 @@ test('workbench: case generation injects web search context and persists audit s
     db.upsertCustomer({ id: 'crm-web-1', name: '案例客户甲', shortName: '客户甲' });
     db.upsertSourceEvent({ customerId: 'crm-web-1', sourceSystem: 'ones', sourceType: 'suggestion_feedback',
       externalId: 'web-S-1', displayId: 'S-100', title: '需求池功能已完成交付', occurredAt: '2026-03-01T03:00:00Z',
-      payload: { field005: { name: '已完成' } } });
+      payload: { field005: { name: '已完成', category: 'done' } } });
     const queries: string[] = [];
     const fetcher: HttpPost = async (url, headers, body) => {
       void url; void headers;
@@ -3599,7 +3625,7 @@ test('workbench: case generation injects web search context and persists audit s
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime, {
@@ -3614,19 +3640,19 @@ test('workbench: case generation injects web search context and persists audit s
     assert.ok(capturedPrompt.includes('信息化制度建设招标公告'));
     assert.ok(!capturedPrompt.includes('Another company'));
     assert.ok(capturedPrompt.includes('"web_context"'), '上下文须含 web_context 块');
-    // 已交付记录进上下文（isDeliveredOnesEvent 口径：标题含「完成」）。
+    // 已交付记录进上下文（isDeliveredOnesEvent 口径：结构化状态类型 done）。
     assert.ok(capturedPrompt.includes('"delivered_records"'));
     assert.ok(capturedPrompt.includes('需求池功能已完成交付'));
     // 检索审计快照随草稿落库。
     const draft = db.listCaseDrafts('crm-web-1')[0];
     const webSearch = (draft.fields as any).web_search;
     assert.equal(webSearch.searched, CASE_WEB_ANGLES.length);
-    assert.equal(webSearch.results.length, CASE_WEB_ANGLES.length, '每角度各保留 1 条命中客户名的结果');
+    assert.equal(webSearch.results.length, 1, '同一 URL 跨角度只保留一条');
     assert.ok(webSearch.results.every((item: any) => item.title.includes('案例客户甲')));
     assert.equal(webSearch.errors.length, 0);
     // detail 的 contextSummary 含 web 检索行。
     const detail = service.detail(draft.id)!;
-    assert.ok(detail.contextSummary.some((entry) => entry.system === 'web' && entry.count === CASE_WEB_ANGLES.length));
+    assert.ok(detail.contextSummary.some((entry) => entry.system === 'web' && entry.count === 1));
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -3658,7 +3684,7 @@ test('workbench: case web search failure is isolated and never blocks generation
     assert.equal(webSearch.searched, CASE_WEB_ANGLES.length - 1, 'searched 只计成功角度');
     assert.equal(webSearch.errors.length, 1);
     assert.match(webSearch.errors[0], /项目管理: HTTP 429/);
-    assert.equal(webSearch.results.length, CASE_WEB_ANGLES.length - 1, '其余角度结果保留');
+    assert.equal(webSearch.results.length, 1, '其余角度相同 URL 去重保留一条');
     // 检索全挂也不阻断：恒抛错的 fetcher 下任务仍成功。
     const dir2 = mkdtempSync(join(tmpdir(), 'csm-case-werr2-'));
     const db2 = new WorkbenchDatabase(dir2);
@@ -3686,9 +3712,9 @@ test('workbench: delivered_records only includes delivered ones records', async 
   try {
     db.upsertCustomer({ id: 'crm-deliv', name: '交付客户' });
     db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'ones', sourceType: 'suggestion_feedback',
-      externalId: 'deliv-S-1', displayId: 'S-200', title: '需求池模块上线', occurredAt: '2026-03-02T03:00:00Z', payload: { field005: { name: '已完成' } } });
+      externalId: 'deliv-S-1', displayId: 'S-200', title: '需求池模块上线', occurredAt: '2026-03-02T03:00:00Z', payload: { field005: { name: '已完成', category: 'done' } } });
     db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'ones', sourceType: 'support_ticket',
-      externalId: 'deliv-T-1', displayId: 'T-300', title: '统计报表报错', occurredAt: '2026-03-03T03:00:00Z', payload: { field005: { name: '进行中' } } });
+      externalId: 'deliv-T-1', displayId: 'T-300', title: '统计报表报错', occurredAt: '2026-03-03T03:00:00Z', payload: { field005: { name: '进行中', category: 'in_progress' } } });
     db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'crm', sourceType: 'crm_followup',
       externalId: 'deliv-F-1', title: '完成季度回访', occurredAt: '2026-03-04T03:00:00Z', payload: { active_record_content: '完成季度回访并记录' } });
     let capturedPrompt = '';
@@ -3696,7 +3722,7 @@ test('workbench: delivered_records only includes delivered ones records', async 
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(CASE_CONTENT) }], stopReason: 'stop' };
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -3710,5 +3736,217 @@ test('workbench: delivered_records only includes delivered ones records', async 
     assert.ok(!context.delivered_records.some((item: any) => item.title === '完成季度回访'));
     // v2 新上下文键齐备。
     for (const key of ['delivered_records', 'pain_point_signals', 'value_signals', 'web_context']) assert.ok(key in context);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case signal routing requires customer speaker and respects time/modal conflicts', () => {
+  const fragment = {
+    id: 'route-1', customerId: 'crm-route', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'route-1',
+    title: '案例路由', occurredAt: '2026-08-01T00:00:00Z', syncedAt: '2026-08-01T01:00:00Z', payloadHash: 'route-hash',
+    attributionStatus: 'confirmed' as const, payload: { evidence: [
+      { speaker: '客户', text: '我们希望 9 月上线，并且需要完成权限集成和验收。' },
+      { speaker: '客户', text: '目前模块尚未上线，项目进度依赖人工表格汇总。' },
+      { speaker: '客户', text: '项目组已完成上线和权限配置。' },
+      { speaker: '客户', text: '目前团队已经全面使用，项目进度更透明。' },
+      { speaker: '客户', text: '希望后续全面使用并覆盖所有团队。' },
+      { speaker: '客户', text: '过去依赖人工表格的问题已经解决。' },
+      { speaker: 'CSM', text: '我认为效率提升了很多。' },
+    ] },
+  } as any;
+  const signals = caseFragmentSignals([fragment]);
+  assert.ok(signals.requirements.some((item) => item.excerpt.includes('希望 9 月上线') && item.timeScope === 'future'));
+  assert.ok(signals.painPoints.some((item) => item.excerpt.includes('人工表格')));
+  assert.ok(!signals.solutions.some((item) => item.excerpt.includes('尚未上线')));
+  assert.ok(signals.solutions.some((item) => item.excerpt.includes('已完成上线') && item.timeScope === 'completed'));
+  assert.ok(signals.values.some((item) => item.excerpt.includes('全面使用') && item.speakerRole === 'customer'));
+  assert.ok(!signals.values.some((item) => item.excerpt.includes('希望后续全面使用')));
+  assert.ok(!signals.painPoints.some((item) => item.excerpt.includes('已经解决')));
+  assert.ok(!signals.values.some((item) => item.excerpt.includes('我认为')));
+  assert.ok(signals.review.some((item) => item.excerpt.includes('我认为') && item.speakerRole === 'csm'));
+});
+
+test('workbench: case pain and value keyword coverage includes scattered duplicate governance and reduction', () => {
+  const fragment = (id: string, text: string) => ({ id, customerId: 'crm-route', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: id,
+    title: id, occurredAt: `2026-08-0${id.slice(-1)}T00:00:00Z`, syncedAt: '2026-08-10T00:00:00Z', payloadHash: id,
+    attributionStatus: 'confirmed', payload: { evidence: [{ speaker: '客户', text }] } }) as any;
+  const signals = caseFragmentSignals([
+    fragment('route-1', '需求和文档分散在多个系统。'),
+    fragment('route-2', '同一数据需要重复录入和多头维护。'),
+    fragment('route-4', '目前缺少统一规范，也无法追溯。'),
+    fragment('route-3', '系统已经上线，统计周期缩短了 2 天，重复工作量也明显减少。'),
+  ]);
+  assert.ok(signals.painPoints.some((item) => item.theme === '信息或工具分散'));
+  assert.ok(signals.painPoints.some((item) => item.theme === '重复工作'));
+  assert.ok(signals.painPoints.some((item) => item.theme === '重复工作' && item.timeScope === 'current'));
+  assert.ok(signals.painPoints.some((item) => item.theme === '缺少规范或追溯'));
+  assert.ok(signals.values.some((item) => item.theme === '周期或成本改善'));
+});
+
+test('workbench: customer outcome evidence ignores CSM and unknown speakers', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-speaker', name: '说话人客户', csmName: '小王' });
+  const event = db.upsertSourceEvent({ customerId: 'crm-speaker', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'speaker-1',
+    title: '效果回访', occurredAt: '2026-08-01T00:00:00Z', attributionStatus: 'confirmed', payload: { evidence: [
+      { speaker: '小王', text: '我认为效率提升明显。' },
+      { speaker: '发言人2', text: '系统很好用。' },
+      { speaker: '客户', text: '平台让进度透明多了，我们认可这个效果。' },
+    ] } });
+  const sync = new PortfolioSyncService(db, {} as never, async () => ({ events: [], proposedCount: 0, includedCount: 0 }));
+  sync.processHemoryEvidence(event);
+  const outcomes = db.listEvidence('crm-speaker').filter((item) => item.kind === 'outcome');
+  assert.equal(outcomes.length, 1);
+  assert.match(outcomes[0].detail, /客户|平台让进度透明/);
+  assert.doesNotMatch(outcomes[0].detail, /我认为|系统很好用/);
+}));
+
+test('workbench: delivered classification rejects negated and future status text', () => {
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'support_ticket', title: '功能未完成', payload: { field005: { name: '进行中', category: 'in_progress' } } }), false);
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'suggestion_feedback', title: '模块尚未上线', payload: { field005: { name: '待处理', category: 'to_do' } } }), false);
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'support_ticket', title: '任意标题', payload: { field005: { name: '已完成', category: 'done' } } }), true);
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'support_ticket', title: '计划上线', payload: { field005: '进行中' } }), false);
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'support_ticket', title: '修复完成', payload: { field005: '已完成' } }), true);
+  assert.equal(isDeliveredOnesEvent({ sourceType: 'support_ticket', title: '旧数据', payload: { field005: '已交付' } }), true);
+});
+
+test('workbench: case fingerprint covers customer profile and evidence changes', () => withDb((db) => {
+  const customer = db.upsertCustomer({ id: 'crm-fp', name: '指纹客户', industry: '制造' });
+  const event = db.upsertSourceEvent({ customerId: customer.id, sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 'fp-1',
+    title: '工单', occurredAt: '2026-08-01T00:00:00Z', payload: { field005: { category: 'done' } } });
+  const evidence = { id: 'ev-1', customerId: customer.id, kind: 'outcome', label: '效果', detail: '进度透明', occurredAt: '2026-08-02T00:00:00Z', confidence: 0.8, sourceSystem: 'hemory' };
+  const base = caseFingerprint(customer, [event], [], [evidence]);
+  assert.notEqual(base, caseFingerprint({ ...customer, industry: '汽车' }, [event], [], [evidence]));
+  assert.notEqual(base, caseFingerprint(customer, [event], [], [{ ...evidence, detail: '流程透明' }]));
+  const risk = { level: 'medium', coverage: 0.8, dimensions: {}, unknowns: [], ruleVersion: 'v1' } as any;
+  const opportunity = { id: 'opp-1', customerId: customer.id, title: '扩展', detail: '知识管理', confidence: 0.7, status: 'hypothesis', evidenceRefs: [] } as any;
+  assert.notEqual(base, caseFingerprint(customer, [event], [], [evidence], risk, []));
+  assert.notEqual(base, caseFingerprint(customer, [event], [], [evidence], null, [opportunity]));
+}));
+
+test('workbench: case web search rejects title-only results, deduplicates URL and grades official domains', async () => {
+  const customer = { id: 'crm-web', name: '公开客户', shortName: '公开客户', source: {
+    website: 'https://official.example.com', attachment: 'https://example.com/files/a.pdf',
+  } } as any;
+  const fetcher: HttpPost = async () => JSON.stringify({ results: [
+    { title: '公开客户招标公告', url: 'https://example.com/a?utm_source=x', published_date: '2026-01-01', content: '' },
+    { title: '公开客户项目公告', url: 'https://example.com/unrelated', published_date: '2026-01-01', content: '这是一段与目标企业没有关系的普通摘要。' },
+    { title: '公开客户项目公告', url: 'https://example.com/a', published_date: '2026-01-01', content: '公开客户正在建设研发项目管理平台并开展公开采购。' },
+    { title: '公开客户官网新闻', url: 'https://official.example.com/news/1', published_date: '2026-01-02', content: '公开客户官网发布研发管理平台建设进展。' },
+  ] });
+  const result = await searchCaseWebContext(customer, { getApiKey: () => 'x', getMaxResults: () => 5, getKeylessEnabled: () => false, fetcher });
+  assert.equal(result.results.length, 2);
+  assert.match(result.results[0].snippet, /研发项目管理平台/);
+  assert.equal(result.results[0].url, 'https://example.com/a');
+  assert.equal(result.results[0].sourceTier, 'media');
+  assert.equal(result.results[1].sourceTier, 'customer_official');
+});
+
+test('workbench: public case parsing requires traceable excerpts and derives Hemory speaker role', () => {
+  const content = { title: '公开案例', background: '背景事实', challenges: ['现状痛点'], requirements: ['明确需求'], solution: '已落地方案', value: ['效率提升'], unknowns: [] };
+  const profile = { id: 'customer:c1', source_system: 'crm', source_type: 'customer_profile', external_id: 'c1', occurred_at: '2026-01-01', synced_at: '2026-01-01',
+    title: '客户', excerpt: '制造行业客户', url: '', payload_hash: 'p' } as any;
+  const done = { id: 'done-1', source_system: 'ones', source_type: 'support_ticket', external_id: 'd1', occurred_at: '2026-02-01', synced_at: '2026-02-01',
+    title: '平台已完成上线', excerpt: '平台已完成上线', url: '', payload_hash: 'd', status_category: 'done' } as any;
+  const csm = { id: 'voice-1', source_system: 'hemory', source_type: 'ai_topic_segment', external_id: 'v1', occurred_at: '2026-03-01', synced_at: '2026-03-01',
+    title: '效果回访', excerpt: 'CSM: 我认为效率提升', url: '', payload_hash: 'v', speaker_lines: [{ speaker: 'CSM', speaker_role: 'csm', text: '我认为效率提升' }] } as any;
+  const claims = [
+    { section: 'background', claim: content.background, source_refs: [profile.id], excerpt: profile.excerpt },
+    { section: 'challenges', claim: content.challenges[0], source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'requirements', claim: content.requirements[0], source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'solution', claim: content.solution, source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'value', claim: content.value[0], source_refs: [csm.id], excerpt: '我认为效率提升', speaker_role: 'customer' },
+  ];
+  const sources = [profile, done, csm];
+  assert.throws(() => parseCaseContent({ ...content, claim_evidence: claims.map(({ excerpt, ...claim }) => claim) },
+    { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources }), /缺少原文摘录/);
+  assert.throws(() => parseCaseContent({ ...content, claim_evidence: claims },
+    { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources }), /不是明确客户说话人/);
+});
+
+test('workbench: quality review marks stale web, pre-solution value, other customer and sensitive title', () => {
+  const sources = [
+    { id: 'customer:c1', source_system: 'crm', source_type: 'customer_profile', external_id: 'c1', occurred_at: '2026-01-01', synced_at: '2026-01-01', title: '目标客户', excerpt: '制造行业', url: '', payload_hash: 'p' },
+    { id: 'value-early', source_system: 'hemory', source_type: 'ai_topic_segment', external_id: 'v1', occurred_at: '2026-02-01', synced_at: '2026-02-01', title: '反馈', excerpt: '效率提升', url: '', payload_hash: 'v', speaker_lines: [{ speaker: '客户', speaker_role: 'customer', text: '效率提升' }] },
+    { id: 'solution-late', source_system: 'ones', source_type: 'support_ticket', external_id: 's1', occurred_at: '2026-03-01', synced_at: '2026-03-01', title: '已完成上线', excerpt: '已完成上线', url: '', payload_hash: 's', status_category: 'done' },
+    { id: 'followup-csm', source_system: 'crm', source_type: 'crm_followup', external_id: 'f1', occurred_at: '2026-01-15', synced_at: '2026-01-15', title: '客户需要统一管理', excerpt: '客户需要统一管理', url: '', payload_hash: 'f' },
+  ] as any[];
+  const fields = { background: '制造行业', challenges: ['流程不透明'], requirements: ['统一管理'], solution: '已完成上线', value: ['效率提升'],
+    context_snapshot: { generated_at: '2026-03-01', internal_digest: 'same', digest: 'snapshot', sources },
+    web_search: { searched: 1, searchedAt: '2026-01-01T00:00:00Z', results: [{ id: 'web-1', angle: '项目管理', title: '报道', snippet: '目标客户公开报道', domain: 'media.example', sourceTier: 'media', url: 'https://media.example/1', date: '2026-01-01' }], errors: [] },
+    claim_evidence: [
+      { section: 'background', claim: '制造行业', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'challenges', claim: '流程不透明', source_refs: ['solution-late'], excerpt: '已完成上线' },
+      { section: 'requirements', claim: '统一管理', source_refs: ['followup-csm'], excerpt: '客户需要统一管理', speaker_role: 'unknown' },
+      { section: 'solution', claim: '已完成上线', source_refs: ['solution-late'], excerpt: '已完成上线' },
+      { section: 'value', claim: '效率提升', source_refs: ['value-early'], excerpt: '效率提升', speaker_role: 'customer' },
+    ] };
+  const draft = { id: 'case-q', customerId: 'c1', version: 1, status: 'draft', title: '泄漏客户 13800138000', fields,
+    evidenceRefs: [], createdAt: '2026-03-01', updatedAt: '2026-03-01' } as any;
+  const review = caseQualityReview(draft, { currentInternalDigest: 'same', otherCustomerNames: ['泄漏客户'], now: new Date('2026-08-31T00:00:00Z') });
+  assert.equal(review.contextStale, true);
+  assert.ok(review.warnings.some((warning) => /公开资料快照已超过/.test(warning)));
+  assert.ok(review.warnings.some((warning) => /先方案落地、后价值反馈/.test(warning)));
+  assert.ok(review.warnings.some((warning) => /其他客户名称/.test(warning)));
+  assert.ok(review.warnings.some((warning) => /手机号码.*案例标题/.test(warning)));
+  assert.ok(review.warnings.some((warning) => /CRM 跟进.*缺少明确客户说话人/.test(warning)));
+});
+
+test('workbench: case update preserves internal evidence and quality review stays warning-only', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-update-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT));
+    const queued = service.generate('crm-c1');
+    await waitForJob(db, queued.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const snapshot = (draft.fields as any).context_snapshot;
+    const claims = (draft.fields as any).claim_evidence;
+    const updated = service.update(draft.id, draft.version, '', { background: '', unknowns: [], context_snapshot: {} })!;
+    assert.deepEqual((updated.fields as any).context_snapshot, snapshot);
+    assert.deepEqual((updated.fields as any).claim_evidence, claims);
+    assert.deepEqual((updated.fields as any).unknowns, CASE_CONTENT.unknowns);
+    const review = caseQualityReview(updated);
+    assert.ok(review.warnings.some((warning) => /标题为空/.test(warning)));
+    assert.ok(review.warnings.some((warning) => /客户背景.*为空/.test(warning)));
+    assert.ok(review.warnings.some((warning) => /线下确认/.test(warning)));
+    assert.ok(service.publishPreview(updated.id, 'parent-warning').approvalHash, '警告不阻断预览');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case publish is idempotent under concurrency and missing page id remains unknown', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-publish-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    let calls = 0;
+    const mcp = { listTools: () => [], call: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { text: '{"result":"SUCCESS","data":{"pageID":"page-once"}}', isError: false };
+    } } as any;
+    const service = new CaseService(db, mcp, fakeCaseModel(CASE_CONTENT));
+    const queued = service.generate('crm-c1');
+    await waitForJob(db, queued.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const preview = service.publishPreview(draft.id, 'parent-once');
+    const results = await Promise.allSettled([
+      service.publish(draft.id, draft.version, 'parent-once', preview.approvalHash),
+      service.publish(draft.id, draft.version, 'parent-once', preview.approvalHash),
+    ]);
+    assert.equal(calls, 1);
+    assert.equal(results.filter((item) => item.status === 'fulfilled').length, 1);
+    assert.equal(db.getCaseDraft(draft.id)?.publishedPageId, 'page-once');
+
+    db.upsertCustomer({ id: 'crm-noid', name: '无 ID 客户' });
+    db.upsertSourceEvent({ customerId: 'crm-noid', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 'noid-1',
+      title: '已交付', occurredAt: '2026-08-01T00:00:00Z', payload: { field005: { category: 'done' } } });
+    const noIdService = new CaseService(db, { listTools: () => [], call: async () => ({ text: '{"result":"SUCCESS"}', isError: false }) } as any,
+      fakeCaseModel(CASE_CONTENT));
+    const noIdJob = noIdService.generate('crm-noid');
+    await waitForJob(db, noIdJob.jobId!);
+    const noIdDraft = db.listCaseDrafts('crm-noid')[0];
+    const noIdPreview = noIdService.publishPreview(noIdDraft.id, 'parent-noid');
+    await assert.rejects(() => noIdService.publish(noIdDraft.id, noIdDraft.version, 'parent-noid', noIdPreview.approvalHash), /结果未知/);
+    assert.equal(db.getCaseDraft(noIdDraft.id)?.status, 'draft');
+    assert.equal(db.getCaseDraft(noIdDraft.id)?.publishedPageId ?? null, null);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

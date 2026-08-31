@@ -57,7 +57,9 @@ const CLI_CAPABILITIES = [
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
-  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'] },
+  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'],
+    editableFields: ['title', 'background', 'challenges', 'requirements', 'solution', 'value'],
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns'] },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -131,11 +133,12 @@ function help(): void {
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
-    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标）
+    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标/中标采购）
   csm-agent case show <草稿ID> [--json]
-    （默认输出客户版案例叙事 Markdown（与复制/Wiki 发布同源）；--json 输出含 evidence_map/unknowns 的完整对象）
+    （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源）；--json 输出含 claim_evidence/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
+    （只更新 title 与 fields 中的五段公开正文；客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
   csm-agent case preview <草稿ID> [ONES父页面ID]
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
   csm-agent weekly-report list <客户ID或名称> [--json]
@@ -429,7 +432,7 @@ function parseObject(input: string, label: string): Record<string, unknown> {
 function printCaseDraft(draft: any, markdown = ''): void {
   console.log(`${draft.title} · ${draft.status === 'published' ? `已发布(${draft.publishedPageId ?? ''})` : `草稿 v${draft.version}`} · ${draft.generator ?? 'unknown'}`);
   // 正文 = 服务端 renderCaseMarkdown 权威渲染的客户版 Markdown（与 Web 复制、Wiki 发布同源）；
-  // evidence_map/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
+  // claim_evidence/context_snapshot/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
   if (markdown) console.log(`\n${markdown}`);
   console.log(`\n（完整内部证据：csm-agent case show ${draft.id} --json）`);
 }
@@ -481,7 +484,6 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
     if (jsonOutput) return print(body);
     printCaseDraft(body.draft, body.markdown ?? '');
     for (const warning of body.warnings ?? []) console.log(`⚠ ${warning}`);
-    if (body.contextStale) console.log('⚠ 生成后客户数据已更新，建议重新生成后再发布');
     return;
   }
   if (subcommand === 'update') {

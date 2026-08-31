@@ -1245,8 +1245,11 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(editCase, /三、需求与要求（每行一项）/);
   assert.match(editCase, /四、解决方案/);
   assert.match(editCase, /五、价值与成效（每行一项/);
+  assert.match(editCase, /仅写已完成或有明确完成确认的落地举措/);
   assert.match(editCase, /fields\.pain_points/);
   assert.match(editCase, /fields\.results/);
+  assert.doesNotMatch(editCase, /fields: \{ \.\.\.fields,/);
+  assert.match(editCase, /fields: \{\s*background:/);
   // 旧字段编辑入口不再出现（客户原话/可复用经验/脱敏检查/实施过程）。
   assert.doesNotMatch(editCase, /客户原话/);
   assert.doesNotMatch(editCase, /可复用经验/);
@@ -1288,6 +1291,8 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(caseCard, /'重新生成'/);
   assert.match(caseCard, /contextStale/);
   assert.match(caseCard, /'数据已更新'/);
+  assert.match(caseCard, /qualityReview\?\.warnings\?\.length/);
+  assert.match(caseCard, /公开检查 \$\{warningCount\} 项/);
 });
 
 test('cursor ripple fx: theme tokens, silky wake guards, header toggle and load order', () => {

@@ -196,6 +196,21 @@ export interface CaseDraft {
   updatedAt: string;
 }
 
+export type CasePublishAttemptStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
+
+export interface CasePublishAttempt {
+  id: string;
+  draftId: string;
+  version: number;
+  parentPageId: string;
+  requestHash: string;
+  status: CasePublishAttemptStatus;
+  pageId?: string | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DraftBatch {
   id: string;
   customerId: string;

@@ -138,10 +138,10 @@ function editedDraft(original: ConfirmDraft, value: unknown): ConfirmDraft | nul
   };
 }
 
-/** 案例精修提交里允许合并回 case_drafts.fields 的叙事键（五段正文 + 内部元数据）。 */
+/** 案例精修只允许修改五段公开正文；证据、客户绑定与上下文快照由生成服务维护。 */
 function pickNarrativeFields(fields: Record<string, unknown>): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
-  for (const key of ['background', 'challenges', 'requirements', 'solution', 'value', 'evidence_map', 'unknowns']) {
+  for (const key of ['background', 'challenges', 'requirements', 'solution', 'value']) {
     if (fields[key] !== undefined) picked[key] = fields[key];
   }
   return picked;
@@ -754,7 +754,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
-          const draft = workbench.db.updateCaseDraft(draftId, Number(body.version), String(body.title ?? ''), body.fields ?? {});
+          const draft = workbench.cases.update(draftId, Number(body.version), typeof body.title === 'string' ? body.title : undefined,
+            isRecord(body.fields) ? body.fields : {});
           return draft ? json(res, 200, draft) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
         }
         if (req.method === 'POST' && sub === '/publish-preview') {
@@ -1260,8 +1261,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               }
               const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer);
               if (bindingError) return json(res, 400, { error: bindingError });
-              const fields = { ...caseDraft.fields, ...pickNarrativeFields(approvedDraft.fields) };
-              const updated = workbench.db.updateCaseDraft(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title, fields);
+              const updated = workbench.cases.update(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title,
+                pickNarrativeFields(approvedDraft.fields));
               if (!updated) return json(res, 400, { error: '案例草稿更新失败（版本已变化或已发布）' });
               workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id });
               session.pending.resolve(approvedDraft);

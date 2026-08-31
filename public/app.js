@@ -3016,6 +3016,14 @@
     const card = el('article', 'case-card-item');
     card.append(el('strong', null, draft.title), el('div', 'cell-sub', `${draft.status === 'published' ? '已发布' : `草稿 v${draft.version}`} · ${formatDateTime(draft.updatedAt)}`));
     const buttons = el('div', 'row-actions');
+    let detail = null;
+    if (draft.status === 'draft') {
+      try {
+        detail = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
+        const warningCount = detail.qualityReview?.warnings?.length ?? detail.warnings?.length ?? 0;
+        if (warningCount) buttons.append(badge(`公开检查 ${warningCount} 项`, 'warning'));
+      } catch { /* 详情失败不阻塞卡片渲染 */ }
+    }
     if (draft.status === 'draft') {
       const edit = el('button', 'quiet-command small', '编辑');
       edit.onclick = () => editCase(draft);
@@ -3047,10 +3055,7 @@
         buttons.append(regenerate);
       }
       if (customerMode && customerId) {
-        try {
-          const detail = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
-          if (detail.contextStale) buttons.append(badge('数据已更新', 'warning'));
-        } catch { /* 详情失败不阻塞卡片渲染 */ }
+        if (detail?.contextStale) buttons.append(badge('数据已更新', 'warning'));
       }
     }
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
@@ -3077,7 +3082,7 @@
     const background = inputField('一、客户背景（行业、业务概况与合作起点的连贯叙述）', fields.background, 'textarea');
     const challenges = inputField('二、痛点、现状与挑战（每行一项）', asList(fields.challenges, fields.pain_points), 'textarea');
     const requirements = inputField('三、需求与要求（每行一项）', asList(fields.requirements), 'textarea');
-    const solution = inputField('四、解决方案（问题如何被分析、设计、实施与协同解决）', fields.solution, 'textarea');
+    const solution = inputField('四、解决方案（仅写已完成或有明确完成确认的落地举措）', fields.solution, 'textarea');
     const value = inputField('五、价值与成效（每行一项；量化优先，无量化写有据定性价值）', asList(fields.value, fields.results), 'textarea');
     const actions = el('div', 'row-actions');
     const save = el('button', 'primary-command', '保存草稿');
@@ -3085,7 +3090,7 @@
     const lines = (input) => input.value.split('\n').map((x) => x.trim()).filter(Boolean);
     async function saveDraft() {
       return api(`/api/case-drafts/${draft.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        version: draft.version, title: title.input.value.trim(), fields: { ...fields,
+        version: draft.version, title: title.input.value.trim(), fields: {
           background: background.input.value.trim(), challenges: lines(challenges.input),
           requirements: lines(requirements.input), solution: solution.input.value.trim(), value: lines(value.input) },
       }) });
@@ -3098,7 +3103,9 @@
         if (!target) return;
         const parentPageID = target.pageID;
         const preview = await api(`/api/case-drafts/${draft.id}/publish-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID }) });
-        const warningText = (preview.warnings || []).length ? `\n\n${(preview.warnings || []).join('\n')}` : '';
+        const warningText = (preview.warnings || []).length
+          ? `\n\n公开检查提示（不阻断发布）：\n${(preview.warnings || []).map((warning) => `- ${warning}`).join('\n')}`
+          : '';
         if (!await confirmDialog(`确认将“${draft.title}”发布到 ONES Wiki「${target.title}」下？${warningText}\n\n${preview.args.content.slice(0, 800)}`)) return;
         draft = await api(`/api/case-drafts/${draft.id}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: draft.version, parentPageID, approvalHash: preview.approvalHash }) });
         closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases();

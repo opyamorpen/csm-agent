@@ -8,6 +8,7 @@ import type {
   ActionItemInput,
   ActionStatus,
   CaseDraft,
+  CasePublishAttempt,
   Customer,
   CustomerInput,
   DraftBatch,
@@ -346,6 +347,20 @@ export class WorkbenchDatabase {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS case_publish_attempts (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL REFERENCES case_drafts(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        parent_page_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        page_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_case_publish_draft ON case_publish_attempts(draft_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS action_items (
         id TEXT PRIMARY KEY,
@@ -725,6 +740,16 @@ export class WorkbenchDatabase {
     return rows.map(sourceEventFromRow);
   }
 
+  /** 案例生成使用的完整客户事件集；与分页 UI 无关，不截断长期客户历史。 */
+  listCaseContextEvents(customerId: string): SourceEvent[] {
+    const rows = this.db.prepare(`SELECT * FROM source_events WHERE customer_id=?
+      AND attribution_status='confirmed'
+      AND source_type!='customer_snapshot'
+      AND NOT EXISTS (SELECT 1 FROM hemory_fragment_generations g WHERE g.event_id=source_events.id AND g.active=0)
+      ORDER BY datetime(occurred_at), external_id`).all(customerId) as Row[];
+    return rows.map(sourceEventFromRow);
+  }
+
   /**
    * ONES 工作项完成率（全量口径，不受 listTimeline 截断窗口影响）：suggestion_feedback / support_ticket / operations_ticket。
    * 完成判定与概览数据卡一致——payload.field005.category==='done'，绝不拿状态名猜；
@@ -1101,6 +1126,65 @@ export class WorkbenchDatabase {
     const result = this.db.prepare(`UPDATE case_drafts SET status='published',published_page_id=?,published_at=?,updated_at=? WHERE id=? AND version=? AND status='draft'`)
       .run(pageId, now, now, id, expectedVersion);
     return Number(result.changes) === 1 ? this.getCaseDraft(id)! : null;
+  }
+
+  private casePublishAttemptFromRow(row: Row): CasePublishAttempt {
+    return {
+      id: String(row.id), draftId: String(row.draft_id), version: Number(row.version),
+      parentPageId: String(row.parent_page_id), requestHash: String(row.request_hash),
+      status: String(row.status) as CasePublishAttempt['status'], pageId: row.page_id as string | null,
+      error: row.error as string | null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    };
+  }
+
+  getCasePublishAttemptByHash(requestHash: string): CasePublishAttempt | undefined {
+    const row = this.db.prepare('SELECT * FROM case_publish_attempts WHERE request_hash=?').get(requestHash) as Row | undefined;
+    return row ? this.casePublishAttemptFromRow(row) : undefined;
+  }
+
+  beginCasePublishAttempt(draftId: string, version: number, parentPageId: string, requestHash: string): { attempt: CasePublishAttempt; acquired: boolean } {
+    const existing = this.getCasePublishAttemptByHash(requestHash);
+    if (existing) {
+      if (existing.status === 'failed') {
+        const retried = this.db.prepare("UPDATE case_publish_attempts SET status='pending',error=NULL,updated_at=? WHERE id=? AND status='failed'")
+          .run(nowIso(), existing.id);
+        if (Number(retried.changes) === 1) return { attempt: this.getCasePublishAttemptByHash(requestHash)!, acquired: true };
+      }
+      return { attempt: this.getCasePublishAttemptByHash(requestHash)!, acquired: false };
+    }
+    const now = nowIso();
+    const id = randomUUID();
+    this.db.prepare(`INSERT OR IGNORE INTO case_publish_attempts(id,draft_id,version,parent_page_id,request_hash,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,'pending',?,?)`).run(id, draftId, version, parentPageId, requestHash, now, now);
+    const attempt = this.getCasePublishAttemptByHash(requestHash)!;
+    return { attempt, acquired: attempt.id === id };
+  }
+
+  updateCasePublishAttempt(id: string, status: CasePublishAttempt['status'], values: { pageId?: string | null; error?: string | null } = {}): CasePublishAttempt {
+    this.db.prepare('UPDATE case_publish_attempts SET status=?,page_id=?,error=?,updated_at=? WHERE id=?')
+      .run(status, values.pageId ?? null, values.error ?? null, nowIso(), id);
+    const row = this.db.prepare('SELECT * FROM case_publish_attempts WHERE id=?').get(id) as Row;
+    return this.casePublishAttemptFromRow(row);
+  }
+
+  completeCasePublishAttempt(attemptId: string, draftId: string, expectedVersion: number, pageId: string): CaseDraft | null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const now = nowIso();
+      const result = this.db.prepare(`UPDATE case_drafts SET status='published',published_page_id=?,published_at=?,updated_at=?
+        WHERE id=? AND version=? AND status='draft'`).run(pageId, now, now, draftId, expectedVersion);
+      if (Number(result.changes) !== 1) {
+        this.db.exec('ROLLBACK');
+        return null;
+      }
+      this.db.prepare("UPDATE case_publish_attempts SET status='succeeded',page_id=?,error=NULL,updated_at=? WHERE id=? AND status='pending'")
+        .run(pageId, now, attemptId);
+      this.db.exec('COMMIT');
+      return this.getCaseDraft(draftId)!;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   createAction(input: ActionItemInput): ActionItem {

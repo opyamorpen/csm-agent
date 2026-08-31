@@ -993,8 +993,20 @@ export class PortfolioSyncService {
 
   processHemoryEvidence(event: SourceEvent): void {
     if (!event.customerId || event.attributionStatus !== 'confirmed') return;
-    const text = String(event.payload?.transcript ?? event.title);
+    const customer = this.db.getCustomer(event.customerId);
+    const evidence = Array.isArray(event.payload?.evidence) ? event.payload.evidence : [];
+    const customerLines = evidence.flatMap((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+      const item = raw as Record<string, unknown>;
+      const speaker = typeof item.speaker === 'string' ? item.speaker.trim() : '';
+      const text = typeof item.text === 'string' ? item.text.trim() : '';
+      return text && caseSpeakerRole(speaker, customer?.csmName) === 'customer' ? [text] : [];
+    });
+    // 成果/风险/机会属于“客户声音”证据。旧片段没有逐句说话人时宁可不产出，不能把 CSM
+    // 的总结误记成客户反馈；原始片段仍保留在案例上下文中供模型作为内部辅助材料审阅。
+    const text = customerLines.join('\n');
     this.db.deleteEvidenceForSourceEvents([event.id]);
+    if (!text) return;
     if (/不满|不续约|替换|投诉|预算取消|严重|阻塞/.test(text)) this.db.addEvidence({ id: `hemory-${hash(`${event.id}:risk`)}`, customerId: event.customerId, sourceEventId: event.id,
       kind: 'voice', label: '会议风险信号', detail: text, occurredAt: event.occurredAt, confidence: 0.75, sourceSystem: 'hemory' });
     if (/满意|认可|效果|提升|节省|成功|上线/.test(text)) this.db.addEvidence({ id: `hemory-${hash(`${event.id}:outcome`)}`, customerId: event.customerId, sourceEventId: event.id,
@@ -1052,9 +1064,45 @@ export function shanghaiDateKey(now = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
-/** ONES 事件是否属「已完成交付」：案例候选判定与案例生成 delivered_records 共用的单一口径。 */
+export type CaseSpeakerRole = 'customer' | 'csm' | 'unknown';
+
+/** 案例信号的说话人归类：只有明确客户角色才能成为客户声音证据。 */
+export function caseSpeakerRole(speaker: string | null | undefined, csmName?: string | null): CaseSpeakerRole {
+  const normalized = String(speaker ?? '').trim();
+  if (!normalized) return 'unknown';
+  if (csmName?.trim() && normalized === csmName.trim()) return 'csm';
+  if (/^(?:客户|甲方|用户|对方|贵方)(?:\d+|代表|老师)?$/i.test(normalized)) return 'customer';
+  if (/(?:CSM|客户成功|ONES|我方|实施|售后|项目组)/i.test(normalized)) return 'csm';
+  return 'unknown';
+}
+
+function eventStatusCategory(event: { payload?: Record<string, unknown> }): string | null {
+  const status = event.payload?.field005;
+  if (!status || typeof status !== 'object' || Array.isArray(status)) return null;
+  const category = (status as Record<string, unknown>).category;
+  return typeof category === 'string' && category.trim() ? category.trim() : null;
+}
+
+function onesStatusName(event: { payload?: Record<string, unknown> }): string {
+  const status = event.payload?.field005;
+  if (typeof status === 'string') return status;
+  if (status && typeof status === 'object' && !Array.isArray(status)) {
+    const item = status as Record<string, unknown>;
+    return String(item.name ?? item.value ?? item.label ?? '');
+  }
+  return '';
+}
+
+const NEGATED_DELIVERY = /(?:未|尚未|没有|并未|待|计划|预计|拟|希望|需要).{0,8}(?:完成|关闭|上线|交付)|(?:完成|关闭|上线|交付).{0,8}(?:前|中|计划|目标|延期|推迟|失败)/;
+const POSITIVE_DELIVERY_STATUS = /^(?:已完成|完成|已关闭|关闭|已解决|解决|已上线|上线|已交付|交付|done|closed|resolved)$/i;
+
+/** ONES 事件是否属「已完成交付」：结构化状态类型优先，旧数据才回退严格状态名。 */
 export function isDeliveredOnesEvent(event: { sourceType: string; title: string; payload?: Record<string, unknown> }): boolean {
-  return /完成|关闭|上线|交付/.test(`${event.title} ${JSON.stringify(event.payload ?? {})}`);
+  const category = eventStatusCategory(event);
+  if (category) return category === 'done';
+  const status = onesStatusName(event).trim();
+  if (NEGATED_DELIVERY.test(`${event.title} ${status}`)) return false;
+  return POSITIVE_DELIVERY_STATUS.test(status);
 }
 
 /** ONES 工时登记的 startTime 要求 ISO 8601 带时区偏移；按上海时区输出 YYYY-MM-DDTHH:mm:ss+08:00。 */

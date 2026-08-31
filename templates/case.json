@@ -1,10 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "客户案例 Customer Case Study",
-  "description": "每个成功案例一篇，五段客户叙事（背景→痛点→需求→解决方案→价值），经 CSM 审核后回写 ONES（默认 Wiki 页面组「案例库」）。",
+  "description": "每个成功案例一篇，可直接对外的五段客户叙事（背景→痛点→需求→解决方案→价值）。内部证据仅供审核，不进入公开正文。",
   "type": "object",
-  "required": ["customer_id", "customer_name", "background", "solution"],
+  "required": ["customer_id", "customer_name", "background", "challenges", "requirements", "solution", "value"],
   "properties": {
+    "case_draft_id": { "type": "string", "description": "精修时原样带回的案例草稿 ID" },
+    "case_version": { "type": "integer", "minimum": 1, "description": "精修时原样带回的乐观锁版本" },
     "customer_id": { "type": "string", "description": "CRM 中客户唯一 ID" },
     "customer_name": { "type": "string", "description": "客户名称" },
     "background": { "type": "string", "description": "客户背景：行业、业务概况与合作起点的一段连贯叙述，可含可信的公开信息" },
@@ -18,20 +20,40 @@
       "items": { "type": "string" },
       "description": "需求与要求"
     },
-    "solution": { "type": "string", "description": "解决方案：以「我们为客户提供了什么方案」为主线的方案级举措叙述" },
+    "solution": { "type": "string", "description": "解决方案：只写已完成或有明确完成确认的落地举措，计划、讨论和待办不得写成已交付" },
     "value": {
       "type": "array",
       "items": { "type": "string" },
       "description": "价值与成效（量化优先，无量化写有据定性价值，客户正面反馈可转述）"
     },
-    "evidence_map": {
+    "claim_evidence": {
+      "type": "array",
+      "readOnly": true,
+      "description": "内部只读字段：逐条公开主张与实际使用证据的映射，不进入公开正文，精修时由服务端保留",
+      "items": {
+        "type": "object",
+        "required": ["section", "claim", "source_refs"],
+        "properties": {
+          "section": { "enum": ["background", "challenges", "requirements", "solution", "value"] },
+          "claim": { "type": "string" },
+          "source_refs": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "excerpt": { "type": "string" },
+          "speaker_role": { "enum": ["customer", "csm", "unknown"] },
+          "status_category": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "context_snapshot": {
       "type": "object",
-      "description": "内部字段：各章节证据依据说明，不进入客户版正文"
+      "readOnly": true,
+      "description": "内部只读字段：生成时不可变来源快照及摘要，精修时由服务端保留"
     },
     "unknowns": {
       "type": "array",
+      "readOnly": true,
       "items": { "type": "string" },
-      "description": "内部字段：CSM 需补充确认的关键信息，不进入客户版正文"
+      "description": "内部只读字段：CSM 需线下补充确认的关键信息，不进入公开正文"
     }
   }
 }
