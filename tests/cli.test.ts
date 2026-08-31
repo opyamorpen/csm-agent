@@ -59,6 +59,13 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-batches/:id/regenerate')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-items/:id/dismiss')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-drafts' && item.api.includes('/api/draft-jobs')));
+  // 草稿生成进度可见契约：drafts 能力含全局在途查询端点与 --active 说明；hemory 能力含 --wait 进度说明。
+  // （hemory-drafts 工作流有 drafts/draft 两条能力，find 会先命中无 notes 的 draft 条目——按 api 精确定位。）
+  const draftsReadCapability = capabilities.find((item) => item.api.includes('/api/draft-jobs?status=active&kind=hemory'));
+  assert.ok(draftsReadCapability, 'drafts 能力应含全局在途查询端点');
+  assert.match(draftsReadCapability.notes ?? '', /draft jobs --active/);
+  const heretryCapability = capabilities.find((item) => item.workflow === 'hemory-attribution');
+  assert.match(heretryCapability.notes ?? '', /实时打印生成进度/);
   assert.ok(capabilities.some((item) => item.workflow === 'runtime-config' && item.api.includes('PUT /api/config/llm')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions?include=archived')));
   assert.ok(capabilities.some((item) => item.workflow === 'agent-sessions' && item.api.includes('/api/sessions/:id/export')));
@@ -332,8 +339,8 @@ test('fragment consumption ledger is visible across CLI and API contracts', () =
   const inbox = cli.match(/async function hemoryCommand[\s\S]*?\n}\n\n\/\/ 草稿确认视图/)?.[0];
   assert.ok(inbox, 'hemoryCommand source was not found');
   assert.match(inbox, /consumed: \(item\.consumedBy \?\? \[\]\)\.join\(','\) \|\| ''/);
-  // 生成任务备注：regenerate --wait / draft jobs 展示「未生成新草稿」结论，与失败错误并列输出。
-  assert.match(cli, /job\.status !== 'failed' && job\.note/);
+  // 生成任务备注：regenerate --wait / draft jobs 展示「未生成新草稿」结论，与失败错误、中断标注并列输出。
+  assert.match(cli, /job\.status !== 'failed' && !job\.stalled && job\.note/);
   assert.match(cli, /备注：\$\{job\.note\}/);
   // 服务端同一契约：fragments 响应附 consumedBy（written 草稿 evidence_refs 反查）。
   assert.match(server, /decorateHemoryFragments\(fragments\)/);

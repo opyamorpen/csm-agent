@@ -211,7 +211,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   }
   // 失败生成任务的片段明细：客户名 + 上海日 + 逐片段摘要（截断），支撑「失败后选片段重新生成」。
   // weekly_report 任务补算 weekStart（首个可解析种子事件的周界，与 process() 同逻辑）：页面重开后恢复进度需对周。
-  function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }>; weekStart?: string } {
+  // 在途 heretry 任务补 dateKey（横幅按「客户 · 日期」标注）；running 但不在本进程处理集合 = 孤儿
+  //（服务重启遗留、resume 因 attempts 耗尽不再认领，永不终结）→ stalled，前端/CLI 据此提前退出并引导重新生成。
+  function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }>; weekStart?: string; stalled?: boolean } {
     if (job.status === 'failed') {
       const fragments: Array<{ id: string; occurredAt: string; topic: string; summary: string }> = [];
       let dateKey = '';
@@ -223,6 +225,14 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         fragments.push({ id: event.id, occurredAt: event.occurredAt, topic: event.title, summary: summary.slice(0, 120) });
       }
       return { ...job, dateKey: dateKey || undefined, fragments };
+    }
+    if (job.kind === 'hemory' && (job.status === 'pending' || job.status === 'running')) {
+      const stalled = job.status === 'running' && !workbench.drafts.isJobProcessing(job.id);
+      for (const id of job.sourceEventIds) {
+        const event = workbench.db.getSourceEvent(id);
+        if (event) return { ...job, dateKey: shanghaiEventDate(event), ...(stalled ? { stalled: true } : {}) };
+      }
+      return stalled ? { ...job, stalled: true } : job;
     }
     if (job.kind === 'weekly_report') {
       for (const id of job.sourceEventIds) {
@@ -674,6 +684,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           // 某客户全部在途任务（页面重开恢复进度展示用），可用 kind 再过滤。
           jobs = workbench.db.listActiveDraftJobsByCustomer(customerId)
             .filter((job) => !kindParam || job.kind === kind);
+        } else if (status === 'active') {
+          // 全局在途任务（Web 刷新恢复横幅 / CLI draft jobs --active），可用 kind 过滤。
+          jobs = workbench.db.listActiveDraftJobs(kind);
         } else {
           jobs = status === 'failed' ? workbench.db.listFailedDraftJobs(kind) : [];
         }

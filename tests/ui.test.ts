@@ -773,21 +773,42 @@ test('draft generation shows a loading banner and polls job status after attribu
   assert.match(updater, /setAssignBarBusy\(true\)/);
   assert.match(updater, /finally \{ setAssignBarBusy\(false\); \}/);
 
-  const tracker = source.match(/function trackDraftGeneration\(jobs\) \{[\s\S]*?\n  \}\n\n  async function showAgentMode/)?.[0];
+  const tracker = source.match(/function trackDraftGeneration\(jobs\) \{[\s\S]*?\n  \}\n\n  function draftTypeLabel/)?.[0];
   assert.ok(tracker, 'trackDraftGeneration source was not found');
   assert.match(tracker, /\/api\/draft-jobs\?ids=/);
-  assert.match(tracker, /正在生成草稿（\$\{running\} 个任务）…/);
+  // 实时进度契约：横幅按任务渲染「客户 · 日期：阶段文案」，阶段优先取服务端 progress（与周报/案例同源）。
+  assert.match(tracker, /job\.progress \|\| \(job\.status === 'running' \? '正在处理' : '排队中'\)/);
+  assert.match(tracker, /const summary = `正在生成草稿（\$\{runningJobs\.length\} 个任务\$\{slow\}，已进行 \$\{duration\}\）：\$\{lines\.join\('；'\)\}`;/);
   assert.match(tracker, /draftGenerationNotice\.classList\.remove\('hidden'\)/);
   assert.match(tracker, /draftGenerationText\.textContent/);
+  // 轮询降频（2s→5s）且不再 180s 硬放弃：180s 只是「耗时较长」提示阈值，600s 才是安全阀，
+  // 安全阀文案 15s 后自动清除（setStatus 纯赋值无自动清除曾把 warn 永久钉死在角落）。
+  assert.match(tracker, /attempt < 90 \? 2000 : 5000/);
+  assert.match(tracker, /600000/);
+  assert.doesNotMatch(tracker, /180000/);
+  assert.match(tracker, /耗时较长，仍在后台执行/);
+  assert.match(tracker, /setTransientStatus\('warn', '草稿生成仍在后台进行（耗时较长）——稍后点「刷新」查看；若长时间无变化，任务可能已中断，请在草稿箱点「重新生成」', 15000\)/);
+  // 孤儿 running（服务重启遗留、永不终结）由服务端装饰 stalled：按终态移出并引导重新生成。
+  assert.match(tracker, /job\.stalled/);
+  assert.match(tracker, /部分任务疑似中断（服务重启未恢复），请在草稿箱点「重新生成」/);
   // 失败任务不创建批次，只能靠任务状态感知；终态后刷新草稿列表与角标。
   assert.match(tracker, /草稿生成失败/);
   assert.match(tracker, /void loadDraftBatches\(\)/);
-  assert.match(tracker, /180000/);
   // 重新生成同样接入轮询（响应同样返回 jobs）。
-  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  }\n\n  async function showAgentMode/)?.[0];
+  const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 失败生成任务卡片/)?.[0];
   assert.ok(renderer, 'loadDraftBatches source was not found');
   assert.match(renderer, /const \{ jobs \} = await api\(`\/api\/draft-batches\/\$\{batch\.id\}\/regenerate`/);
   assert.match(renderer, /trackDraftGeneration\(jobs \|\| \[\]\)/);
+  // 刷新/切 tab/页面重开后恢复跟踪：loadDraftBatches 内 re-seed 全局在途任务（stalled 除外）。
+  assert.match(renderer, /resumeDraftGenerationTracking\(\)/);
+  const resume = source.match(/async function resumeDraftGenerationTracking[\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(resume, 'resumeDraftGenerationTracking source was not found');
+  assert.match(resume, /\/api\/draft-jobs\?status=active&kind=hemory/);
+  assert.match(resume, /!job\.stalled/);
+  // 自动清除的代际守卫：仅当状态栏仍是这条文案时才清除，避免清掉用户触发的其他状态。
+  const transient = source.match(/function setTransientStatus\(cls, text, clearMs\) \{[\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(transient, 'setTransientStatus source was not found');
+  assert.match(transient, /statusEl\.lastChild\.textContent === text/);
 
   // 横幅 DOM 与 spinner 样式（纯 CSS 动画，WKWebView 安全）。
   assert.match(html, /id="draftGenerationNotice" class="draft-generation-notice hidden"/);

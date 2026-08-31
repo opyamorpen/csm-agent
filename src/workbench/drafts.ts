@@ -4,6 +4,7 @@ import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
 import { parseOnesManhourMode, shanghaiDateKey, shanghaiIsoOffset } from './sync.js';
+import { completeModelWithProgress, modelProgressText } from './model-progress.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, DraftBatch, DraftEditContract, DraftEditField, DraftItem, DraftItemType, SourceEvent } from './types.js';
 import type { ConfirmDraft } from '../tools/confirm.js';
@@ -801,7 +802,7 @@ export function onesAsrAliasRule(): string {
 }
 
 async function proposeWithModel(runtime: Runtime, customer: Customer, events: SourceEvent[], unpublishedEvents: SourceEvent[],
-  consumedTypes?: Map<string, DraftItemType[]>): Promise<DraftProposal[]> {
+  consumedTypes?: Map<string, DraftItemType[]>, onProgress?: (text: string) => void): Promise<DraftProposal[]> {
   const unpublished = new Set(unpublishedEvents.map((event) => event.id));
   const evidence = events.map((event) => ({ id: event.id, occurred_at: event.occurredAt,
     published: !unpublished.has(event.id),
@@ -830,7 +831,7 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
   // 中继端点偶发连接超时（坏窗口可持续数分钟）：complete 不抛异常而是返回 stopReason='error' +
   // errorMessage，必须显式透出真实原因并指数退避重试（与周报同款 5s→15s→45s），固定短间隔会整个
   // 落在同一坏窗口内。baseMs 可注入：测试用 1ms 加速。
-  const value = await completeDraftModelWithRetry(runtime, prompt) as { drafts?: unknown[] } | null;
+  const value = await completeDraftModelWithRetry(runtime, prompt, onProgress) as { drafts?: unknown[] } | null;
   if (!Array.isArray(value?.drafts)) throw new Error('模型未返回 drafts 数组');
   const allowed = new Set<DraftItemType>(['internal_todo', 'workhour', 'followup', 'suggestion', 'ticket', 'operations']);
   return value.drafts.flatMap((raw) => {
@@ -848,25 +849,35 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
 export const draftModelRetryDelays = { baseMs: 5_000 };
 
 /** 带指数退避的草稿模型调用：provider 故障（stopReason=error）与不可解析输出都重试，返回可解析 JSON。 */
-async function completeDraftModelWithRetry(runtime: Runtime, prompt: string): Promise<unknown> {
+async function completeDraftModelWithRetry(runtime: Runtime, prompt: string, onProgress?: (text: string) => void): Promise<unknown> {
   const MAX_MODEL_ATTEMPTS = 3;
   const retryDelayMs = (attempt: number) => draftModelRetryDelays.baseMs * 3 ** (attempt - 1);
   let lastError = '模型未返回 drafts 数组';
   for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
-    const response = await runtime.models.complete(runtime.model, {
+    // 流式进度助手：返回值与 complete() 完全一致（provider 故障仍是 stopReason=error），重试/解析零改动；
+    // 测试假模型只有 complete 时自动回退、不产生流式 tick。
+    const response = await completeModelWithProgress(runtime, {
       systemPrompt: '你是 CSM 草稿分类器。你只能整理用户提供的证据，不执行任何工具或外部写入。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined);
     if (response.stopReason === 'error') {
       lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
-      if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      if (attempt < MAX_MODEL_ATTEMPTS) {
+        const delay = retryDelayMs(attempt);
+        onProgress?.(`${lastError}，${Math.round(delay / 1000)} 秒后自动重试`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
       continue;
     }
     const value = cleanJson(extractText(response.content));
     if (value && Array.isArray((value as { drafts?: unknown[] }).drafts)) return value;
     lastError = `模型未返回可解析的草稿 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
-    if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    if (attempt < MAX_MODEL_ATTEMPTS) {
+      const delay = retryDelayMs(attempt);
+      onProgress?.(`${lastError}，正在重写`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
   throw new Error(lastError);
 }
@@ -1008,6 +1019,11 @@ export class HemoryDraftService {
     return { jobs, days: dayList };
   }
 
+  /** 任务是否在本进程处理中：running 状态跨进程不可信（孤儿任务永不终结），stalled 装饰与 activeRegenerationDays 同源。 */
+  isJobProcessing(jobId: string): boolean {
+    return this.processing.has(jobId);
+  }
+
   /**
    * 进行中任务覆盖的「客户×上海日」集合：重新生成期间旧批次判定的数据源（刷新页面/CLI 触发同样可见）。
    * 数据库 running 状态跨进程不可信——进程崩溃会留下永不终结的孤儿 running（attempts 耗尽后 resume
@@ -1076,6 +1092,9 @@ export class HemoryDraftService {
     if (!job || job.status === 'succeeded') return;
     this.processing.add(jobId);
     this.db.updateDraftJob(jobId, 'running');
+    // 进度文案只经 updateDraftJobProgress 落 progress 列：绝不动 status/attempts（updateDraftJob 的
+    // running 会 attempts+1，流式心跳每 1.5s 一次会把重试计数刷爆）。终态写入后 progress 保留最后值仅供诊断。
+    const report_ = (text: string) => this.db.updateDraftJobProgress(jobId, text);
     try {
       const customer = this.db.getCustomer(job.customerId);
       if (!customer) throw new Error('customer not found');
@@ -1113,11 +1132,13 @@ export class HemoryDraftService {
       // （兜底草稿无分节摘要、无 ones_required 提案、描述塞原始转写，曾被误当正常草稿写入 CRM/ONES）。
       // 失败任务不建批次，用户在草稿箱点「重新生成」即可重试。
       if (!this.runtime) throw new Error('模型未配置，无法生成草稿（请检查 LLM 配置后重新生成）');
+      report_(`证据就绪（${events.length} 个片段），模型撰写中…`);
       let ai: DraftProposal[];
-      try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents, consumedTypesByEvent); }
+      try { ai = await proposeWithModel(this.runtime, customer, events, followupEvents, consumedTypesByEvent, report_); }
       catch (error) { throw new Error(`模型未生成草稿: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const proposals = this.buildProposals(ai, customer, events, followupEvents, workhourEvents, dateKey, writtenEvidence);
+      report_(`已解析 ${proposals.length} 条草稿提案，正在组装批次…`);
       // 零提案守卫：全部证据片段均已被已写入草稿消费时不建批次、不作废旧批次、不 supersede 失败
       // 任务，任务以 succeeded + note 收尾——避免「空转作废」把仍有效的待处理草稿打 stale。
       if (!proposals.length) {
@@ -1137,6 +1158,7 @@ export class HemoryDraftService {
         let issue = this.db.findCustomerManhourIssue(customer.id);
         if (!issue && this.refreshOnes) {
           try {
+            report_('工时工作项缺匹配，正在定向刷新 ONES 同步…');
             await this.refreshOnesOnce(customer.id);
             issue = this.db.findCustomerManhourIssue(customer.id);
             workhourBinding.refresh = { refreshed: true, refreshError: null };

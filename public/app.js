@@ -124,14 +124,29 @@
   let maxSeq = 0;
   let mcpFailures = [];
   let archivedExpanded = false;
-  const draftJobTracking = new Map();
+  let draftJobTracking = new Map();
   let draftJobTimer = null;
+  let draftJobStartedAt = 0;
   let activeDraftTab = 'pending';
   let activeActionTab = 'pending';
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
     statusEl.lastChild.textContent = text;
+  }
+
+  /**
+   * 短暂提示后自动清除：清除前校验状态栏仍是这条文案（代际守卫），避免清掉用户触发的其他状态
+   *（setStatus 是纯赋值无自动清除，warn 提示曾永久钉死在角落——「草稿生成仍在后台进行」卡死的根因之一）。
+   */
+  let transientStatusGeneration = 0;
+  function setTransientStatus(cls, text, clearMs) {
+    setStatus(cls, text);
+    const generation = ++transientStatusGeneration;
+    setTimeout(() => {
+      if (generation !== transientStatusGeneration) return;
+      if (statusEl.lastChild.textContent === text) setStatus('', '');
+    }, clearMs);
   }
 
   /** 侧边栏 Agent 角标 = Hemory 待归属 + 草稿箱两个数字之和（与两个 tab 角标同源）。 */
@@ -1435,17 +1450,25 @@
   }
 
   /**
-   * 轮询草稿生成任务直到终态：进行中在草稿箱顶部显示 spinner 横幅；全部结束后自动刷新草稿列表。
+   * 轮询草稿生成任务直到终态：进行中在草稿箱顶部横幅实时显示每个任务的阶段/模型输出进度
+   *（与周报/案例同源的 progress 文案），全部结束后自动刷新草稿列表。
    * 失败任务不会创建批次，只能在这里感知；jobId 为空的幂等复用任务（草稿已存在）不轮询。
+   * 孤儿 running（服务重启遗留、永不终结）由服务端装饰 stalled，按终态移出并提示重新生成。
+   * 活轮询期间 re-seed（loadDraftBatches 恢复）只并入新任务并重置计时，不重启循环。
    */
   function trackDraftGeneration(jobs) {
-    for (const job of jobs || []) if (job.jobId) draftJobTracking.set(job.jobId, job.fingerprint);
+    let added = false;
+    for (const job of jobs || []) {
+      if (job.jobId && !draftJobTracking.has(job.jobId)) { draftJobTracking.set(job.jobId, job.fingerprint); added = true; }
+    }
     if (!draftJobTracking.size) return;
+    if (added) draftJobStartedAt = Date.now();
     if (draftJobTimer) return;
-    const startedAt = Date.now();
+    let attempt = 0;
     const tick = async () => {
-      let running = 0;
+      const runningJobs = [];
       const failed = [];
+      const stalled = new Set();
       const finished = new Set();
       try {
         const ids = [...draftJobTracking.keys()];
@@ -1453,33 +1476,54 @@
         const byId = new Map((fresh || []).map((job) => [job.id, job]));
         for (const id of ids) {
           const job = byId.get(id);
-          // 查不到的任务按终态处理，避免轮询空转。
+          // 查不到的任务按终态处理，避免轮询空转；stalled（孤儿 running）同样按终态移出。
           if (!job || job.status === 'succeeded' || job.status === 'failed') {
             finished.add(id);
             if (job?.status === 'failed') failed.push(job.error || '未知原因');
-          } else running++;
+          } else if (job.stalled) {
+            finished.add(id);
+            stalled.add(id);
+          } else runningJobs.push(job);
         }
       } catch (error) { /* 轮询失败保持现状，下一轮重试 */ }
-      if (running) {
+      if (runningJobs.length) {
+        const elapsed = Math.round((Date.now() - draftJobStartedAt) / 1000);
+        const duration = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`;
+        const slow = elapsed >= 180 ? '，耗时较长，仍在后台执行' : '';
+        const customerNameOf = (customerId) => (customersCache.find((item) => item.id === customerId) || {}).name || customerId;
+        // 每任务一行「客户 · 日期：阶段文案」；阶段优先取服务端 progress，缺失按状态兜底（与周报/案例同款）。
+        const lines = runningJobs.map((job) => {
+          const phase = job.progress || (job.status === 'running' ? '正在处理' : '排队中');
+          const where = `${customerNameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''}`;
+          return `${where}：${phase}`;
+        });
+        const summary = `正在生成草稿（${runningJobs.length} 个任务${slow}，已进行 ${duration}）：${lines.join('；')}`;
         draftGenerationNotice.classList.remove('hidden');
-        draftGenerationText.textContent = `正在生成草稿（${running} 个任务）…`;
-        setStatus('', `正在生成草稿（${running} 个任务）…`);
+        draftGenerationText.textContent = summary;
+        setStatus('', summary.slice(0, 160));
       } else {
         for (const id of finished) draftJobTracking.delete(id);
         draftJobTimer = null;
         draftGenerationNotice.classList.add('hidden');
-        if (failed.length) setStatus('warn', `草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}——请在 Hemory 收件箱重新归属片段、或对既有批次点「重新生成」重试`);
-        else setStatus('', '草稿生成完成');
+        if (failed.length || stalled.size) {
+          const parts = [];
+          if (failed.length) parts.push(`草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}`);
+          if (stalled.size) parts.push('部分任务疑似中断（服务重启未恢复），请在草稿箱点「重新生成」');
+          setStatus('warn', parts.join('；'));
+        } else setStatus('', '草稿生成完成');
         void loadDraftBatches();
         return;
       }
-      if (Date.now() - startedAt > 180000) {
+      // 安全阀：超过 10 分钟（3 次模型重试 + 退避的最坏路径）停止轮询并自动清除提示——
+      // 旧实现 180s 硬放弃时任务往往仍在正常跑，且 warn 文案无任何清除路径，永久钉死在角落。
+      if (Date.now() - draftJobStartedAt > 600000) {
         draftJobTimer = null;
         draftGenerationNotice.classList.add('hidden');
-        setStatus('warn', '草稿生成仍在后台进行，稍后点「刷新」查看');
+        setTransientStatus('warn', '草稿生成仍在后台进行（耗时较长）——稍后点「刷新」查看；若长时间无变化，任务可能已中断，请在草稿箱点「重新生成」', 15000);
         return;
       }
-      draftJobTimer = setTimeout(() => void tick(), 2000);
+      attempt++;
+      draftJobTimer = setTimeout(() => void tick(), attempt < 90 ? 2000 : 5000);
     };
     draftJobTimer = setTimeout(() => void tick(), 1500);
   }
@@ -1654,6 +1698,9 @@
 
   async function loadDraftBatches() {
     const data = await api('/api/draft-batches');
+    // 恢复在途生成任务跟踪（幂等）：刷新/切 tab/页面重开后横幅与实时进度自动回来——
+    // 旧实现里「稍后点刷新查看」的提示是死路（刷新既不清提示也不恢复跟踪）。
+    void resumeDraftGenerationTracking();
     const batches = data.batches || [];
     // 待处理口径统一为草稿条目数（可处理卡片数）：一个批次（客户×天）含多条草稿，
     // 按批计数会让数字和卡片对不上；顶部角标、二级 tab、侧边栏 Agent 角标同一来源。
@@ -1768,6 +1815,19 @@
       }
       draftBatchList.append(section);
     }
+  }
+
+  /**
+   * 页面重开/切 tab/点「刷新」后恢复草稿生成跟踪：拉全局在途 heretry 任务 re-seed 进轮询
+   *（trackDraftGeneration 幂等：已跟踪的只保留，活轮询中只并入新任务并重置计时）。
+   * stalled（孤儿 running）跳过——它们永不终结，收编会把横幅永久钉死；其恢复出口是草稿箱「重新生成」。
+   */
+  async function resumeDraftGenerationTracking() {
+    try {
+      const data = await api('/api/draft-jobs?status=active&kind=hemory');
+      const jobs = (data.jobs || []).filter((job) => !job.stalled).map((job) => ({ jobId: job.id, fingerprint: job.fingerprint }));
+      if (jobs.length) trackDraftGeneration(jobs);
+    } catch (error) { /* 恢复失败不影响草稿箱主体展示 */ }
   }
 
   /**

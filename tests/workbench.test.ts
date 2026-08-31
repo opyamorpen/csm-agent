@@ -3022,6 +3022,98 @@ test('workbench: weekly report generation writes stage/model progress without to
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: heretry draft generation writes stage/model progress without touching attempts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-prog-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-hp1', name: '草稿进度客户' });
+    const event = segment(db, 'crm-hp1', 'hp1:t1', 'hp1r', '报错需求跟进', '2026-08-25T05:00:00Z', '客户提到工单报错需要跟进');
+    const fakeMcp = { listTools: () => [], isWrite: () => false, resolve: () => undefined,
+      call: async () => ({ text: '', isError: false }) } as any;
+    // 流式假模型：两个 text_delta 之间挂 1.6s（> 1.5s 节流窗），流式 tick 才会真正落库——
+    // 生产模型输出以秒/分钟计自然满足；瞬时吐完的假流只在收尾 force 一次，会被后续阶段文案覆盖。
+    const streamedText = JSON.stringify({ drafts: [{ type: 'followup', title: '沟通记录', summary: '全天综述。',
+      fields: { one_line_summary: '跟进报错需求' }, evidence_refs: [event.id] }] });
+    const streamRuntime = {
+      llm: { provider: 'fake', model: 'fake-stream' },
+      models: {
+        complete: async () => ({ content: [{ type: 'text', text: streamedText }], stopReason: 'stop' }),
+        stream: (_model: unknown, _context: any) => ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'text_delta', contentIndex: 0, delta: streamedText.slice(0, Math.ceil(streamedText.length / 2)), partial: {} };
+            await new Promise((resolve) => setTimeout(resolve, 1600));
+            yield { type: 'text_delta', contentIndex: 0, delta: streamedText.slice(Math.ceil(streamedText.length / 2)), partial: {} };
+          },
+          result: async () => ({ content: [{ type: 'text', text: streamedText }], stopReason: 'stop' }),
+        }),
+      },
+    } as any;
+    const service = new HemoryDraftService(db, fakeMcp, streamRuntime);
+    const queued = service.enqueue('crm-hp1', [event.id]);
+    assert.equal(queued.length, 1);
+    let sawStage = false;
+    let sawModelChars = false;
+    for (let i = 0; i < 1500 && !(sawStage && sawModelChars); i++) {
+      const job = db.getDraftJob(queued[0].jobId);
+      if (job?.progress?.includes('证据就绪')) sawStage = true;
+      if (job?.progress && /模型撰写中… 已输出 \d+ 字/.test(job.progress)) sawModelChars = true;
+      if (!sawStage || !sawModelChars) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(sawStage, '草稿生成进度必须含证据就绪阶段文案');
+    assert.ok(sawModelChars, '流式进度必须出现「模型撰写中… 已输出 N 字」');
+    // 流式挂起 1.6s 超出共用 waitForJob 的 1s 上限，这里放宽等待终态。
+    for (let i = 0; i < 600 && db.getDraftJob(queued[0].jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const job = db.getDraftJob(queued[0].jobId)!;
+    assert.equal(job.status, 'succeeded');
+    // 进度写入不动 attempts：成功任务恰好 running 一次。
+    assert.equal(job.attempts, 1);
+    assert.match(job.progress ?? '', /已解析 \d+ 条草稿提案/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: heretry draft retry reports delay in progress', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-drafts-retry-prog-'));
+  const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = draftModelRetryDelays.baseMs;
+  draftModelRetryDelays.baseMs = 1;
+  try {
+    db.upsertCustomer({ id: 'crm-hp2', name: '草稿重试进度客户' });
+    const event = segment(db, 'crm-hp2', 'hp2:t1', 'hp2r', '报错需求跟进', '2026-08-25T05:00:00Z', '客户提到工单报错需要跟进');
+    const fakeMcp = { listTools: () => [], isWrite: () => false, resolve: () => undefined,
+      call: async () => ({ text: '', isError: false }) } as any;
+    // 第一次 provider 故障（stopReason=error）、第二次正常：重试提示必须落进 progress。
+    let calls = 0;
+    const flakyRuntime = {
+      llm: { provider: 'fake', model: 'flaky' },
+      models: { complete: async () => {
+        calls++;
+        if (calls === 1) return { content: [], stopReason: 'error', errorMessage: 'connect timeout' };
+        return { content: [{ type: 'text', text: JSON.stringify({ drafts: [] }) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new HemoryDraftService(db, fakeMcp, flakyRuntime);
+    const queued = service.enqueue('crm-hp2', [event.id]);
+    // 退避 1ms + 解析瞬时完成：重试提示可能只存在几毫秒就被后续文案覆盖，逐轮抓取仍可能错过；
+    // 这里用挂起的第二次 complete 放大窗口，重试提示必然可观测。
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let sawRetry = false;
+    const watcher = (async () => {
+      for (let i = 0; i < 2000 && !sawRetry; i++) {
+        const job = db.getDraftJob(queued[0].jobId);
+        if (job?.progress?.includes('秒后自动重试')) sawRetry = true;
+        else await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release?.();
+    await watcher;
+    assert.ok(sawRetry, '模型重试的退避提示必须写进任务进度');
+    await waitForJob(db, queued[0].jobId);
+    assert.equal(db.getDraftJob(queued[0].jobId)?.status, 'succeeded');
+  } finally { draftModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: case generation writes web-search stage progress', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-prog-'));
   const db = new WorkbenchDatabase(dir);
@@ -3774,14 +3866,14 @@ test('workbench: case fingerprint is deterministic per customer-eventset', () =>
   assert.equal(caseFingerprint('crm-c2', [a, a], [a]), caseFingerprint('crm-c2', [a], []));
 }));
 
-test('workbench: case jobs are isolated from herory and weekly jobs by kind', () => withDb((db) => {
+test('workbench: case jobs are isolated from heretry and weekly jobs by kind', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-c3', name: '案例客户三' });
-  const heroryJob = db.createDraftJob('crm-c3', 'fp-h-c3', ['evt-1']);
+  const heretryJob = db.createDraftJob('crm-c3', 'fp-h-c3', ['evt-1']);
   const caseJob = db.createDraftJob('crm-c3', 'fp-c3', ['evt-2'], 'case_report');
   assert.equal(caseJob.kind, 'case_report');
   assert.ok(db.listPendingDraftJobs().every((job) => job.kind === 'hemory'), 'hemory resume 不得认领案例任务');
   assert.ok(db.listPendingDraftJobs('case_report').every((job) => job.kind === 'case_report'));
-  assert.ok(!db.listPendingDraftJobs('case_report').some((job) => job.id === heroryJob.id));
+  assert.ok(!db.listPendingDraftJobs('case_report').some((job) => job.id === heretryJob.id));
   assert.ok(!db.listPendingDraftJobs().some((job) => job.id === caseJob.id));
 }));
 
