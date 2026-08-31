@@ -11,7 +11,7 @@ import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 
-export const CASE_GENERATION_VERSION = 'case-v3-public-evidence';
+export const CASE_GENERATION_VERSION = 'case-v4-rich-narrative';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /** 案例五段叙事的字段契约（templates/case.json 同源描述，供前端/CLI 展示）。 */
@@ -83,6 +83,19 @@ const MAX_CASE_SIGNALS = 40;
 const MAX_SIGNALS_PER_FRAGMENT = 3;
 /** 信号摘录长度上限。 */
 const SIGNAL_EXCERPT_LIMIT = 160;
+/** records（非片段事件清单）注入上限：超限保最早 1/6 + 最近 5/6，与片段选择同哲学（背景靠早期证据、价值靠近期证据）。 */
+const MAX_CASE_RECORDS = 300;
+/** evidence_signals 注入上限（每条 detail 已截 200 字，全量注入无预算会稀释注意力）。 */
+const MAX_CASE_EVIDENCE = 60;
+/** crm_followups 注入上限。 */
+const MAX_CASE_FOLLOWUPS = 30;
+
+/** 列表章节的写回护栏上限：生成契约是 3~6 条，超出视为编辑异常（非阻断告警）。 */
+const CASE_LIST_ITEM_LIMIT = 12;
+/** 单条正文/单段的写回护栏长度上限（字符）。 */
+const CASE_ITEM_MAX_CHARS = 500;
+/** 案例生成输出预算：五章+claim_evidence 的 JSON 输出与 reasoning 共享 completion 上限，服务端默认 8k 会截断（stopReason=length）。 */
+const CASE_MODEL_MAX_TOKENS = 16_384;
 
 /** 案例联网检索角度（生成时现搜，低频手动动作不做新鲜度门）：背景与制度要求类信息不限时间窗。 */
 export const CASE_WEB_ANGLES: ReadonlyArray<{ key: string; label: string; query: string }> = [
@@ -277,8 +290,30 @@ function fragmentSpeechLines(event: SourceEvent): FragmentSpeechLine[] {
     });
 }
 
-function signalTimeScope(text: string, modality: CaseSignalModality): CaseTimeScope {
-  if (NEGATED_COMPLETION_PATTERN.test(text)) return modality === 'pain' ? 'current' : 'future';
+/**
+ * 片段说话人角色摘要（catalog 注入用）：按角色聚合「共 N 句」而非逐句全文——
+ * 完整逐句文本走 communications 与摘录校验第二查找源，catalog 不再重复注入全量转写。
+ */
+function speakerRoleSummaryLines(event: SourceEvent, csmName?: string | null): Array<{ speaker: string; speaker_role: CaseSpeakerRole; text: string }> {
+  const counts = new Map<CaseSpeakerRole, number>();
+  const speakers = new Map<CaseSpeakerRole, Set<string>>();
+  for (const line of fragmentSpeechLines(event)) {
+    if (line.text.length < 4) continue;
+    const role = caseSpeakerRole(line.speaker, csmName);
+    counts.set(role, (counts.get(role) ?? 0) + 1);
+    const names = speakers.get(role) ?? new Set<string>();
+    if (line.speaker) names.add(line.speaker);
+    speakers.set(role, names);
+  }
+  const labels: Record<CaseSpeakerRole, string> = { customer: '客户', csm: 'CSM/我方', unknown: '未明确' };
+  return [...counts.entries()].map(([role, count]) => ({
+    speaker: [...(speakers.get(role) ?? [])].slice(0, 3).join('、') || labels[role],
+    speaker_role: role,
+    text: `${labels[role]}发言共 ${count} 句（完整逐句见 communications 中该片段）`,
+  }));
+}
+
+function signalTimeScope(text: string, modality: CaseSignalModality): CaseTimeScope {  if (NEGATED_COMPLETION_PATTERN.test(text)) return modality === 'pain' ? 'current' : 'future';
   if (COMPLETED_PATTERN.test(text) || modality === 'solution') return 'completed';
   if (modality === 'pain') return 'current';
   if (FUTURE_PATTERN.test(text)) return 'future';
@@ -416,16 +451,49 @@ export type ParsedCaseContent = { title?: string } & CaseNarrativeFields & {
 };
 
 /** 模型输出契约校验；公开生成路径额外要求五章完整、无占位词且每条主张可追溯。 */
-function sourceSupportsExcerpt(source: CaseEvidenceSnapshotItem, excerpt: string): boolean {
-  return `${source.title}\n${source.excerpt}`.includes(excerpt)
-    || !!source.speaker_lines?.some((line) => line.text.includes(excerpt));
+/** 摘录校验的第二查找源：注入片段的 summary+transcript（catalog 的 hermory 条目只带角色摘要）。 */
+interface CaseCommunicationSource { id: string; transcript: string; summary: string; csmName?: string | null; evidence?: Array<{ speaker: string; text: string }> }
+
+function sourceSupportsExcerpt(source: CaseEvidenceSnapshotItem, excerpt: string, communications?: CaseCommunicationSource[]): boolean {
+  if (`${source.title}\n${source.excerpt}`.includes(excerpt)
+    || !!source.speaker_lines?.some((line) => line.text.includes(excerpt))) return true;
+  // catalog 的 hermory 条目只带角色摘要行——摘录的逐字定位回退到注入片段全文（communications）。
+  if (communications?.length && source.source_system === 'hemory') {
+    const fragment = communications.find((item) => item.id === source.id);
+    if (fragment && (`${fragment.summary}\n${fragment.transcript}`.includes(excerpt))) return true;
+  }
+  return false;
 }
 
-function sourceExcerptRoles(source: CaseEvidenceSnapshotItem, excerpt: string): CaseSpeakerRole[] {
-  return source.speaker_lines?.filter((line) => line.text.includes(excerpt)).map((line) => line.speaker_role) ?? [];
+function sourceExcerptRoles(source: CaseEvidenceSnapshotItem, excerpt: string, communications?: CaseCommunicationSource[]): CaseSpeakerRole[] {
+  const direct = source.speaker_lines?.filter((line) => line.text.includes(excerpt)).map((line) => line.speaker_role) ?? [];
+  if (direct.length) return direct;
+  // 摘录来自片段正文时，说话人角色从片段逐句结构化证据推导（catalog 摘要行不含逐句角色；
+  // evidence 数组优先——transcript 行解析对无前缀行拿不到说话人）。
+  if (communications?.length && source.source_system === 'hemory') {
+    const fragment = communications.find((item) => item.id === source.id);
+    if (fragment) {
+      if (fragment.evidence?.length) {
+        const roles = fragment.evidence.filter((line) => line.text.includes(excerpt)).map((line) => caseSpeakerRole(line.speaker, fragment.csmName));
+        if (roles.length) return roles;
+      }
+      const line = fragmentSpeechTextLines(fragment.transcript).find((item) => item.text.includes(excerpt));
+      if (line) return [caseSpeakerRole(line.speaker, fragment.csmName)];
+    }
+  }
+  return [];
 }
 
-export function parseCaseContent(value: unknown, options: { requirePublic?: boolean; allowedRefs?: Set<string>; sources?: CaseEvidenceSnapshotItem[] } = {}): ParsedCaseContent {
+/** 注入片段的逐句拆分（校验第二查找源用）：按「说话人:」行拆，无前缀行 speaker 为空。 */
+function fragmentSpeechTextLines(transcript: string): Array<{ speaker: string; text: string }> {
+  return transcript.split('\n').flatMap((line) => {
+    const match = line.match(/^([^:：]{1,24})[:：]\s*(.*)$/);
+    const text = (match?.[2] ?? line).trim();
+    return text ? [{ speaker: match?.[1]?.trim() ?? '', text }] : [];
+  });
+}
+
+export function parseCaseContent(value: unknown, options: { requirePublic?: boolean; allowedRefs?: Set<string>; sources?: CaseEvidenceSnapshotItem[]; communications?: CaseCommunicationSource[] } = {}): ParsedCaseContent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型未返回案例 JSON 对象');
   const raw = value as Record<string, unknown>;
   const background = typeof raw.background === 'string' ? raw.background.trim() : '';
@@ -480,15 +548,17 @@ export function parseCaseContent(value: unknown, options: { requirePublic?: bool
     if (!mapped.excerpt) throw new Error(`${CASE_SECTIONS.find((section) => section.key === item.section)!.label}主张缺少原文摘录`);
     if (sourceMap.size) {
       const supporting = mapped.source_refs.map((ref) => sourceMap.get(ref)).filter((source): source is CaseEvidenceSnapshotItem => !!source)
-        .filter((source) => sourceSupportsExcerpt(source, mapped.excerpt!));
+        .filter((source) => sourceSupportsExcerpt(source, mapped.excerpt!, options.communications));
       if (!supporting.length) throw new Error(`${CASE_SECTIONS.find((section) => section.key === item.section)!.label}主张的摘录未在引用证据中找到`);
-      const roles = supporting.flatMap((source) => sourceExcerptRoles(source, mapped.excerpt!));
+      const roles = supporting.flatMap((source) => sourceExcerptRoles(source, mapped.excerpt!, options.communications));
       mapped.speaker_role = roles.includes('customer') ? 'customer' : roles.includes('csm') ? 'csm' : 'unknown';
       const statuses = [...new Set(supporting.map((source) => source.status_category).filter((status): status is string => !!status && status !== 'unknown'))];
       mapped.status_category = statuses.length === 1 ? statuses[0] : 'unknown';
       if (['challenges', 'requirements', 'value'].includes(item.section)
         && supporting.some((source) => source.source_system === 'hemory') && !roles.includes('customer')) {
-        throw new Error(`${CASE_SECTIONS.find((section) => section.key === item.section)!.label}引用的会议摘录不是明确客户说话人`);
+        // 真实会议的说话人形态多样（客户员工真名/无名分轨/拼接摘录），逐句角色判定无法稳定可靠——
+        // 摘录可定位（防编造）保持阻断，说话人角色降级为非阻断告警（caseQualityReview 同款），由 CSM 复核。
+        continue;
       }
     }
   }
@@ -516,6 +586,21 @@ function selectFragments(hemory: SourceEvent[]): SourceEvent[] {
   return [...sorted.slice(0, early), ...sorted.slice(-(MAX_CASE_FRAGMENTS - early))];
 }
 
+/** 摘录校验第二查找源：与 renderContext 注入的 communications 同口径（同选择、同预算、同截取）。 */
+function caseCommunicationSources(input: CasePromptInput): CaseCommunicationSource[] {
+  const fragments = selectFragments(input.hemory);
+  const perFragment = Math.max(400, Math.floor(TRANSCRIPT_BUDGET / Math.max(1, fragments.length)));
+  return fragments.map((event) => ({
+    id: event.id,
+    summary: typeof event.payload?.summary === 'string' ? event.payload.summary : '',
+    // 校验用全文（含被预算截断的中后段）：模型可能引用 communications 之外、source_catalog 仅有摘要的句子——
+    // 逐字定位与角色推导必须覆盖完整转写，否则中长片段的引用会误判「摘录未找到」。
+    transcript: textOf(event),
+    evidence: fragmentSpeechLines(event),
+    csmName: input.customer.csmName,
+  }));
+}
+
 function statusCategory(event: SourceEvent): string {
   const value = event.payload?.field005;
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -534,6 +619,102 @@ function eventExcerpt(event: SourceEvent): string {
 function customerPublicProfile(customer: Customer): Record<string, unknown> {
   return { id: customer.id, name: customer.name, short_name: customer.shortName ?? null, industry: customer.industry ?? null,
     usage_version: customer.usageVersion ?? null, products: customer.products ?? [] };
+}
+
+/** 交付事实统计（服务端预计算，仅交付事实口径，不含完成率百分比）。 */
+export interface CaseDeliveryStats {
+  /** 合作起点：confirmed 事件最早日期（YYYY-MM-DD）；无事件时为 null。 */
+  firstConfirmedAt: string | null;
+  /** 合作月数（按 30 天一月向下取整）。 */
+  months: number | null;
+  /** 交付完成量：suggestion_feedback / support_ticket / operations_ticket 三类 ONES 工作项的 {total, done}。 */
+  categories: Array<{ source_type: string; label: string; total: number; done: number }>;
+  /** 私有云实例条数（任意状态）。 */
+  privateCloudInstances: number;
+  /** 工单解决时效（天）：support/operations 已完成项 field009→field010 的中位数与最小值；样本不足为 null。 */
+  ticketResolutionDays: { median: number; min: number } | null;
+  /** 工时登记总小时数（field019 累加）。 */
+  registeredHours: number | null;
+}
+
+const CASE_STATS_CATEGORY_LABELS: Record<string, string> = {
+  suggestion_feedback: '建议与反馈', support_ticket: '工单', operations_ticket: '运维工单',
+};
+
+function payloadDate(value: unknown): number | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(' ', 'T')}+08:00` : text;
+  const at = Date.parse(normalized);
+  return Number.isFinite(at) ? at : null;
+}
+
+function roundHours(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * 服务端预计算的交付事实统计：合作起点/时长、各类已完成交付量、工单解决时效、工时投入。
+ * 这些数字由本地已同步数据计算（非模型推导），作为可引用素材注入案例上下文——
+ * 口径只有「已完成的交付事实」，不含完成率百分比（低完成率写进对外案例有口径风险）。
+ */
+export function caseDeliveryStats(input: { customer: Customer; timeline: SourceEvent[]; hemory: SourceEvent[] }): CaseDeliveryStats {
+  const confirmed = [...input.timeline, ...input.hemory].filter((event) => event.attributionStatus === 'confirmed');
+  const times = confirmed.map((event) => Date.parse(event.occurredAt)).filter(Number.isFinite);
+  const firstAt = times.length ? Math.min(...times) : null;
+  const categories = ['suggestion_feedback', 'support_ticket', 'operations_ticket'].map((sourceType) => {
+    const items = confirmed.filter((event) => event.sourceSystem === 'ones' && event.sourceType === sourceType);
+    return { source_type: sourceType, label: CASE_STATS_CATEGORY_LABELS[sourceType] ?? sourceType,
+      total: items.length, done: items.filter((item) => isDeliveredOnesEvent(item)).length };
+  });
+  const privateCloudInstances = confirmed.filter((event) => event.sourceSystem === 'ones' && event.sourceType === 'private_cloud_instance').length;
+  const resolutions = confirmed
+    .filter((event) => event.sourceSystem === 'ones' && (event.sourceType === 'support_ticket' || event.sourceType === 'operations_ticket')
+      && isDeliveredOnesEvent(event))
+    .map((event) => {
+      const created = payloadDate(event.payload?.field009);
+      const updated = payloadDate(event.payload?.field010);
+      return created != null && updated != null && updated >= created ? (updated - created) / 86_400_000 : null;
+    })
+    .filter((days): days is number => days != null)
+    .sort((a, b) => a - b);
+  const registeredHours = (() => {
+    let total = 0;
+    let seen = false;
+    for (const event of confirmed) {
+      if (event.sourceSystem !== 'ones' || event.sourceType !== 'customer_manhour') continue;
+      const raw = Number(event.payload?.field019);
+      if (Number.isFinite(raw) && raw > 0) { total += raw / 100_000; seen = true; }
+    }
+    return seen ? roundHours(total) : null;
+  })();
+  return {
+    firstConfirmedAt: firstAt != null ? new Date(firstAt).toISOString().slice(0, 10) : null,
+    months: firstAt != null ? Math.max(0, Math.floor((Date.now() - firstAt) / (30 * 86_400_000))) : null,
+    categories,
+    privateCloudInstances,
+    ticketResolutionDays: resolutions.length ? { median: roundHours(resolutions[Math.floor((resolutions.length - 1) / 2)]), min: roundHours(resolutions[0]) } : null,
+    registeredHours,
+  };
+}
+
+/** 统计条目的自然语言正文（作为 stats 证据的 excerpt，逐字校验在此定位）。 */
+function deliveryStatsText(stats: CaseDeliveryStats, customer: Customer): string {
+  const parts: string[] = [];
+  if (stats.firstConfirmedAt) {
+    parts.push(`最早记录 ${stats.firstConfirmedAt} 起${stats.months != null && stats.months > 0 ? `，合作约 ${stats.months} 个月` : ''}`);
+  }
+  for (const category of stats.categories) {
+    if (!category.total) continue;
+    parts.push(`${category.label}共 ${category.total} 项，已完成 ${category.done} 项`);
+  }
+  if (stats.privateCloudInstances) parts.push(`私有云实例 ${stats.privateCloudInstances} 个`);
+  if (stats.ticketResolutionDays) {
+    const { median, min } = stats.ticketResolutionDays;
+    parts.push(`已完成工单解决时长中位约 ${median} 天，最快 ${min} 天`);
+  }
+  if (stats.registeredHours != null) parts.push(`累计登记服务投入 ${stats.registeredHours} 小时（客户：${customer.name}）`);
+  return parts.join('；');
 }
 
 export function caseFingerprint(customer: Customer | string, timeline: SourceEvent[], hemory: SourceEvent[] = [], evidence: EvidenceInput[] = [],
@@ -555,21 +736,43 @@ export function caseFingerprint(customer: Customer | string, timeline: SourceEve
   return hash(JSON.stringify({ version: CASE_GENERATION_VERSION, profile, events, evidence: evidenceParts, risk: riskState, opportunities: opportunityState }));
 }
 
+/** stats 证据条目 ID（claim_evidence 引用它的 source_ref）。 */
+export const CASE_STATS_SOURCE_ID = 'stats:delivery';
+
 function buildContextSnapshot(input: CasePromptInput): CaseContextSnapshot {
   const generatedAt = new Date().toISOString();
   const internalDigest = caseFingerprint(input.customer, input.timeline, input.hemory, input.evidence, input.risk, input.opportunities);
+  const stats = caseDeliveryStats(input);
+  const statsText = deliveryStatsText(stats, input.customer);
+  // 档案摘录用自然语言而非 JSON.stringify：摘录校验要求「excerpt 逐字是来源原文的子串」，
+  // JSON 化的键值串（带引号逗号）模型几乎不可能逐字抄对，背景主张会稳定校验失败（真实验收教训）。
+  const profileText = [
+    `客户名称：${input.customer.name}`,
+    input.customer.shortName && input.customer.shortName !== input.customer.name ? `简称：${input.customer.shortName}` : '',
+    input.customer.industry ? `行业：${input.customer.industry}` : '',
+    input.customer.usageVersion ? `使用版本：${input.customer.usageVersion}` : '',
+    input.customer.products?.length ? `产品：${input.customer.products.join('、')}` : '',
+  ].filter(Boolean).join('；');
   const sources: CaseEvidenceSnapshotItem[] = [{
     id: `customer:${input.customer.id}`, source_system: 'crm', source_type: 'customer_profile', external_id: input.customer.id,
     occurred_at: input.customer.updatedAt, synced_at: input.customer.syncedAt ?? input.customer.updatedAt,
-    title: input.customer.name, excerpt: JSON.stringify(customerPublicProfile(input.customer)), url: '', payload_hash: hash(JSON.stringify(customerPublicProfile(input.customer))),
+    title: input.customer.name, excerpt: profileText, url: '', payload_hash: hash(profileText),
   }];
-  const seen = new Set<string>(sources.map((item) => item.id));
+  if (statsText) {
+    // 交付事实统计以独立证据条目进入来源目录：数字由服务端预计算，claim_evidence 可直接引用其原文。
+    sources.push({ id: CASE_STATS_SOURCE_ID, source_system: 'internal', source_type: 'stats:delivery', external_id: CASE_STATS_SOURCE_ID,
+      occurred_at: generatedAt, synced_at: generatedAt, title: '交付事实统计（服务端预计算）', excerpt: statsText, url: '',
+      payload_hash: hash(statsText) });
+  }
+  const seen = new Set(sources.map((item) => item.id));
   for (const event of [...input.timeline, ...input.hemory]) {
     if (seen.has(event.id)) continue;
     seen.add(event.id);
-    const speakerLines = event.sourceSystem === 'hemory' ? fragmentSpeechLines(event).map((line) => ({
-      speaker: line.speaker, speaker_role: caseSpeakerRole(line.speaker, input.customer.csmName), text: line.text,
-    })) : undefined;
+    // speaker_lines 只保留「角色:行数」摘要行——完整逐句文本已在 communications（注入的片段）与
+    // 摘录校验的第二查找源中，catalog 再放一份全量转写会让大客户上下文重复注入数万字符。
+    const speakerLines = event.sourceSystem === 'hemory'
+      ? speakerRoleSummaryLines(event, input.customer.csmName)
+      : undefined;
     sources.push({ id: event.id, source_system: event.sourceSystem, source_type: event.sourceType, external_id: event.externalId,
       occurred_at: event.occurredAt, synced_at: event.syncedAt, title: event.title.slice(0, 160), excerpt: eventExcerpt(event),
       url: event.url ?? '', payload_hash: event.payloadHash, status_category: statusCategory(event), speaker_lines: speakerLines });
@@ -595,8 +798,13 @@ function buildContextSnapshot(input: CasePromptInput): CaseContextSnapshot {
 function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): string {
   const { customer, timeline, hemory, evidence, risk, opportunities, webContext } = input;
   const confirmed = timeline.filter((event) => event.attributionStatus === 'confirmed');
-  const records = confirmed
-    .filter((event) => event.sourceSystem !== 'hemory' && event.sourceType !== 'crm_followup')
+  // records 预算：全量事件清单无上限时大客户（数百条）会稀释注意力——保最早 1/6 + 最近 5/6。
+  const recordEvents = confirmed
+    .filter((event) => event.sourceSystem !== 'hemory' && event.sourceType !== 'crm_followup');
+  const keptRecords = recordEvents.length <= MAX_CASE_RECORDS
+    ? recordEvents
+    : [...recordEvents.slice(0, Math.max(1, Math.floor(MAX_CASE_RECORDS / 6))), ...recordEvents.slice(-(MAX_CASE_RECORDS - Math.max(1, Math.floor(MAX_CASE_RECORDS / 6))))];
+  const records = keptRecords
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), system: event.sourceSystem, type: event.sourceType,
       display: event.displayId ?? '', title: event.title.slice(0, 120), status: nestedName(event.payload?.field005) || '', status_category: statusCategory(event) }));
   const delivered = confirmed
@@ -606,6 +814,7 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
     .slice(0, MAX_DELIVERED_RECORDS);
   const followups = confirmed
     .filter((event) => event.sourceType === 'crm_followup')
+    .slice(-MAX_CASE_FOLLOWUPS)
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), title: event.title.slice(0, 120),
       content: String(event.payload?.active_record_content ?? event.title).slice(0, 400) }));
   const fragments = selectFragments(hemory);
@@ -617,9 +826,11 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
     transcript: textOf(event).slice(0, perFragment),
   }));
   const signals = caseFragmentSignals(hemory, customer.csmName);
+  const statsSource = snapshot.sources.find((item) => item.id === CASE_STATS_SOURCE_ID);
   return JSON.stringify({
     customer: { source_ref: `customer:${customer.id}`, ...customerPublicProfile(customer) },
-    evidence_signals: evidence.map((item) => ({ source_ref: item.id, kind: item.kind, label: item.label,
+    delivery_stats: statsSource ? { source_ref: CASE_STATS_SOURCE_ID, facts: statsSource.excerpt } : undefined,
+    evidence_signals: evidence.slice(0, MAX_CASE_EVIDENCE).map((item) => ({ source_ref: item.id, kind: item.kind, label: item.label,
       detail: item.detail.slice(0, 200), occurred_at: item.occurredAt })),
     communications,
     records,
@@ -645,33 +856,38 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
 }
 
 async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, onProgress?: (text: string) => void): Promise<ParsedCaseContent> {
+  // 摘录校验的第二查找源：catalog 的 hermory 条目只带角色摘要，逐句定位回退到注入片段正文。
+  const communications = caseCommunicationSources(input);
   const prompt = `为客户「${input.customer.name}」生成一篇客户成功案例草稿。这份案例经 CSM 审核后会用于对外展示与复用，是正式的客户叙事型案例。你只能基于下面提供的上下文证据写作，不执行任何工具或外部写入。\n`
     + `按固定叙事路径输出五个章节，只输出 JSON：\n`
     + `{"title":"...","background":"...","challenges":["..."],"requirements":["..."],"solution":"...","value":["..."],"claim_evidence":[{"section":"background|challenges|requirements|solution|value","claim":"与正文逐字一致的完整主张","source_refs":["上下文中的 source_ref"],"excerpt":"支持该主张的原文摘录","speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}],"unknowns":["..."]}\n`
     + `写作总则（全部章节适用）：\n`
     + `- 客户叙事视角：客户是主角，按「背景 → 痛点/现状/挑战 → 需求/要求 → 解决方案 → 价值」的故事路径组织；不按 CRM、ONES、会议记录等数据来源罗列过程。\n`
     + `- 多个系统中同一件事必须合并为一条叙述，禁止会议流水账与工单流水账。\n`
-    + `- 只写有证据的事实。每个背景/方案段以及每条列表正文都必须在 claim_evidence 中逐字复写并绑定真实 source_ref；禁止引用 allowed_source_refs 之外的 ID。\n`
+    + `- 动笔前先通读 pain_point_signals、value_signals、delivered_records、delivery_stats 与 web_context，按素材充分度决定各章节条数：素材充足时取条数区间上限，素材不足时宁少勿注水；没有把握写入正文的素材收进 unknowns，不得硬凑条目。\n`
+    + `- 只写有证据的事实。每个背景/方案段以及每条列表正文都必须在 claim_evidence 中逐字复写并绑定真实 source_ref；claim 字段是对正文整段/整条的逐字符复制（不是摘要、不得增删或改写任何一个字），background 与 solution 整段作为一条 claim 完整复制。禁止引用 allowed_source_refs 之外的 ID。摘录（excerpt）必须从某一个来源（source_refs 中列出的任一来源）的 title/excerpt/事实原文中连续逐字截取，不得自行改写、不得拼接多个来源的片段、不得跨来源拼凑——正文若综合了多个来源的信息，excerpt 只需截取其中最能支撑该主张的那一个来源的连续原文（如 delivery_stats 的 facts 原文、customer 档案的「行业：…」句、某一条 web snippet）。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
-    + `- 价值纪律：优先使用已确认的量化结果；没有量化证据时只写有证据支持的定性价值，禁止虚构 ROI、百分比或任何数字。\n`
-    + `- 未确认内容只能写入 unknowns，绝不在正文写「待确认」「待补充」「unknown」或其他占位词。\n`
-    + `- 正文禁止出现 unknown 等占位词、内部系统名（Hemory、CRM）、风险评级/评分、工时统计、行动事项等内部信息，禁止出现联系人姓名、联系方式、合同金额，不得泄露其他客户或其他项目的信息。\n`
+    + `- 交付统计（delivery_stats）的数字由服务端从交付记录预计算，可直接引用（引用 source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其原文），但只可作事实陈述（如累计完成 N 项、合作 N 个月、解决时长中位 N 天）；不得自行计算任何提升百分比或完成率。若某类「已完成数」不足「总数」的一半，只写已完成的部分，不在对外正文中暴露未完成口径。\n`
+    + `- 价值纪律：优先使用已确认的量化结果（含 delivery_stats 中的交付事实）；没有量化证据时只写有证据支持的定性价值，禁止虚构 ROI、百分比或任何数字。\n`
+    + `- 未确认内容只能写入 unknowns，绝不在正文写「待确认」「待补充」「unknown」或其他占位词。unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」（如「量化收益数据待补：建议向客户项目负责人索取上线前后对比数据」）。\n`
+    + `- 正文禁止出现 unknown 等占位词、内部系统名（Hemory、CRM）、风险评级/评分、工时统计、行动事项等内部信息，禁止出现联系人姓名、联系方式、合同金额，不得泄露其他客户或其他项目的信息。delivery_stats 中的工时投入不得写成客户价值，只能作为背景里的服务投入事实。\n`
     + `- internal_business_review 只用于发现需线下复核的内部缺口并写入 unknowns，绝不能进入正文或 claim_evidence。\n`
     + `- 禁止生成直接或间接的虚构客户引语；只有 speakerRole=customer 的逐句证据才能概括为客户反馈，且正文不加引号。CSM/unknown 说话人的判断只能进 unknowns。\n`
-    + `- 所有数字、比例、效率、成本、时长和规模必须能在 claim_evidence 引用的原文中找到，不得自行计算提升百分比。\n`
+    + `- 所有数字、比例、效率、成本、时长和规模必须能在 claim_evidence 引用的原文（含 delivery_stats 的 facts 原文）中找到，不得自行计算提升百分比。\n`
     + `章节路由判定（关键词只是线索，必须同时看 speakerRole、timeScope、statusCategory、来源和上下文）：\n`
-    + `- 背景：行业、业务、组织、产品线、项目范围、合作起点、建设目标；只取客户档案、早期沟通或可核验公开资料。\n`
+    + `- 背景：行业、业务、组织、产品线、项目范围、合作起点、建设目标；只取客户档案、早期沟通记录，以及 web_context 中可信的公开信息（招投标、制度要求、公开报道等）。\n`
     + `- 痛点：无法、困难、低效、耗时、人工/表格、孤岛、分散、不透明、重复、协作不畅、缺少规范/追溯；必须是合作前或当前问题，已解决事项不再写成现状。\n`
     + `- 需求：希望、需要、必须、期望、要求、支持、集成、迁移、权限、安全、合规、验收、SLA、时间节点；必须是客户明确诉求或正式招采要求。\n`
     + `- 方案：已建立/配置/部署/迁移/打通/培训/交付/完成上线；ONES 记录必须 status_category=done，讨论、计划和待办不得写成已交付。\n`
     + `- 价值：提升、缩短、减少、节省、统一、透明、规范、可追溯、覆盖、采用、满意、认可；必须来自客户说话人或可复核指标，并发生在方案落地之后，泛泛「很好」不能单独成项。\n`
     + `冲突示例：「希望 9 月上线」属于需求；「尚未上线」不属于方案；「已完成上线」属于方案；「全面使用」只有真实采用证据时才属于价值；CSM 说「效率提升」只进入 unknowns。\n`
     + `章节要求：\n`
-    + `1. background（客户背景）：一段连贯叙述——客户所处行业、业务概况、与 ONES 合作的起点与目标。依据客户档案、早期沟通记录，以及 web_context 中可信的公开信息（招投标、制度要求、公开报道等）。\n`
-    + `2. challenges（痛点、现状与挑战）：3~6 条，客户在合作前或合作中面临的核心业务痛点与现状困难。重点从 pain_point_signals 中客户原话表达的痛点线索（系统未打通、效率低、表格/人工管理、信息不透明、协作不畅等）分析整理并归纳为主题；信号只是线索，须结合上下文甄别（如转述他人情形、已解决的历史问题不写入）；工单/建议/运维记录作为补充佐证。\n`
-    + `3. requirements（需求与要求）：2~6 条，客户明确提出的需求与要求（功能诉求、交付要求、服务标准）；有明确时间节点的要求保留节点；web_context 中可信的招投标/制度类公开信息可作为佐证。\n`
-    + `4. solution（解决方案）：一段连贯叙述，以「我们为客户提供了什么方案」为主线——从 delivered_records（已完成交付）与会议讨论中提炼方案级举措（如建立需求池/需求管理机制、提供资源管理、二次开发打通既有系统、开发定制插件、搭建知识库等），按举措组织自然段，说明每项举措解决什么问题；不得写成功能点罗列、按日期排列的事件流水或需求清单；每一项举措都必须有交付记录或会议证据支撑，不得虚构。\n`
-    + `5. value（价值与成效）：2~6 条，客户获得的已确认价值。重点从 value_signals 中客户的正面反馈表述（如对效率提升、流程改善的认可）与 signals 中的成果反馈分析总结；量化结果优先（上线时间、效率改善、问题下降等），无量化写有证据支持的定性价值，可适度转述客户反馈但不得出现人名；禁止虚构数字。\n`
+    + `1. background（客户背景）：一段 150~400 字的连贯叙述——客户所处行业与业务概况、与 ONES 合作的起点与目标，可自然融入合作时长与服务投入（delivery_stats）。依据客户档案（customer 来源，其 excerpt 为「行业：…；使用版本：…」等自然语言句，摘录从中逐字截取）、早期沟通记录，以及 web_context 中可信的公开信息（招投标、制度要求、公开报道等）。\n`
+    + `2. challenges（痛点、现状与挑战）：3~6 条，客户在合作前或合作中面临的核心业务痛点与现状困难，每条 30~120 字且包含「痛点现象 + 具体场景或影响」两层，禁止一句话条目。重点从 pain_point_signals 中客户原话表达的痛点线索（系统未打通、效率低、表格/人工管理、信息不透明、协作不畅等）分析整理并归纳为主题；信号只是线索，须结合上下文甄别（如转述他人情形、已解决的历史问题不写入）；工单/建议/运维记录作为补充佐证。\n`
+    + `3. requirements（需求与要求）：2~6 条，客户明确提出的需求与要求（功能诉求、交付要求、服务标准），每条 30~120 字；有明确时间节点的要求保留节点；web_context 中可信的招投标/制度类公开信息可作为佐证。\n`
+    + `4. solution（解决方案）：以「我们为客户提供了什么方案」为主线的连贯叙述，全文 250~800 字、2~5 个自然段——从 delivered_records（已完成交付）与会议讨论中提炼方案级举措（如建立需求池/需求管理机制、提供资源管理、二次开发打通既有系统、开发定制插件、搭建知识库等），每项举措一段（80~250 字）说明其内容与所解决的问题，可引用 delivery_stats 的交付完成量佐证规模；不得写成功能点罗列、按日期排列的事件流水或需求清单；每一项举措都必须有交付记录或会议证据支撑，不得虚构。\n`
+    + `5. value（价值与成效）：2~6 条，客户获得的已确认价值，每条 30~150 字。重点从 value_signals 中客户的正面反馈表述（如对效率提升、流程改善的认可）与 signals 中的成果反馈分析总结；量化结果优先（上线时间、效率改善、问题下降等，含 delivery_stats 的交付事实），无量化写有证据支持的定性价值，可适度转述客户反馈但不得出现人名；禁止虚构数字。\n`
+    + `篇幅契约是质量要求而非硬性字符数：上下文素材不足以支撑下限时允许略低，但禁止明显低于下限的空泛正文；超出上限的冗长堆砌同样不合格。\n`
     + `内部字段（不进入正文）：claim_evidence 为逐条事实依据；unknowns 为 CSM 需补充确认的关键信息清单。\n`
     + `title：案例标题，概括客户从痛点到价值的实践，也可朴素地写「${input.customer.name}客户成功案例」。\n`
     + `${onesAsrAliasRule()}该订正适用于全部正文。\n`
@@ -683,11 +899,13 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
   const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
   let lastError = '模型未返回可解析的案例 JSON';
   for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
+    // 输出预算：五章正文 + claim_evidence 的 JSON 常达 8k+ 中文字符，reasoning token 与正文共享
+    // completion 上限——服务端默认 8k 会截断成 stopReason=length（真实验收教训），显式给大预算。
     const response = await completeModelWithProgress(runtime, {
       systemPrompt: '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined);
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: CASE_MODEL_MAX_TOKENS, timeoutMs: 180_000 });
     if (response.stopReason === 'error') {
       lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_MODEL_ATTEMPTS) {
@@ -698,8 +916,11 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     }
     const value = cleanJson(extractText(response.content));
     if (value) {
-      try { return parseCaseContent(value, { requirePublic: true, allowedRefs: new Set(snapshot.sources.map((item) => item.id)), sources: snapshot.sources }); }
-      catch (error) { lastError = `模型案例契约不合格（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${(error as Error).message}`; }
+      try { return parseCaseContent(value, { requirePublic: true, allowedRefs: new Set(snapshot.sources.map((item) => item.id)), sources: snapshot.sources, communications }); }
+      catch (error) {
+        lastError = `模型案例契约不合格（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${(error as Error).message}`;
+        onProgress?.(lastError);
+      }
     } else {
       lastError = `模型未返回可解析的案例 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
     }
@@ -709,6 +930,120 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     }
   }
   throw new Error(lastError);
+}
+
+/** 素材覆盖度：关键素材被 claim_evidence 实际引用的比例（诊断生成是否浪费素材，非正确性判定）。 */
+export interface CaseCoverage {
+  delivered: { total: number; cited: number };
+  valueSignals: { total: number; cited: number };
+  painSignals: { total: number; cited: number };
+  authoritativeWeb: { total: number; cited: number };
+}
+
+/** 补写触发阈值（从严）：单一素材池引用率过低且样本足够多才补写；单边聚焦是正常写作不算浪费。 */
+const COVERAGE_DELIVERED_MIN = 5;
+const COVERAGE_DELIVERED_RATIO = 1 / 3;
+const COVERAGE_VALUE_MIN = 4;
+const COVERAGE_VALUE_RATIO = 1 / 4;
+
+export function caseCoverage(content: { claim_evidence: Array<{ source_refs: string[] }> }, input: CasePromptInput): CaseCoverage {
+  const cited = new Set(content.claim_evidence.flatMap((item) => item.source_refs));
+  const confirmed = input.timeline.filter((event) => event.attributionStatus === 'confirmed');
+  const deliveredTotal = confirmed.filter((event) => event.sourceSystem === 'ones' && isDeliveredOnesEvent(event)).map((event) => event.id);
+  const signals = caseFragmentSignals(input.hemory, input.customer.csmName);
+  const authoritativeWeb = (input.webContext?.results ?? []).filter((item) => item.sourceTier === 'customer_official' || item.sourceTier === 'government_procurement' || item.sourceTier === 'official').map((item) => item.id);
+  const count = (ids: string[]) => ({ total: ids.length, cited: ids.filter((id) => cited.has(id)).length });
+  return { delivered: count(deliveredTotal), valueSignals: count(signals.values.map((item) => item.fragment_id)),
+    painSignals: count(signals.painPoints.map((item) => item.fragment_id)), authoritativeWeb: count(authoritativeWeb) };
+}
+
+/** 覆盖率是否低到值得追加一次「补充完善」调用（从严阈值：只在主要素材池大量闲置时触发）。 */
+export function coverageNeedsEnrichment(coverage: CaseCoverage): boolean {
+  const deliveredLow = coverage.delivered.total > COVERAGE_DELIVERED_MIN
+    && coverage.delivered.cited < coverage.delivered.total * COVERAGE_DELIVERED_RATIO;
+  const valueLow = coverage.valueSignals.total > COVERAGE_VALUE_MIN
+    && coverage.valueSignals.cited < coverage.valueSignals.total * COVERAGE_VALUE_RATIO;
+  return deliveredLow || valueLow;
+}
+
+/** 覆盖率的一行人类可读描述（进度列/CLI 共用）。 */
+export function coverageSummary(coverage: CaseCoverage): string {
+  return `素材覆盖率：交付记录 ${coverage.delivered.cited}/${coverage.delivered.total}`
+    + `，价值信号 ${coverage.valueSignals.cited}/${coverage.valueSignals.total}`
+    + `，痛点信号 ${coverage.painSignals.cited}/${coverage.painSignals.total}`
+    + `，权威公开资料 ${coverage.authoritativeWeb.cited}/${coverage.authoritativeWeb.total}`;
+}
+
+/** 未被引用的关键素材清单（补写 prompt 注入；只列主要池，避免清单本身过长）。 */
+function uncoveredMaterialList(content: { claim_evidence: Array<{ source_refs: string[] }> }, input: CasePromptInput, snapshot: CaseContextSnapshot): string[] {
+  const cited = new Set(content.claim_evidence.flatMap((item) => item.source_refs));
+  const sourceMap = new Map(snapshot.sources.map((item) => [item.id, item]));
+  const confirmed = input.timeline.filter((event) => event.attributionStatus === 'confirmed');
+  const items: string[] = [];
+  for (const event of confirmed.filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item))) {
+    if (cited.has(event.id)) continue;
+    items.push(`- [已交付记录] ${event.occurredAt.slice(0, 10)} ${event.title.slice(0, 80)}（source_ref: ${event.id}）`);
+  }
+  const signals = caseFragmentSignals(input.hemory, input.customer.csmName);
+  for (const signal of signals.values) {
+    if (cited.has(signal.fragment_id)) continue;
+    items.push(`- [客户正面反馈] ${signal.date} ${signal.theme}：${signal.excerpt.slice(0, 80)}（source_ref: ${signal.fragment_id}）`);
+  }
+  for (const item of items) {
+    const ref = item.match(/source_ref: (\S+?)）/)?.[1];
+    if (!ref || !sourceMap.has(ref)) return items; // 兜底：来源不在 catalog 时不注入清单
+  }
+  return items;
+}
+
+/**
+ * 追加一次「补充完善」生成：把未引用素材清单反馈给模型重写一稿。
+ * 同样过全套公开契约校验；失败保留第一稿（返回 null 由调用方降级），不因补写失败判任务失败。
+ */
+async function enrichCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, first: ParsedCaseContent,
+  uncovered: string[], onProgress?: (text: string) => void): Promise<ParsedCaseContent | null> {
+  const communications = caseCommunicationSources(input);
+  const basePrompt = `为客户「${input.customer.name}」补充完善客户成功案例草稿。这是第二遍生成：第一稿已通过契约校验，但以下关键素材未被引用，说明案例内容还不够充实。\n`
+    + `未引用素材清单（全部真实存在，source_ref 可直接引用）：\n${uncovered.slice(0, 40).join('\n')}\n`
+    + `要求：\n`
+    + `- 在第一稿基础上充实内容：优先把上述素材中有价值的内容并入对应章节（已交付记录进 solution、客户正面反馈进 value），并为其新增 claim_evidence（claim 与正文逐字一致、摘录取素材原文）。\n`
+    + `- 已合格且与素材无关的章节内容保持第一稿原文，不为了引用而引用、不堆砌清单；确实无价值的素材允许继续不引用。\n`
+    + `- 输出完整的五章 JSON（与第一稿相同的 schema），不是增量补丁。\n`
+    + `- 第一稿正文：\n${JSON.stringify({ title: first.title, background: first.background, challenges: first.challenges, requirements: first.requirements, solution: first.solution, value: first.value })}\n`
+    + `上下文：${renderContext(input, snapshot)}`;
+  const MAX_ATTEMPTS = 2;
+  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  let lastError = '补充完善未返回可解析的案例 JSON';
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await completeModelWithProgress(runtime, {
+      systemPrompt: '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。',
+      messages: [{ role: 'user', content: basePrompt, timestamp: Date.now() }],
+      tools: [],
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: CASE_MODEL_MAX_TOKENS, timeoutMs: 180_000 });
+    if (response.stopReason === 'error') {
+      lastError = `补充完善模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      continue;
+    }
+    const value = cleanJson(extractText(response.content));
+    if (value) {
+      try {
+        const refined = parseCaseContent(value, { requirePublic: true, allowedRefs: new Set(snapshot.sources.map((item) => item.id)), sources: snapshot.sources, communications });
+        // 补写稿必须真的更充实（引用素材数不少于第一稿），否则视为无效补写、保留第一稿。
+        const citeCount = (content: ParsedCaseContent) => new Set(content.claim_evidence.flatMap((item) => item.source_refs)).size;
+        if (citeCount(refined) >= citeCount(first)) return refined;
+        lastError = '补充完善稿引用的证据不多于第一稿，弃用';
+      } catch (error) {
+        lastError = `补充完善契约不合格（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${(error as Error).message}`;
+        onProgress?.(lastError);
+      }
+    } else {
+      lastError = `补充完善未返回可解析的案例 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+    }
+    if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+  onProgress?.(`${lastError}，保留第一稿`);
+  return null;
 }
 
 /**
@@ -731,7 +1066,12 @@ const CASE_INTERNAL_EVIDENCE_PATTERNS: Array<{ pattern: RegExp; label: string }>
 ];
 
 export function caseContentWarnings(draft: CaseDraft): string[] {
-  const texts = caseSectionTexts(draft.fields);
+  return caseTextsContentWarnings(draft.title, draft.fields);
+}
+
+/** 残留检测核心（标题 + 五段文本），caseContentWarnings 与写回护栏 caseNarrativeWarnings 共用。 */
+function caseTextsContentWarnings(title: string, fields: Record<string, unknown>): string[] {
+  const texts = caseSectionTexts(fields);
   const textsByKey: Record<keyof CaseNarrativeFields, string[]> = {
     background: [texts.background],
     challenges: texts.challenges,
@@ -742,14 +1082,50 @@ export function caseContentWarnings(draft: CaseDraft): string[] {
   const warnings: string[] = [];
   for (const { pattern, label } of CASE_INTERNAL_EVIDENCE_PATTERNS) {
     const hits = [
-      ...(pattern.test(draft.title) ? ['案例标题'] : []),
+      ...(pattern.test(title) ? ['案例标题'] : []),
       ...CASE_SECTIONS
-      .filter((section) => (textsByKey[section.key] ?? []).some((text) => pattern.test(text)))
-      .map((section) => section.label),
+        .filter((section) => (textsByKey[section.key] ?? []).some((text) => pattern.test(text)))
+        .map((section) => section.label),
     ];
     if (hits.length) warnings.push(`客户版正文检出内部信息「${label}」（${hits.join('、')}），请确认已转换为面向客户的表达后再发布`);
   }
   return warnings;
+}
+
+/**
+ * 写回护栏（非阻断）：对话精修与结构化编辑只做字段合并，没有生成路径的逐字校验——
+ * 这里检查明显异常的编辑结果（条目数失控/单条超长/内部信息残留/占位词），命中不阻止保存，
+ * 只通过 API 响应返回 warnings 交给 CSM 复核。
+ */
+export function caseNarrativeWarnings(fields: Record<string, unknown>): string[] {
+  const texts = caseSectionTexts(fields);
+  const warnings: string[] = [];
+  const listSections: Array<{ key: 'challenges' | 'requirements' | 'value'; label: string }> = [
+    { key: 'challenges', label: '痛点、现状与挑战' },
+    { key: 'requirements', label: '需求与要求' },
+    { key: 'value', label: '价值与成效' },
+  ];
+  for (const section of listSections) {
+    const items = texts[section.key];
+    if (items.length > CASE_LIST_ITEM_LIMIT) warnings.push(`「${section.label}」条目数 ${items.length} 超过 ${CASE_LIST_ITEM_LIMIT} 条，请确认不是编辑异常`);
+    const overlong = items.filter((item) => item.length > CASE_ITEM_MAX_CHARS).length;
+    if (overlong) warnings.push(`「${section.label}」有 ${overlong} 条超过 ${CASE_ITEM_MAX_CHARS} 字，请确认适合对外展示`);
+  }
+  for (const [label, text] of [['客户背景', texts.background], ['解决方案', texts.solution]] as const) {
+    if (text.length > CASE_ITEM_MAX_CHARS * 4) warnings.push(`「${label}」超过 ${CASE_ITEM_MAX_CHARS * 4} 字，请确认适合对外展示`);
+  }
+  if (texts.background || texts.solution || texts.challenges.length || texts.requirements.length || texts.value.length) {
+    const pseudo: Array<{ key: keyof CaseNarrativeFields; label: string }> = [
+      { key: 'background', label: '客户背景' }, { key: 'challenges', label: '痛点、现状与挑战' },
+      { key: 'requirements', label: '需求与要求' }, { key: 'solution', label: '解决方案' }, { key: 'value', label: '价值与成效' },
+    ];
+    for (const section of pseudo) {
+      const items = typeof texts[section.key] === 'string' ? [texts[section.key] as unknown as string] : texts[section.key] as string[];
+      if (items.some((item) => /待确认|待补充|\bunknown\b/i.test(item))) warnings.push(`「${section.label}」包含待确认/待补充占位词，请改为有证据的表述或移入待确认清单`);
+    }
+    warnings.push(...caseTextsContentWarnings('', fields));
+  }
+  return [...new Set(warnings)];
 }
 
 function contextSnapshotOf(draft: CaseDraft): CaseContextSnapshot | null {
@@ -840,6 +1216,10 @@ export function caseQualityReview(draft: CaseDraft, options: { currentInternalDi
   }
   for (const name of options.otherCustomerNames ?? []) {
     if (name && name.length >= 3 && (draft.title.includes(name) || visibleClaims.some((item) => item.text.includes(name)))) warnings.push(`正文疑似包含其他客户名称「${name}」`);
+  }
+  // 正文引用了服务端交付统计（stats:delivery）时提示 CSM 确认对外披露口径（数字本身是事实，披露与否需人拍板）。
+  if (claims.some((claim) => claim.source_refs.includes(CASE_STATS_SOURCE_ID))) {
+    warnings.push('正文引用了服务端预计算的交付统计数字，请确认客户允许对外披露该口径');
   }
   warnings.push('公开发布前请由 CSM 线下确认客户名称、事实数据和客户反馈引用已获授权');
   const unique = [...new Set(warnings)];
@@ -943,6 +1323,19 @@ export class CaseService {
       let content: ParsedCaseContent;
       try { content = await proposeCaseWithModel(this.runtime, promptInput, snapshot, report_); }
       catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
+      // 素材覆盖度诊断 + 从严阈值自动补写：主要素材池（已交付记录/客户正面反馈）大量闲置时
+      // 追加一次「补充完善」调用；补写失败保留第一稿，不因补写失败判任务失败。
+      const coverage = caseCoverage(content, promptInput);
+      let enriched = false;
+      if (coverageNeedsEnrichment(coverage)) {
+        const uncovered = uncoveredMaterialList(content, promptInput, snapshot);
+        if (uncovered.length) {
+          report_(`${coverageSummary(coverage)}——关键素材闲置较多，自动补充完善中…`);
+          const refined = await enrichCaseWithModel(this.runtime, promptInput, snapshot, content, uncovered, report_);
+          if (refined) { content = refined; enriched = true; }
+        }
+      }
+      const finalCoverage = enriched ? caseCoverage(content, promptInput) : coverage;
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const evidenceRefs = [...new Set(content.claim_evidence.flatMap((item) => item.source_refs))];
       const fields: Record<string, unknown> = {
@@ -950,6 +1343,7 @@ export class CaseService {
         background: content.background, challenges: content.challenges, requirements: content.requirements,
         solution: content.solution, value: content.value, claim_evidence: content.claim_evidence,
         context_snapshot: snapshot,
+        coverage: { ...finalCoverage, enriched },
       };
       if (content.unknowns?.length) fields.unknowns = content.unknowns;
       // 检索审计快照：不渲染进正文，case show --json 可见生成时用了哪些公开信息。
@@ -957,7 +1351,7 @@ export class CaseService {
       const draft = this.db.createCaseDraft(customer.id, content.title ?? `${customer.name}客户成功案例`, fields, evidenceRefs,
         { fingerprint: snapshot.digest, generator });
       this.db.updateDraftJob(jobId, 'succeeded');
-      this.db.audit('agent', 'generate_case_draft', 'case_draft', draft.id, { customerId: customer.id, generator, fingerprint: job.fingerprint });
+      this.db.audit('agent', 'generate_case_draft', 'case_draft', draft.id, { customerId: customer.id, generator, fingerprint: job.fingerprint, coverage: finalCoverage, enriched });
     } catch (error) {
       this.db.updateDraftJob(jobId, 'failed', (error as Error).message);
     } finally {
@@ -984,6 +1378,8 @@ export class CaseService {
     // 生成时联网检索的条数（审计快照，web_search 字段无检索结果时 count 亦如实为 0）。
     const webSearch = draft.fields?.web_search as CaseWebSearchContext | undefined;
     if (webSearch) summary.push({ system: 'web', count: webSearch.results.length, lastSyncedAt: null });
+    // 服务端预计算的交付事实统计条目（v4 起注入，claim_evidence 可引用）。
+    if (contextSnapshotOf(draft)?.sources.some((item) => item.id === CASE_STATS_SOURCE_ID)) summary.push({ system: 'stats', count: 1, lastSyncedAt: null });
     const qualityReview = caseQualityReview(draft, {
       currentInternalDigest: this.internalDigest(customer, context),
       otherCustomerNames: this.db.listCustomers().filter((item) => item.id !== draft.customerId).flatMap((item) => [item.name, item.shortName ?? '']),

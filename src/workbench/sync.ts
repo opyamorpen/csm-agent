@@ -1052,7 +1052,8 @@ export class PortfolioSyncService {
         recommendedAction: '结合公开动态与客户确认扩张计划，评估增购切入点。' });
     }
 
-    const delivered = this.db.listTimeline(customerId, 200).filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item));
+    // 案例候选判定用全量事件口径（与生成管线 listCaseContextEvents 一致）：200 条分页窗口会漏掉早期交付记录。
+    const delivered = this.db.listCaseContextEvents(customerId).filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item));
     const outcomes = evidence.filter((item) => item.kind === 'outcome');
     const eligible = delivered.length > 0 && outcomes.length > 0;
     this.db.setCaseCandidate(customerId, eligible, eligible ? '存在已完成交付及客户成果反馈' : '需要同时具备完成交付和客户成果反馈',
@@ -1066,13 +1067,20 @@ export function shanghaiDateKey(now = new Date()): string {
 
 export type CaseSpeakerRole = 'customer' | 'csm' | 'unknown';
 
-/** 案例信号的说话人归类：只有明确客户角色才能成为客户声音证据。 */
+/**
+ * 案例信号的说话人归类：只有明确客户角色才能成为客户声音证据。
+ * 说话人代号（speaker_N，转写系统的匿名分轨标记）与「我/我们」视角无法从名字归类为 CSM——
+ * 会议本身是 CSM 与客户的沟通，非 CSM 说话人默认按客户侧处理（宁可放进待甄别也不整段判废，
+ * 真实验收中华大九天 745 事件+speaker_2 代号会议曾让客户声音章节全部无法引用）。
+ */
 export function caseSpeakerRole(speaker: string | null | undefined, csmName?: string | null): CaseSpeakerRole {
   const normalized = String(speaker ?? '').trim();
   if (!normalized) return 'unknown';
   if (csmName?.trim() && normalized === csmName.trim()) return 'csm';
   if (/^(?:客户|甲方|用户|对方|贵方)(?:\d+|代表|老师)?$/i.test(normalized)) return 'customer';
   if (/(?:CSM|客户成功|ONES|我方|实施|售后|项目组)/i.test(normalized)) return 'csm';
+  if (/^speaker_\d+$/i.test(normalized)) return 'customer';
+  if (normalized === '我' || normalized === '我们') return 'customer';
   return 'unknown';
 }
 

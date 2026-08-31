@@ -21,7 +21,7 @@ import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { WebIntelService } from './workbench/webintel.js';
 import { RISK_RULE_VERSION } from './workbench/risk.js';
-import { CaseService } from './workbench/cases.js';
+import { CaseService, caseNarrativeWarnings } from './workbench/cases.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate, draftEditContract, applyDraftEdits, confirmDraftEditContract, applyConfirmDraftEdits } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
 import { HemorySegmentationService } from './workbench/hemory.js';
@@ -772,9 +772,11 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         }
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
-          const draft = workbench.cases.update(draftId, Number(body.version), typeof body.title === 'string' ? body.title : undefined,
-            isRecord(body.fields) ? body.fields : {});
-          return draft ? json(res, 200, draft) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
+          const fields = isRecord(body.fields) ? body.fields : {};
+          const draft = workbench.cases.update(draftId, Number(body.version), typeof body.title === 'string' ? body.title : undefined, fields);
+          // 写回护栏（非阻断）：编辑结果异常（条目失控/超长/内部残留）时随响应返回 warnings，由 CSM 复核。
+          const warnings = draft ? caseNarrativeWarnings(draft.fields) : [];
+          return draft ? json(res, 200, { ...draft, warnings: warnings.length ? warnings : undefined }) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
         }
         if (req.method === 'POST' && sub === '/publish-preview') {
           const body = await readBody(req);
@@ -1282,7 +1284,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               const updated = workbench.cases.update(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title,
                 pickNarrativeFields(approvedDraft.fields));
               if (!updated) return json(res, 400, { error: '案例草稿更新失败（版本已变化或已发布）' });
-              workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id });
+              // 写回护栏（非阻断）：精修稿异常（条目失控/超长/内部残留）随响应返回，由 CSM 复核。
+              const refineWarnings = caseNarrativeWarnings(updated.fields);
+              workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id, warnings: refineWarnings });
               session.pending.resolve(approvedDraft);
               session.pending = null;
               const refineRecord = session.lastRecordId
@@ -1299,7 +1303,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
                 store.persistRecords();
                 session.lastRecordId = null;
               }
-              return json(res, 200, { ok: true, decided: 'approved', refined: true, draft: updated });
+              return json(res, 200, { ok: true, decided: 'approved', refined: true, draft: updated, warnings: refineWarnings.length ? refineWarnings : undefined });
             }
             const target = runtime.mcp.resolve(approvedDraft.target_tool);
             if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {

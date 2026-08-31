@@ -46,16 +46,23 @@ export function progressSnippet(textTail: string, thinkingTail: string): string 
   return '';
 }
 
-/** 流式调用 + 进度回调；models 无 stream 能力（测试假模型）时回退 complete。 */
+/**
+ * 流式调用 + 进度回调；models 无 stream 能力（测试假模型）时回退 complete。
+ * options 透传给 models.stream/complete：maxTokens 提升输出预算（长 JSON 输出 + reasoning token 共享上限，
+ * 服务端默认 8k 会被截断成 stopReason=length——案例/周报需要显式大预算）；timeoutMs 放宽到 120s
+ * （中继端点大上下文首字节常见 40~60s，pi-ai/undici 默认 10s 连接超时对慢节点过短）。
+ */
 export async function completeModelWithProgress(
   runtime: Runtime,
   context: Parameters<Runtime['models']['complete']>[1],
   onTick?: ModelProgressCallback,
+  options: { maxTokens?: number; timeoutMs?: number } = {},
 ): Promise<Awaited<ReturnType<Runtime['models']['complete']>>> {
+  const request = Object.keys(options).length ? options : undefined;
   if (!onTick || typeof runtime.models.stream !== 'function') {
-    return runtime.models.complete(runtime.model, context);
+    return runtime.models.complete(runtime.model, context, request);
   }
-  const stream = runtime.models.stream(runtime.model, context);
+  const stream = runtime.models.stream(runtime.model, context, request);
   let textChars = 0;
   let textTail = '';
   let thinkingTail = '';

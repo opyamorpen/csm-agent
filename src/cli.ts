@@ -59,8 +59,8 @@ const CLI_CAPABILITIES = [
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/draft-jobs'],
     editableFields: ['title', 'background', 'challenges', 'requirements', 'solution', 'value'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns'],
-    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）' },
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage'],
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；show 输出素材覆盖率（已交付记录/价值信号被正文引用比例）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -431,10 +431,14 @@ function parseObject(input: string, label: string): Record<string, unknown> {
     throw new Error('action 子命令只允许 list/update/complete');
   }
 
-function printCaseDraft(draft: any, markdown = ''): void {
+function printCaseDraft(draft: any, markdown = '', coverage?: any): void {
   console.log(`${draft.title} · ${draft.status === 'published' ? `已发布(${draft.publishedPageId ?? ''})` : `草稿 v${draft.version}`} · ${draft.generator ?? 'unknown'}`);
   // 正文 = 服务端 renderCaseMarkdown 权威渲染的客户版 Markdown（与 Web 复制、Wiki 发布同源）；
   // claim_evidence/context_snapshot/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
+  if (coverage) {
+    const { delivered, valueSignals, painSignals, enriched } = coverage;
+    console.log(`素材覆盖率：交付记录 ${delivered.cited}/${delivered.total} · 价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${enriched ? ' · 已自动补充完善' : ''}`);
+  }
   if (markdown) console.log(`\n${markdown}`);
   console.log(`\n（完整内部证据：csm-agent case show ${draft.id} --json）`);
 }
@@ -461,7 +465,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
           ?? (body.drafts ?? [])[0];
         if (draft) {
           const detail = await request<any>(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
-          printCaseDraft(detail.draft, detail.markdown ?? '');
+          printCaseDraft(detail.draft, detail.markdown ?? '', detail.draft?.fields?.coverage);
         }
       }
       return;
@@ -484,7 +488,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
   if (subcommand === 'show') {
     const body = await request<any>(`/api/case-drafts/${encodeURIComponent(draftId)}`);
     if (jsonOutput) return print(body);
-    printCaseDraft(body.draft, body.markdown ?? '');
+    printCaseDraft(body.draft, body.markdown ?? '', body.draft?.fields?.coverage);
     for (const warning of body.warnings ?? []) console.log(`⚠ ${warning}`);
     return;
   }

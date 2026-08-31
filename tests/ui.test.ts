@@ -1314,6 +1314,14 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(caseCard, /'数据已更新'/);
   assert.match(caseCard, /qualityReview\?\.warnings\?\.length/);
   assert.match(caseCard, /公开检查 \$\{warningCount\} 项/);
+  // 复制 Markdown：与周报卡同款（服务端权威渲染，带 WKWebView execCommand 兜底）。
+  assert.match(caseCard, /'复制 Markdown'/);
+  assert.match(caseCard, /copyText\(current\.markdown/);
+  // 编辑写回护栏：保存/PATCH 响应的 warnings 以弹窗提示（非阻断）。
+  const editCaseSource = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
+  assert.ok(editCaseSource, 'editCase source was not found');
+  assert.match(editCaseSource, /async function afterSave/);
+  assert.match(editCaseSource, /updated\?\.warnings/);
 });
 
 test('cursor ripple fx: theme tokens, silky wake guards, header toggle and load order', () => {

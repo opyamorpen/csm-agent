@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 
@@ -3377,7 +3377,7 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseFragmentSignals, caseQualityReview, caseSectionTexts, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFragmentSignals, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
 function publicCaseModelContent(content: any, prompt: string): any {
@@ -3510,7 +3510,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v3-public-evidence');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v4-rich-narrative');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -3665,6 +3665,22 @@ function segmentWithEvidence(db: WorkbenchDatabase, customerId: string, external
     payload: { recordingId, speakers: ['CSM', '客户'], transcript: lines.map((line, index) => `${index === 0 ? '客户' : 'CSM'}: ${line}`).join('\n'),
       evidence: lines.map((text, index) => ({ spokenAt: occurredAt, speaker: index === 0 ? '客户' : 'CSM', text })) } });
 }
+
+test('workbench: caseSpeakerRole classifies anonymous speaker tracks as customer side', () => {
+  // 转写系统的匿名分轨（speaker_N）与「我/我们」视角：会议是 CSM 与客户的沟通，
+  // 非 CSM 说话人默认客户侧——否则真实会议（华大九天 speaker_2 占多数）客户声音章节全部无法引用。
+  assert.equal(caseSpeakerRole('speaker_2', '赵荣泽'), 'customer');
+  assert.equal(caseSpeakerRole('speaker_10'), 'customer');
+  assert.equal(caseSpeakerRole('我'), 'customer');
+  assert.equal(caseSpeakerRole('我们'), 'customer');
+  assert.equal(caseSpeakerRole('赵荣泽', '赵荣泽'), 'csm');
+  assert.equal(caseSpeakerRole('CSM'), 'csm');
+  assert.equal(caseSpeakerRole('客户'), 'customer');
+  assert.equal(caseSpeakerRole('客户代表'), 'customer');
+  assert.equal(caseSpeakerRole('ONES 实施团队'), 'csm');
+  assert.equal(caseSpeakerRole('张三', '赵荣泽'), 'unknown', '未知名真名保持 unknown 待甄别');
+  assert.equal(caseSpeakerRole(''), 'unknown');
+});
 
 test('workbench: caseFragmentSignals extracts pain/value themes from full fragment text', () => {
   // 前缀填充 300+ 字符把痛点句顶到片段中后部：验证信号扫描的是全文而非 prompt 注入的头部截断。
@@ -3936,6 +3952,243 @@ test('workbench: case web search rejects title-only results, deduplicates URL an
   assert.equal(result.results[1].sourceTier, 'customer_official');
 });
 
+test('workbench: case delivery stats compute delivered facts from confirmed events', () => {
+  const customer = { id: 'crm-st', name: '统计客户' } as any;
+  const event = (id: string, sourceType: string, at: string, payload: Record<string, unknown> = {}): any => ({
+    id, sourceSystem: 'ones', sourceType, externalId: id, displayId: '', title: `记录${id}`, occurredAt: at, syncedAt: at,
+    attributionStatus: 'confirmed', payload, payloadHash: id,
+  });
+  const timeline = [
+    event('e1', 'support_ticket', '2026-01-01T00:00:00Z', { field005: { name: '已完成', category: 'done' }, field009: '2026-01-01 10:00:00', field010: '2026-01-03 10:00:00' }),
+    event('e2', 'support_ticket', '2026-02-01T00:00:00Z', { field005: { name: '已完成', category: 'done' }, field009: '2026-02-01 10:00:00', field010: '2026-02-01 16:00:00' }),
+    event('e3', 'support_ticket', '2026-03-01T00:00:00Z', { field005: { name: '处理中', category: 'in_progress' } }),
+    event('e4', 'suggestion_feedback', '2026-02-10T00:00:00Z', { field005: { name: '已完成', category: 'done' } }),
+    event('e5', 'suggestion_feedback', '2026-02-15T00:00:00Z', { field005: { name: '待处理', category: 'to_do' } }),
+    event('e6', 'private_cloud_instance', '2026-02-20T00:00:00Z', { field005: { name: '运行中', category: 'in_progress' } }),
+    event('e7', 'customer_manhour', '2026-02-25T00:00:00Z', { field019: 25000000 }),
+  ];
+  const stats = caseDeliveryStats({ customer, timeline, hemory: [] });
+  assert.equal(stats.firstConfirmedAt, '2026-01-01');
+  assert.ok(stats.months != null && stats.months >= 6, '合作月数按最早事件推算');
+  const tickets = stats.categories.find((category) => category.source_type === 'support_ticket')!;
+  assert.equal(tickets.total, 3);
+  assert.equal(tickets.done, 2);
+  const suggestions = stats.categories.find((category) => category.source_type === 'suggestion_feedback')!;
+  assert.equal(suggestions.total, 2);
+  assert.equal(suggestions.done, 1);
+  assert.equal(stats.privateCloudInstances, 1);
+  // 解决时效：2 天（e1）与 0.25 天（e2）→ 偶数样本取下中位（0.3 天）、最快 0.3（一位小数舍入）。
+  assert.equal(stats.ticketResolutionDays!.median, 0.3);
+  assert.equal(stats.ticketResolutionDays!.min, 0.3);
+  assert.equal(stats.registeredHours, 250);
+  // 无 ONES 数据的客户：分类全零、时效 null，不产生 stats 事实文本。
+  const empty = caseDeliveryStats({ customer, timeline: [], hemory: [] });
+  assert.equal(empty.firstConfirmedAt, null);
+  assert.equal(empty.ticketResolutionDays, null);
+});
+
+test('workbench: case generation injects delivery stats as citable source and coverage field persists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-stats-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    // 档案摘录是自然语言句（真实验收教训：JSON.stringify 的键值串模型无法逐字抄写，背景主张稳定校验失败）。
+    const profileSource = (draft.fields as any).context_snapshot.sources.find((item: any) => String(item.id).startsWith('customer:'));
+    assert.ok(profileSource, '档案来源必须进快照');
+    assert.doesNotMatch(profileSource.excerpt, /^\{/, '档案摘录不得是 JSON 串');
+    assert.match(profileSource.excerpt, /客户名称：/);
+    // stats 证据条目进入来源目录且 prompt 说明其引用规则。
+    assert.ok(capturedPrompt.includes('"delivery_stats"'), '上下文须含交付统计块');
+    assert.ok(capturedPrompt.includes('stats:delivery'), 'prompt 须说明 stats 引用 source_ref');
+    assert.match(capturedPrompt, /只可作事实陈述/);
+    assert.match(capturedPrompt, /不得自行计算任何提升百分比或完成率/);
+    assert.ok((draft.fields as any).context_snapshot.sources.some((item: any) => item.id === 'stats:delivery'), 'stats 条目固化进快照');
+    // coverage 内部字段持久化（样本小不触发补写：enriched=false）。
+    const coverage = (draft.fields as any).coverage;
+    assert.ok(coverage, 'coverage 必须落库');
+    assert.equal(coverage.enriched, false);
+    assert.ok(coverage.delivered.total >= 1, '交付记录计入覆盖率分母');
+    // 篇幅契约进入 prompt。
+    assert.match(capturedPrompt, /150~400 字/);
+    assert.match(capturedPrompt, /250~800 字/);
+    assert.match(capturedPrompt, /30~120 字/);
+    assert.match(capturedPrompt, /篇幅契约是质量要求而非硬性字符数/);
+    // 摘录抄写规则（防「摘录未在引用证据中找到」复发）。
+    assert.match(capturedPrompt, /连续逐字截取/);
+    // detail 的 contextSummary 含 stats 行。
+    const detail = service.detail(draft.id)!;
+    assert.ok(detail.contextSummary.some((entry) => entry.system === 'stats'));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case coverage thresholds gate enrichment and uncovered materials feed the second pass', async () => {
+  // 覆盖度阈值：delivered>5 且引用 <1/3，或 value 信号 >4 且引用 <1/4。
+  const cited = (delivered: number, values: number) => ({
+    delivered: { total: delivered, cited: 0 }, valueSignals: { total: values, cited: 0 },
+    painSignals: { total: 0, cited: 0 }, authoritativeWeb: { total: 0, cited: 0 },
+  });
+  assert.equal(coverageNeedsEnrichment(cited(6, 0)), true, '交付记录 6 条零引用须触发');
+  assert.equal(coverageNeedsEnrichment(cited(5, 0)), false, '交付记录 5 条（≤阈值下限）不触发');
+  assert.equal(coverageNeedsEnrichment({ ...cited(0, 0), valueSignals: { total: 5, cited: 0 } }), true, '价值信号 5 条零引用须触发');
+  assert.equal(coverageNeedsEnrichment({ ...cited(0, 0), valueSignals: { total: 5, cited: 2 } }), false, '价值信号引用 2/5 不触发');
+  assert.equal(coverageNeedsEnrichment(cited(0, 0)), false, '无素材不触发');
+  const summary = coverageSummary(cited(6, 5));
+  assert.match(summary, /交付记录 0\/6/);
+  assert.match(summary, /价值信号 0\/5/);
+
+  // 端到端：多数交付记录未被引用 → 自动追加第二遍模型调用，第二稿须引用更多素材才被采纳。
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-cov-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-cov', name: '覆盖客户' });
+    for (let i = 1; i <= 8; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-cov', sourceSystem: 'ones', sourceType: 'support_ticket',
+        externalId: `cov-T-${i}`, displayId: `T-3${i}0${i}`, title: `覆盖交付事项 ${i}`, occurredAt: `2026-03-0${i}T03:00:00Z`,
+        payload: { field005: { name: '已完成', category: 'done' }, field009: `2026-03-0${i} 10:00:00`, field010: `2026-03-0${i} 18:00:00` } });
+    }
+    let calls = 0;
+    const prompts: string[] = [];
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        calls += 1;
+        prompts.push(input.messages[0].content);
+        // 第二遍（补写）prompt 含未引用素材清单；产出引用更多证据的第二稿。
+        const enrichedContent = calls >= 2
+          ? { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '已累计完成 8 项交付事项'] }
+          : CASE_CONTENT;
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(enrichedContent, input.messages[0].content)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-cov');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-cov')[0];
+    assert.ok(draft, '触发补写的生成仍须产出草稿');
+    assert.equal(calls, 2, '覆盖不足须追加一次补写调用');
+    assert.match(prompts[1], /未引用素材清单/, '补写 prompt 须含未引用素材清单');
+    assert.match(prompts[1], /覆盖交付事项/, '补写 prompt 须列出未引用的交付记录');
+    const coverage = (draft.fields as any).coverage;
+    assert.equal(coverage.enriched, true, 'coverage.enriched 须记录补写发生');
+    assert.ok((draft.fields as any).value.includes('已累计完成 8 项交付事项'), '采纳第二稿正文');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: failed enrichment keeps first draft and job still succeeds', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-covfail-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-cf', name: '补写失败客户' });
+    for (let i = 1; i <= 8; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-cf', sourceSystem: 'ones', sourceType: 'support_ticket',
+        externalId: `cf-T-${i}`, displayId: `T-4${i}0${i}`, title: `补写失败交付 ${i}`, occurredAt: `2026-03-1${i}T03:00:00Z`,
+        payload: { field005: { name: '已完成', category: 'done' } } });
+    }
+    let calls = 0;
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        calls += 1;
+        if (calls >= 2) return { stopReason: 'error', errorMessage: 'relay down', content: [] };
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, input.messages[0].content)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-cf');
+    // 补写自身重试含 5s 退避：等待窗口放宽到 30 秒。
+    for (let i = 0; i < 6000 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'succeeded', '补写失败不判任务失败');
+    const draft = db.listCaseDrafts('crm-cf')[0];
+    assert.ok(draft, '补写失败仍保留第一稿');
+    assert.equal((draft.fields as any).coverage.enriched, false);
+    assert.equal((draft.fields as any).background, CASE_CONTENT.background, '保留第一稿正文');
+    assert.equal(calls, 3, '补写自身重试 1 次（2 次尝试：第 2 次失败即止于 3 次总调用）');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case records budget keeps early sixth and recent five sixths', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-budget-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-budget', name: '预算客户' });
+    for (let i = 1; i <= 320; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-budget', sourceSystem: 'ones', sourceType: 'support_ticket',
+        externalId: `bud-T-${i}`, displayId: `T-5${String(i).padStart(3, '0')}`, title: `预算事件 ${i}`,
+        occurredAt: `2026-03-${String((i % 28) + 1).padStart(2, '0')}T03:00:00Z`, payload: { field005: { category: 'in_progress' } } });
+    }
+    let capturedPrompt = '';
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        capturedPrompt = input.messages[0].content;
+        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-budget');
+    await waitForJob(db, result.jobId!);
+    const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
+    assert.equal(context.records.length, 300, 'records 注入 300 条上限');
+    // 最早 1/6（50 条）+ 最近 5/6（250 条）：首条来自最早一批、总数不超上限。
+    assert.ok(context.records.some((item: any) => item.title === '预算事件 1'), '最早事件保留');
+    // 指纹仍基于全量事件（含被截断的中间事件）→ 数据变化必然触发 contextStale。
+    const draft = db.listCaseDrafts('crm-budget')[0];
+    assert.ok(draft);
+    db.upsertSourceEvent({ customerId: 'crm-budget', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'bud-T-new', title: '新增事件', occurredAt: '2026-08-01T00:00:00Z', payload: {} });
+    assert.equal(service.detail(draft.id)!.contextStale, true, '预算截断不影响指纹全量口径');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: narrative warnings guard refine/update writeback without blocking', () => {
+  // 干净内容零告警。
+  assert.deepEqual(caseNarrativeWarnings({ background: '背景', solution: '方案', challenges: ['痛点一'], requirements: ['需求一'], value: ['价值一'] }), []);
+  // 条目数失控 + 单条超长 + 占位词 + 内部残留。
+  const runaway = { background: '背景', solution: '方案',
+    challenges: Array.from({ length: 13 }, (_, i) => `痛点${i}`),
+    requirements: ['需求一'], value: ['价值一'.repeat(200)] };
+  const warnings = caseNarrativeWarnings(runaway);
+  assert.ok(warnings.some((warning) => /痛点、现状与挑战.*超过 12 条/.test(warning)), '条目超限须告警');
+  assert.ok(warnings.some((warning) => /价值与成效.*超过 500 字/.test(warning)), '单条超长须告警');
+  const dirty = { background: '背景待确认', solution: '方案', challenges: [], requirements: [], value: ['客户不满意减少了'] };
+  const dirtyWarnings = caseNarrativeWarnings(dirty);
+  assert.ok(dirtyWarnings.some((warning) => /待确认\/待补充占位词/.test(warning)), '占位词须告警');
+  assert.ok(dirtyWarnings.some((warning) => /客户情绪内部记录/.test(warning)), '内部残留须告警');
+});
+
+test('workbench: quality review flags stats citations for disclosure confirmation', () => {
+  const sources = [
+    { id: 'customer:c1', source_system: 'crm', source_type: 'customer_profile', external_id: 'c1', occurred_at: '2026-01-01', synced_at: '2026-01-01', title: '客户', excerpt: '制造行业', url: '', payload_hash: 'p' },
+    { id: 'stats:delivery', source_system: 'internal', source_type: 'stats:delivery', external_id: 'stats:delivery', occurred_at: '2026-03-01', synced_at: '2026-03-01', title: '交付事实统计', excerpt: '工单共 8 项，已完成 8 项', url: '', payload_hash: 's' },
+    { id: 'done-1', source_system: 'ones', source_type: 'support_ticket', external_id: 'd1', occurred_at: '2026-02-01', synced_at: '2026-02-01', title: '已完成上线', excerpt: '已完成上线', url: '', payload_hash: 'd', status_category: 'done' },
+  ] as any[];
+  const fields = { background: '制造行业', challenges: ['流程不透明'], requirements: ['统一管理'], solution: '已完成上线', value: ['累计完成 8 项交付'],
+    context_snapshot: { generated_at: '2026-03-01', internal_digest: 'same', digest: 'snapshot', sources },
+    claim_evidence: [
+      { section: 'background', claim: '制造行业', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'challenges', claim: '流程不透明', source_refs: ['done-1'], excerpt: '已完成上线' },
+      { section: 'requirements', claim: '统一管理', source_refs: ['done-1'], excerpt: '已完成上线' },
+      { section: 'solution', claim: '已完成上线', source_refs: ['done-1'], excerpt: '已完成上线' },
+      { section: 'value', claim: '累计完成 8 项交付', source_refs: ['stats:delivery'], excerpt: '工单共 8 项，已完成 8 项', speaker_role: 'unknown' },
+    ] };
+  const draft = { id: 'case-st', customerId: 'c1', version: 1, status: 'draft', title: '统计引用案例', fields, evidenceRefs: [], createdAt: '2026-03-01', updatedAt: '2026-03-01' } as any;
+  const review = caseQualityReview(draft, { now: new Date('2026-08-30T00:00:00Z') });
+  assert.ok(review.warnings.some((warning) => /交付统计数字.*披露/.test(warning)), '引用 stats 数字须提示披露口径确认');
+});
+
 test('workbench: public case parsing requires traceable excerpts and derives Hemory speaker role', () => {
   const content = { title: '公开案例', background: '背景事实', challenges: ['现状痛点'], requirements: ['明确需求'], solution: '已落地方案', value: ['效率提升'], unknowns: [] };
   const profile = { id: 'customer:c1', source_system: 'crm', source_type: 'customer_profile', external_id: 'c1', occurred_at: '2026-01-01', synced_at: '2026-01-01',
@@ -3954,8 +4207,11 @@ test('workbench: public case parsing requires traceable excerpts and derives Hem
   const sources = [profile, done, csm];
   assert.throws(() => parseCaseContent({ ...content, claim_evidence: claims.map(({ excerpt, ...claim }) => claim) },
     { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources }), /缺少原文摘录/);
-  assert.throws(() => parseCaseContent({ ...content, claim_evidence: claims },
-    { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources }), /不是明确客户说话人/);
+  // 说话人角色降级为非阻断（真实会议说话人形态多样，逐句角色判定不可靠）：
+  // 生成期只阻断「摘录无法定位」（防编造），角色问题由 caseQualityReview 告警 CSM 复核。
+  const parsed = parseCaseContent({ ...content, claim_evidence: claims },
+    { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources });
+  assert.equal(parsed.value[0], content.value[0], 'CSM 说话人摘录不再阻断生成');
 });
 
 test('workbench: quality review marks stale web, pre-solution value, other customer and sensitive title', () => {

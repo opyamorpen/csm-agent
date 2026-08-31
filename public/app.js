@@ -3101,6 +3101,19 @@
         if (detail?.contextStale) buttons.append(badge('数据已更新', 'warning'));
       }
     }
+    // 复制内容 = 服务端 renderCaseMarkdown 权威渲染（与 Wiki 发布正文同源），与周报卡复制按钮同款。
+    const copy = el('button', 'quiet-command small', '复制 Markdown');
+    copy.onclick = async () => {
+      try {
+        const current = draft.status === 'draft' && !detail
+          ? await api(`/api/case-drafts/${encodeURIComponent(draft.id)}`)
+          : detail || await api(`/api/case-drafts/${encodeURIComponent(draft.id)}`);
+        const ok = await copyText(current.markdown || '');
+        if (!ok) throw new Error('剪贴板不可用');
+        copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 Markdown'; }, 1500);
+      } catch (error) { await alertDialog(`复制失败：${error.message}`); }
+    };
+    buttons.append(copy);
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
     card.append(buttons);
     return card;
@@ -3138,10 +3151,17 @@
           requirements: lines(requirements.input), solution: solution.input.value.trim(), value: lines(value.input) },
       }) });
     }
-    save.onclick = async () => { draft = await saveDraft(); closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases(); };
+    // 写回护栏（非阻断）：服务端对编辑结果做条目数/长度/内部残留检查，命中时弹窗提示复核。
+    async function afterSave(updated) {
+      if ((updated?.warnings || []).length) {
+        await alertDialog(`已保存，但有 ${updated.warnings.length} 项编辑提醒：\n${updated.warnings.map((warning) => `- ${warning}`).join('\n')}`);
+      }
+      return updated;
+    }
+    save.onclick = async () => { draft = await afterSave(await saveDraft()); closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases(); };
     publish.onclick = async () => {
       try {
-        draft = await saveDraft();
+        draft = await afterSave(await saveDraft());
         const target = await pickWikiPage();
         if (!target) return;
         const parentPageID = target.pageID;
