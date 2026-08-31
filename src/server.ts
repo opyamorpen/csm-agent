@@ -210,18 +210,27 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     return customer ? draftEditContract(workbench.db, item, customer) : undefined;
   }
   // 失败生成任务的片段明细：客户名 + 上海日 + 逐片段摘要（截断），支撑「失败后选片段重新生成」。
-  function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }> } {
-    if (job.status !== 'failed') return job;
-    const fragments: Array<{ id: string; occurredAt: string; topic: string; summary: string }> = [];
-    let dateKey = '';
-    for (const id of job.sourceEventIds) {
-      const event = workbench.db.getSourceEvent(id);
-      if (!event) continue;
-      if (!dateKey) dateKey = shanghaiEventDate(event);
-      const summary = String(event.payload?.summary ?? '').trim();
-      fragments.push({ id: event.id, occurredAt: event.occurredAt, topic: event.title, summary: summary.slice(0, 120) });
+  // weekly_report 任务补算 weekStart（首个可解析种子事件的周界，与 process() 同逻辑）：页面重开后恢复进度需对周。
+  function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }>; weekStart?: string } {
+    if (job.status === 'failed') {
+      const fragments: Array<{ id: string; occurredAt: string; topic: string; summary: string }> = [];
+      let dateKey = '';
+      for (const id of job.sourceEventIds) {
+        const event = workbench.db.getSourceEvent(id);
+        if (!event) continue;
+        if (!dateKey) dateKey = shanghaiEventDate(event);
+        const summary = String(event.payload?.summary ?? '').trim();
+        fragments.push({ id: event.id, occurredAt: event.occurredAt, topic: event.title, summary: summary.slice(0, 120) });
+      }
+      return { ...job, dateKey: dateKey || undefined, fragments };
     }
-    return { ...job, dateKey: dateKey || undefined, fragments };
+    if (job.kind === 'weekly_report') {
+      for (const id of job.sourceEventIds) {
+        const event = workbench.db.getSourceEvent(id);
+        if (event) return { ...job, weekStart: weekMonday(event.occurredAt) };
+      }
+    }
+    return job;
   }
 
   // 片段消费台账可见性：每片段标注被哪些类型的已写入草稿消费（written 草稿 evidence_refs 反查，按客户一次构建）。
@@ -648,10 +657,19 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const ids = (url.searchParams.get('ids') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
         // 无 ids 时列出最近失败任务（kind=hemory 日草稿）：失败明细的可发现入口，页面刷新后仍可见。
         const status = url.searchParams.get('status') ?? 'failed';
-        const kind = url.searchParams.get('kind') === 'weekly_report' ? 'weekly_report' : 'hemory';
-        const jobs = ids.length
-          ? ids.map((id) => workbench.db.getDraftJob(id)).filter((job): job is DraftGenerationJob => !!job)
-          : status === 'failed' ? workbench.db.listFailedDraftJobs(kind) : [];
+        const kindParam = url.searchParams.get('kind');
+        const kind = kindParam === 'weekly_report' ? 'weekly_report' : kindParam === 'case_report' ? 'case_report' : 'hemory';
+        const customerId = url.searchParams.get('customer_id') ?? '';
+        let jobs: DraftGenerationJob[];
+        if (ids.length) {
+          jobs = ids.map((id) => workbench.db.getDraftJob(id)).filter((job): job is DraftGenerationJob => !!job);
+        } else if (customerId && status === 'active') {
+          // 某客户全部在途任务（页面重开恢复进度展示用），可用 kind 再过滤。
+          jobs = workbench.db.listActiveDraftJobsByCustomer(customerId)
+            .filter((job) => !kindParam || job.kind === kind);
+        } else {
+          jobs = status === 'failed' ? workbench.db.listFailedDraftJobs(kind) : [];
+        }
         return json(res, 200, { jobs: jobs.map(decorateDraftJob) });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);

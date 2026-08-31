@@ -2827,6 +2827,92 @@ test('workbench: weekly report failure marks job failed and manual regenerate is
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: weekly report generation writes stage/model progress without touching attempts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-prog-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-wp1', name: '周报进度客户' });
+    db.upsertSourceEvent({ customerId: 'crm-wp1', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'wp1-ticket-1', title: '导出超时', occurredAt: '2026-08-25T03:00:00Z',
+      payload: { field005: { name: '已完成' }, field009: '2026-08-25T03:00:00Z' } });
+    // 流式假模型：yield 两个 text_delta 后以完整消息收尾，验证进度助手消费增量并统计字数。
+    const streamedText = JSON.stringify(WEEKLY_CONTENT);
+    const streamRuntime = {
+      llm: { provider: 'fake', model: 'fake-stream' },
+      models: {
+        complete: async () => ({ content: [{ type: 'text', text: streamedText }], stopReason: 'stop' }),
+        stream: (_model: unknown, _context: any) => ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'text_delta', contentIndex: 0, delta: streamedText.slice(0, Math.ceil(streamedText.length / 2)), partial: {} };
+            yield { type: 'text_delta', contentIndex: 0, delta: streamedText.slice(Math.ceil(streamedText.length / 2)), partial: {} };
+          },
+          result: async () => ({ content: [{ type: 'text', text: streamedText }], stopReason: 'stop' }),
+        }),
+      },
+    } as any;
+    const service = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any, streamRuntime);
+    const result = service.generate('crm-wp1', '2026-08-28');
+    await waitForJob(db, result.jobId!);
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'succeeded');
+    // 流式路径生效：进度文案含模型输出字数（而非只有 complete 兜底）。
+    assert.match(job.progress ?? '', /模型撰写中… 已输出 \d+ 字/);
+    // 进度写入不动 attempts：成功任务恰好 running 一次。
+    assert.equal(job.attempts, 1);
+    // updateDraftJobProgress 独立于状态机：直接调用不改变 status。
+    db.updateDraftJobProgress(result.jobId!, '手动进度');
+    assert.equal(db.getDraftJob(result.jobId!)?.status, 'succeeded');
+    assert.equal(db.getDraftJob(result.jobId!)?.progress, '手动进度');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case generation writes web-search stage progress', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-prog-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const fetcher: HttpPost = async () => JSON.stringify({ results: [
+      { title: '案例客户一需求管理实践报道', url: 'https://news.example.com/1', published_date: '2026-02-01', content: '案例客户一引入需求管理平台' },
+    ] });
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT, true), {
+      getApiKey: () => 'tvly-test', getMaxResults: () => 5, getKeylessEnabled: () => true, fetcher,
+    });
+    const result = service.generate('crm-c1');
+    // 检索阶段完成前轮询进度：5 个角度逐个出现在任务进度里。
+    let sawAngle = false;
+    for (let i = 0; i < 500 && !sawAngle; i++) {
+      const job = db.getDraftJob(result.jobId!);
+      if (job?.progress?.includes('联网检索公开动态（')) sawAngle = true;
+      else await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(sawAngle, '案例生成进度必须含逐角度检索文案');
+    await waitForJob(db, result.jobId!);
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'succeeded');
+    assert.match(job.progress ?? '', /模型撰写中… 已输出 \d+ 字/);
+    assert.equal(job.attempts, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: listActiveDraftJobsByCustomer returns only in-flight jobs of that customer', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-j1', name: '任务客户一' });
+  db.upsertCustomer({ id: 'crm-j2', name: '任务客户二' });
+  db.upsertSourceEvent({ customerId: 'crm-j1', sourceSystem: 'ones', sourceType: 'support_ticket',
+    externalId: 'j1-ticket-1', title: '导出超时', occurredAt: '2026-08-25T03:00:00Z', payload: {} });
+  const active = db.createDraftJob('crm-j1', 'fp-active-weekly', ['evt-1'], 'weekly_report');
+  db.createDraftJob('crm-j2', 'fp-active-case', ['evt-2'], 'case_report');
+  const finished = db.createDraftJob('crm-j1', 'fp-failed-case', ['evt-1'], 'case_report');
+  db.updateDraftJob(finished.id, 'failed', '模型未返回可解析的案例 JSON');
+  const mine = db.listActiveDraftJobsByCustomer('crm-j1');
+  assert.deepEqual(mine.map((job) => job.id), [active.id]);
+  assert.equal(mine[0].kind, 'weekly_report');
+  assert.equal(mine[0].status, 'pending');
+  // progress 列随任务行往返。
+  db.updateDraftJobProgress(active.id, '模型撰写中… 已输出 100 字');
+  assert.equal(db.getDraftJob(active.id)?.progress, '模型撰写中… 已输出 100 字');
+  assert.equal(db.getDraftJob(active.id)?.attempts, 0, '进度写入不得累计 attempts');
+}));
+
 test('workbench: weekly report edit uses optimistic lock and publish goes through hash gate', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-weekly-'));
   const db = new WorkbenchDatabase(dir);
@@ -3313,12 +3399,23 @@ function publicCaseModelContent(content: any, prompt: string): any {
   return { ...content, claim_evidence: claims };
 }
 
-function fakeCaseModel(content: unknown): any {
-  return {
+function fakeCaseModel(content: unknown, streaming = false): any {
+  const runtime: any = {
     llm: { provider: 'fake', model: 'fake-model' },
     models: { complete: async (_model: unknown, input: any) => ({
       content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(content, input.messages[0].content)) }], stopReason: 'stop' }) },
   };
+  if (streaming) {
+    // 流式包装：stream 转发 complete 的最终输出为一次性 delta，验证进度助手对流式模型的消费。
+    runtime.models.stream = (_model: unknown, input: any) => ({
+      async *[Symbol.asyncIterator]() {
+        const text = JSON.stringify(publicCaseModelContent(content, input.messages[0].content));
+        yield { type: 'text_delta', contentIndex: 0, delta: text, partial: {} };
+      },
+      result: async () => runtime.models.complete(_model, input),
+    });
+  }
+  return runtime;
 }
 
 const CASE_CONTENT = {

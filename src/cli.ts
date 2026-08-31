@@ -57,10 +57,11 @@ const CLI_CAPABILITIES = [
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
-  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish'],
+  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/draft-jobs'],
     editableFields: ['title', 'background', 'challenges', 'requirements', 'solution', 'value'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns'] },
-  { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'] },
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns'],
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）' },
+  { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'] },
@@ -133,7 +134,8 @@ function help(): void {
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
-    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标/中标采购）
+    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标/中标采购；
+     --wait 轮询任务到终态并实时打印生成进度）
   csm-agent case show <草稿ID> [--json]
     （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源）；--json 输出含 claim_evidence/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
@@ -146,7 +148,7 @@ function help(): void {
     （默认输出客户版周报 Markdown（与复制/Wiki 发布同源）；--json 输出含 source/stats 的完整对象）
   csm-agent weekly-report generate <客户ID或名称> [YYYY-MM-DD] [--force] [--wait]
     （日期为周内任意一天，自动对齐周一；基于该客户本周全部信息生成客户版四章节周报；
-     --force 强制重建已存在的周报；--wait 轮询生成任务到终态）
+     --force 强制重建已存在的周报；--wait 轮询任务到终态并实时打印生成进度）
   csm-agent weekly-report update <周报ID> <版本> <JSON>
     （JSON 为四章节 content 对象：summary/accomplishments/next_week_plan/risks）
   csm-agent weekly-report preview <周报ID> [ONES父页面ID]
@@ -740,10 +742,11 @@ async function waitSync(id: string, maxAttempts = 600): Promise<any> {
   throw new Error('等待同步超时，任务仍可能在后台运行');
 }
 
-/** 轮询草稿生成任务到终态（每 2 秒，默认上限 180 秒）；返回最终任务列表。失败任务不创建批次，只能通过任务状态感知。 */
-async function waitDraftJobs(jobIds: string[], maxAttempts = 90): Promise<any[]> {
+/** 轮询草稿生成任务到终态（每 2 秒，默认上限 10 分钟，覆盖 3 次模型重试 + 指数退避的最坏路径）；轮询期间实时打印进度变化。返回最终任务列表。失败任务不创建批次，只能通过任务状态感知。 */
+async function waitDraftJobs(jobIds: string[], maxAttempts = 300): Promise<any[]> {
   const pending = new Set(jobIds);
   const finished: any[] = [];
+  const lastPrinted = new Map<string, string>();
   for (let attempt = 0; attempt < maxAttempts && pending.size; attempt++) {
     const ids = [...pending].join(',');
     const { jobs } = await request<any>(`/api/draft-jobs?ids=${encodeURIComponent(ids)}`);
@@ -753,10 +756,19 @@ async function waitDraftJobs(jobIds: string[], maxAttempts = 90): Promise<any[]>
       if (!job || job.status === 'succeeded' || job.status === 'failed') {
         pending.delete(id);
         finished.push(job ?? { id, status: 'unknown' });
+      } else if (job) {
+        // 进度文案变化才打印：阶段边界/模型输出增长/重试提示逐条落到终端，超时不再黑箱。
+        const line = job.progress || (job.status === 'running' ? '正在处理' : '排队中');
+        if (lastPrinted.get(id) !== line) {
+          lastPrinted.set(id, line);
+          process.stdout.write(`\r生成中：${line}${' '.repeat(8)}`);
+          if (line.length > 100) process.stdout.write('\n');
+        }
       }
     }
     if (pending.size) await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+  process.stdout.write('\n');
   if (pending.size) throw new Error(`等待草稿生成超时（${pending.size} 个任务仍在后台运行，可稍后运行 csm-agent drafts 查看）`);
   return finished;
 }

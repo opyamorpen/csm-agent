@@ -1159,7 +1159,8 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .weekly-week-label input[type="date"] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 13px; }
 .weekly-week-select { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
 .weekly-week-select select { max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 13px; }
-.weekly-notice { margin-bottom: 10px; padding: 8px 12px; border: 1px solid var(--accent-soft-border); border-radius: 8px; background: var(--accent-soft); color: var(--accent-deep); font-size: 13px; }
+.weekly-notice, .generation-notice { margin-bottom: 10px; padding: 8px 12px; border: 1px solid var(--accent-soft-border); border-radius: 8px; background: var(--accent-soft); color: var(--accent-deep); font-size: 13px; }
+.generation-notice { margin: 0 0 12px; }
 .weekly-report-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; box-shadow: var(--shadow-xs); }
 .weekly-report-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .weekly-stats { margin: 6px 0 12px; padding: 8px 12px; border-radius: 6px; background: var(--panel-2); color: var(--text-2); font-size: 13px; }

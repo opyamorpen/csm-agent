@@ -94,13 +94,13 @@ csm-agent actions [CRM客户ID]
 csm-agent action complete <行动ID...> --outcome "已与客户确认下一步" # 批量完成，--outcome 支持空格或=传值
 csm-agent action update <行动ID> '{"status":"completed"}'
 csm-agent cases [CRM客户ID]
-csm-agent case generate <CRM客户ID> [--force] [--wait] # 公开版五段叙事；联网检索项目管理/需求管理/知识管理/招投标/中标采购
+csm-agent case generate <CRM客户ID> [--force] [--wait] # 公开版五段叙事；联网检索项目管理/需求管理/知识管理/招投标/中标采购；--wait 实时打印生成进度（阶段/检索角度/模型输出字数）
 csm-agent case show <草稿ID> # 默认输出可直接对外的 Markdown（与复制/Wiki 发布同源）；--json 查看 claim_evidence/context_snapshot/unknowns
 csm-agent case regenerate <草稿ID> [--wait] # 数据更新后强制重建（新增草稿，不覆盖旧稿）
 csm-agent case update <草稿ID> <版本> '{"title":"案例标题","fields":{}}'
 csm-agent case preview <草稿ID> <ONES父页面ID>
 csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <preview返回的批准哈希>
-csm-agent weekly-report generate <CRM客户ID> [YYYY-MM-DD] [--force] [--wait] # 实施周报（客户版）：日期对齐周一，基于该客户本周全部信息生成四章节
+csm-agent weekly-report generate <CRM客户ID> [YYYY-MM-DD] [--force] [--wait] # 实施周报（客户版）：日期对齐周一，基于该客户本周全部信息生成四章节；--wait 实时打印生成进度
 csm-agent weekly-report list/show <CRM客户ID|周报ID> # show 默认输出客户版 Markdown（与复制/Wiki 发布同源）；--json 查看含 source/stats 的完整内部证据
 csm-agent weekly-report update <周报ID> <版本> '{"summary":"...","accomplishments":[],"next_week_plan":[],"risks":[]}'
 csm-agent weekly-report preview <周报ID> <ONES父页面ID> # 客户版发布正文 + 内部信息警告 + 批准哈希

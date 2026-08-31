@@ -518,6 +518,9 @@ export class WorkbenchDatabase {
     if (!draftJobColumns.some((column) => String(column.name) === 'note')) {
       this.db.exec('ALTER TABLE draft_generation_jobs ADD COLUMN note TEXT;');
     }
+    if (!draftJobColumns.some((column) => String(column.name) === 'progress')) {
+      this.db.exec('ALTER TABLE draft_generation_jobs ADD COLUMN progress TEXT;');
+    }
     const caseDraftColumns = this.db.prepare('PRAGMA table_info(case_drafts)').all() as Row[];
     if (!caseDraftColumns.some((column) => String(column.name) === 'fingerprint')) {
       this.db.exec('ALTER TABLE case_drafts ADD COLUMN fingerprint TEXT;');
@@ -1293,6 +1296,7 @@ export class WorkbenchDatabase {
       attempts: Number(row.attempts), error: row.error as string | null,
       kind: (String(row.kind ?? 'hemory') === 'weekly_report' ? 'weekly_report' : String(row.kind ?? 'hemory') === 'case_report' ? 'case_report' : 'hemory'),
       note: row.note as string | null,
+      progress: row.progress as string | null,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
   }
 
@@ -1314,6 +1318,12 @@ export class WorkbenchDatabase {
   /** 进行中（pending/running）任务：草稿列表「重新生成中」标记的数据源；与含 failed 的 resume 语义分开。 */
   listActiveDraftJobs(kind: DraftJobKind = 'hemory'): DraftGenerationJob[] {
     const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE kind=? AND status IN ('pending','running') ORDER BY created_at").all(kind) as Row[];
+    return rows.map((row) => this.draftJobFromRow(row));
+  }
+
+  /** 某客户全部进行中（pending/running）生成任务：页面重开后恢复进度展示的查询。 */
+  listActiveDraftJobsByCustomer(customerId: string): DraftGenerationJob[] {
+    const rows = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE customer_id=? AND status IN ('pending','running') ORDER BY created_at").all(customerId) as Row[];
     return rows.map((row) => this.draftJobFromRow(row));
   }
 
@@ -1369,6 +1379,14 @@ export class WorkbenchDatabase {
     this.db.prepare(`UPDATE draft_generation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,error=?,note=COALESCE(?,note),updated_at=? WHERE id=?`)
       .run(status, status, error ?? null, note ?? null, nowIso(), id);
     return this.getDraftJob(id);
+  }
+
+  /**
+   * 只写进度文案：绝不动 status/attempts（updateDraftJob 的 running 会 attempts+1，
+   * 进度心跳若复用会把重试次数刷爆），终态写入后进度保留最后值仅供诊断。
+   */
+  updateDraftJobProgress(id: string, progress: string): void {
+    this.db.prepare('UPDATE draft_generation_jobs SET progress=?,updated_at=? WHERE id=?').run(progress, nowIso(), id);
   }
 
   /**

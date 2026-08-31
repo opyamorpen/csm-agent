@@ -4,6 +4,7 @@ import { argumentsHash } from '../approval.js';
 import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
 import { onesAsrAliasRule } from './drafts.js';
+import { completeModelWithProgress, modelProgressText } from './model-progress.js';
 import { mentionsCustomer } from './webintel.js';
 import { caseSpeakerRole, isDeliveredOnesEvent, type CaseSpeakerRole } from './sync.js';
 import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
@@ -150,13 +151,14 @@ function sourceTier(url: string, officialDomains: Set<string>): Exclude<CaseWebS
  * 客户公开信息检索：逐角度现搜「客户名 + 角度词」，标题/摘要须含客户全称或简称（削减同名噪音）。
  * 单角度失败只记入 errors 不阻断（生成不依赖检索成功）；全空由调用方按「未搜到=unknown」口径提示模型。
  */
-export async function searchCaseWebContext(customer: Customer, deps: CaseWebSearchDeps): Promise<CaseWebSearchContext> {
+export async function searchCaseWebContext(customer: Customer, deps: CaseWebSearchDeps, onProgress?: (text: string) => void): Promise<CaseWebSearchContext> {
   const searchName = customer.shortName?.trim() || customer.name;
   const names = [customer.name, customer.shortName].filter((name): name is string => !!name?.trim());
   const context: CaseWebSearchContext = { searched: 0, searchedAt: new Date().toISOString(), results: [], errors: [] };
   const seenUrls = new Set<string>();
   const officialDomains = customerOfficialDomains(customer);
-  for (const angle of CASE_WEB_ANGLES) {
+  for (const [index, angle] of CASE_WEB_ANGLES.entries()) {
+    onProgress?.(`联网检索公开动态（${index + 1}/${CASE_WEB_ANGLES.length}）${angle.label}…`);
     try {
       const outcome = await performRawWebSearch({
         query: `${searchName} ${angle.query}`,
@@ -197,6 +199,7 @@ export async function searchCaseWebContext(customer: Customer, deps: CaseWebSear
       }
     } catch (error) {
       context.errors.push(`${angle.label}: ${(error as Error).message}`);
+      onProgress?.(`联网检索公开动态（${index + 1}/${CASE_WEB_ANGLES.length}）${angle.label}（该角度检索失败，已跳过）`);
     }
   }
   return context;
@@ -641,7 +644,7 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
   });
 }
 
-async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot): Promise<ParsedCaseContent> {
+async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, onProgress?: (text: string) => void): Promise<ParsedCaseContent> {
   const prompt = `为客户「${input.customer.name}」生成一篇客户成功案例草稿。这份案例经 CSM 审核后会用于对外展示与复用，是正式的客户叙事型案例。你只能基于下面提供的上下文证据写作，不执行任何工具或外部写入。\n`
     + `按固定叙事路径输出五个章节，只输出 JSON：\n`
     + `{"title":"...","background":"...","challenges":["..."],"requirements":["..."],"solution":"...","value":["..."],"claim_evidence":[{"section":"background|challenges|requirements|solution|value","claim":"与正文逐字一致的完整主张","source_refs":["上下文中的 source_ref"],"excerpt":"支持该主张的原文摘录","speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}],"unknowns":["..."]}\n`
@@ -680,14 +683,17 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
   const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
   let lastError = '模型未返回可解析的案例 JSON';
   for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
-    const response = await runtime.models.complete(runtime.model, {
+    const response = await completeModelWithProgress(runtime, {
       systemPrompt: '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined);
     if (response.stopReason === 'error') {
       lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
-      if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      if (attempt < MAX_MODEL_ATTEMPTS) {
+        onProgress?.(`${lastError}，${Math.round(retryDelayMs(attempt) / 1000)} 秒后自动重试`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      }
       continue;
     }
     const value = cleanJson(extractText(response.content));
@@ -697,7 +703,10 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     } else {
       lastError = `模型未返回可解析的案例 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
     }
-    if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    if (attempt < MAX_MODEL_ATTEMPTS) {
+      onProgress?.(`模型输出未通过校验（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次），正在重写`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    }
   }
   throw new Error(lastError);
 }
@@ -917,19 +926,22 @@ export class CaseService {
     if (!job || job.status === 'succeeded' || job.kind !== 'case_report') return;
     this.processing.add(jobId);
     this.db.updateDraftJob(jobId, 'running');
+    const report_ = (text: string) => this.db.updateDraftJobProgress(jobId, text);
     try {
       const customer = this.db.getCustomer(job.customerId);
       if (!customer) throw new Error('customer not found');
+      report_('正在收集客户上下文…');
       // 执行时重新收集全量数据：任务排队期间新同步的数据也会并入。
       const { timeline, hemory, evidence, risk, opportunities } = this.collectContext(customer.id);
       if (!timeline.length && !hemory.length && !evidence.length) throw new Error('该客户没有已同步数据');
       if (!this.runtime) throw new Error('模型未配置，无法生成案例（请检查 LLM 配置后重新生成）');
       // 联网检索客户公开信息：任一角度失败只记入 errors 不阻断生成（未搜到=unknown，不作为事实依据）。
-      const webContext = this.webSearchDeps ? await searchCaseWebContext(customer, this.webSearchDeps) : null;
+      const webContext = this.webSearchDeps ? await searchCaseWebContext(customer, this.webSearchDeps, report_) : null;
       const promptInput = { customer, timeline, hemory, evidence, risk, opportunities, webContext };
+      report_(`上下文与信号就绪（${timeline.length} 条事件 / ${hemory.length} 个片段${webContext ? ` / ${webContext.results.length} 条公开信息` : ''}），模型撰写中…`);
       const snapshot = buildContextSnapshot(promptInput);
       let content: ParsedCaseContent;
-      try { content = await proposeCaseWithModel(this.runtime, promptInput, snapshot); }
+      try { content = await proposeCaseWithModel(this.runtime, promptInput, snapshot, report_); }
       catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const evidenceRefs = [...new Set(content.claim_evidence.flatMap((item) => item.source_refs))];

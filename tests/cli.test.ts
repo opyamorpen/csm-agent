@@ -45,6 +45,12 @@ test('CLI exposes machine-readable core capability coverage without a running se
   const caseCapability = capabilities.find((item) => item.workflow === 'case-drafts');
   assert.deepEqual(caseCapability.editableFields, ['title', 'background', 'challenges', 'requirements', 'solution', 'value']);
   assert.ok(caseCapability.readOnlyFields.includes('claim_evidence') && caseCapability.readOnlyFields.includes('context_snapshot'));
+  // 生成进度可见契约：case/weekly-report 能力含 draft-jobs 轮询端点与 --wait 进度说明。
+  assert.ok(caseCapability.api.includes('/api/draft-jobs'));
+  assert.match(caseCapability.notes ?? '', /实时打印生成进度/);
+  const weeklyCapability = capabilities.find((item) => item.workflow === 'weekly-reports');
+  assert.ok(weeklyCapability.api.includes('/api/draft-jobs'));
+  assert.match(weeklyCapability.notes ?? '', /实时打印生成进度/);
   assert.ok(capabilities.some((item) => item.workflow === 'customer-agent' && item.api.includes('/api/sessions/:id/confirm')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/attribution')));
   assert.ok(capabilities.some((item) => item.workflow === 'hemory-attribution' && item.api.includes('/api/hemory/fragments/ignore')));
@@ -78,6 +84,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /仅未完成状态生效，已完成跳过/);
   assert.doesNotMatch(help.stdout, /待处理\/进行中/);
   assert.match(help.stdout, /csm-agent case generate <客户ID或名称> \[--force\] \[--wait\]/);
+  assert.match(help.stdout, /--wait 轮询任务到终态并实时打印生成进度/);
   assert.match(help.stdout, /csm-agent case show <草稿ID> \[--json\]/);
   assert.match(help.stdout, /csm-agent case regenerate <草稿ID> \[--wait\]/);
   assert.match(help.stdout, /项目管理\/需求管理\/知识管理\/招投标\/中标采购/);

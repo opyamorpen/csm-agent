@@ -303,6 +303,8 @@ export interface DraftGenerationJob {
   kind?: DraftJobKind;
   /** 任务备注：零提案跳过等非失败结论的人读解释（如「当天证据片段均已被已写入草稿消费」）。 */
   note?: string | null;
+  /** 最近一次进度文案（阶段边界/模型流式增量/重试提示）：非终态时前端轮询展示，终态保留最后值仅供诊断。 */
+  progress?: string | null;
   createdAt: string;
   updatedAt: string;
 }

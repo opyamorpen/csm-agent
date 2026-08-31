@@ -832,6 +832,13 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(poller, /delete panel\.dataset\.busyWeek/);
   assert.match(poller, /job\.status === 'failed'/);
   assert.match(poller, /周报生成失败/);
+  // 进度展示契约：消费服务端下发的 job.progress（阶段/模型输出字数）+ 已进行时长；轮询无 90 次上限（面板存活即跟踪）。
+  assert.match(poller, /job\.progress \|\|/);
+  assert.match(poller, /已进行/);
+  assert.match(poller, /panel\.isConnected/);
+  assert.match(poller, /attempt < 90 \? 2000 : 5000/);
+  // 「生成超时」放弃文案整体移除（含案例侧弹窗）：长任务由进度行持续跟踪，不再超时劝退。
+  assert.doesNotMatch(source, /生成超时，任务仍在后台运行/);
   const failure = source.match(/function renderWeeklyFailure[\s\S]*?\n  \}\n\n  async function refreshWeeklyPanel/)?.[0];
   assert.ok(failure, 'renderWeeklyFailure source was not found');
   assert.match(failure, /'再次生成'/);
@@ -1236,6 +1243,7 @@ test('agent replies stream as deltas and thinking collapses into a fold', () => 
 
 test('case narrative generation contract: five-section editor, refine entry, single generation path', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
   // 五段叙事编辑弹窗：五章节标签 + 每行一项列表段；读取旧键回退（pain_points/results）。
   const editCase = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
@@ -1276,6 +1284,19 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.ok(pollCase, 'pollCaseJob source was not found');
   assert.match(pollCase, /\/api\/draft-jobs\?ids=/);
   assert.match(pollCase, /item\.fingerprint === fingerprint/);
+  // 进度展示契约：案例轮询消费 job.progress（阶段/检索角度/模型输出字数），锚点存活期间无超时放弃。
+  assert.match(pollCase, /job\.progress \|\|/);
+  assert.match(pollCase, /ensureCaseNotice/);
+  assert.match(pollCase, /anchor\.isConnected/);
+  assert.match(pollCase, /attempt < 90 \? 2000 : 5000/);
+  assert.doesNotMatch(pollCase, /timeout/);
+  // 案例进度行组件：app.js 建行 + style.css 供样式（与周报 notice 同一视觉契约）。
+  assert.match(source, /function ensureCaseNotice/);
+  assert.match(source, /\.generation-notice/);
+  assert.match(styles, /\.generation-notice/);
+  // 重开页面恢复：openCustomer / buildWeeklyPanel 经 customer_id+status=active 恢复在途任务轮询。
+  assert.match(source, /\/api\/draft-jobs\?customer_id=\$\{encodeURIComponent\(customerId\)\}&status=active/);
+  assert.match(source, /\/api\/draft-jobs\?customer_id=\$\{encodeURIComponent\(customer\.id\)\}&status=active&kind=weekly_report/);
 
   // 对话精修入口：草稿卡按钮 + 种子消息契约（case_draft_id/case_version 注入 + 禁外部写）。
   const refine = source.match(/async function startCaseRefine[\s\S]*?\n  \}\n\n/)?.[0];

@@ -5,6 +5,7 @@ import { extractText } from '../agent.js';
 import type { McpHub } from '../mcp/index.js';
 import { shanghaiDateKey } from './sync.js';
 import { onesAsrAliasRule } from './drafts.js';
+import { completeModelWithProgress, modelProgressText } from './model-progress.js';
 import { WorkbenchDatabase } from './database.js';
 import type { Customer, SourceEvent, WeeklyReport, WeeklyReportContent, WeeklyReportStats } from './types.js';
 
@@ -226,7 +227,7 @@ function parseContent(value: unknown): WeeklyReportContent {
   return { summary, accomplishments, next_week_plan: nextWeekPlan, risks };
 }
 
-async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<WeeklyReportContent> {
+async function proposeWithModel(runtime: Runtime, input: PromptInput, onProgress?: (text: string) => void): Promise<WeeklyReportContent> {
   const prompt = `为客户「${input.customer.name}」生成 ${input.weekStart} ~ ${input.weekEnd}（周一~周日）的实施周报。`
     + `这份周报经 CSM 审核后会直接复制或发布给外部客户，是正式、克制、面向外部客户的项目周报。你只能基于下面提供的证据写作，不执行任何工具或外部写入。\n`
     + `输出四个章节，只输出 JSON：\n`
@@ -258,20 +259,26 @@ async function proposeWithModel(runtime: Runtime, input: PromptInput): Promise<W
   const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
   let lastError = '模型未返回可解析的周报 JSON';
   for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
-    const response = await runtime.models.complete(runtime.model, {
+    const response = await completeModelWithProgress(runtime, {
       systemPrompt: '你是 ONES 项目组实施周报撰写助手。你产出的是经 CSM 审核后直接发给外部客户的正式项目周报：只能基于用户提供的证据写作，客观克制、结果导向，不执行任何工具或外部写入。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined);
     if (response.stopReason === 'error') {
       lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
-      if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      if (attempt < MAX_MODEL_ATTEMPTS) {
+        onProgress?.(`${lastError}，${Math.round(retryDelayMs(attempt) / 1000)} 秒后自动重试`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      }
       continue;
     }
     const value = cleanJson(extractText(response.content));
     if (value) return parseContent(value);
     lastError = `模型未返回可解析的周报 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
-    if (attempt < MAX_MODEL_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    if (attempt < MAX_MODEL_ATTEMPTS) {
+      onProgress?.(`模型输出未通过校验（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次），正在重写`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    }
   }
   throw new Error(lastError);
 }
@@ -413,6 +420,7 @@ export class WeeklyReportService {
     if (!job || job.status === 'succeeded' || job.kind !== 'weekly_report') return;
     this.processing.add(jobId);
     this.db.updateDraftJob(jobId, 'running');
+    const report_ = (text: string) => this.db.updateDraftJobProgress(jobId, text);
     try {
       const customer = this.db.getCustomer(job.customerId);
       if (!customer) throw new Error('customer not found');
@@ -423,6 +431,7 @@ export class WeeklyReportService {
       const anchor = seeded[0];
       const weekStart = weekMonday(anchor.occurredAt);
       const range = weekRange(weekStart);
+      report_(`正在汇总 ${weekStart.slice(5)} 周上下文…`);
       const { events, hemory, workItems } = this.weeklyEvents(customer.id, weekStart);
       if (!events.length && !hemory.length) throw new Error(`${weekStart} 这一周没有该客户的任何数据`);
       // 工时从已同步 payload 取（避免生成路径实时打 ONES MCP）；缺失时按 unknown 处理，不阻塞生成。
@@ -445,8 +454,9 @@ export class WeeklyReportService {
       const riskRow = this.db.latestRisk(customer.id);
       const stats = buildStats(weekStart, { workItems, hemory, workhours: workhoursTotal, actionsCompleted });
       if (!this.runtime) throw new Error('模型未配置，无法生成周报（请检查 LLM 配置后重新生成）');
+      report_(`证据就绪（${workItems.length} 个工作项 / ${hemory.length} 个沟通片段），模型撰写中…`);
       let content: WeeklyReportContent;
-      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hemory, workItems, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }); }
+      try { content = await proposeWithModel(this.runtime, { customer, weekStart, weekEnd: range.weekEnd, events, hemory, workItems, stats, workhourRecords, actions, risk: riskRow ? { level: riskRow.level, score: riskRow.score } : null }, report_); }
       catch (error) { throw new Error(`模型未生成周报: ${(error as Error).message}`); }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
       const report = this.db.upsertWeeklyReport({ customerId: customer.id, weekStart, weekEnd: range.weekEnd,

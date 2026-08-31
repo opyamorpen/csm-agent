@@ -2340,15 +2340,30 @@
     form.requestSubmit();
   }
 
+  /** 案例生成进度行：确保存在且可见，文本可选更新；锚点随客户视图重建而消失，切走即静默停止展示。 */
+  function ensureCaseNotice(host, text) {
+    let notice = host.querySelector('.generation-notice');
+    if (!notice) {
+      notice = el('div', 'generation-notice');
+      host.insertBefore(notice, host.firstChild);
+    }
+    notice.classList.remove('hidden');
+    if (text != null) notice.textContent = text;
+    return notice;
+  }
+
   /**
-   * 案例生成轮询：任务到终态后按指纹定位新草稿并回调；超时提示仍在后台运行。
-   * 返回 { draft } 或 { error } / { timeout: true }。
+   * 案例生成轮询：展示服务端进度文案（阶段/检索角度/模型输出字数），锚点 DOM 存活期间
+   * 一直跟踪（前 90 次 2s、之后降为 5s，无超时放弃）。任务到终态后按指纹定位新草稿并回调。
+   * 返回 { draft } 或 { error }；锚点被移除（切走客户/重开页面）返回 { detached: true }。
    */
-  async function pollCaseJob(customerId, jobId, fingerprint) {
-    for (let attempt = 0; attempt < 90; attempt++) {
+  async function pollCaseJob(customerId, jobId, fingerprint, anchor) {
+    const notice = anchor ? ensureCaseNotice(anchor, '案例生成中…（排队中）') : null;
+    for (let attempt = 0; !anchor || anchor.isConnected; attempt++) {
       const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
       const job = (data.jobs || [])[0];
       if (!job) throw new Error('生成任务不存在');
+      if (notice) notice.textContent = `案例生成中…（${job.progress || (job.status === 'running' ? '正在处理' : '排队中')}）`;
       if (job.status === 'succeeded') {
         const list = await api(`/api/case-drafts?customer_id=${encodeURIComponent(customerId)}`);
         const draft = (list.drafts || []).find((item) => item.fingerprint === fingerprint)
@@ -2356,9 +2371,9 @@
         return draft ? { draft } : { error: '任务成功但未找到新草稿' };
       }
       if (job.status === 'failed') return { error: job.error || '未知原因' };
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, attempt < 90 ? 2000 : 5000));
     }
-    return { timeout: true };
+    return { detached: true };
   }
 
   /**
@@ -2512,17 +2527,25 @@
   }
 
   /**
-   * 轮询周报生成任务到终态。进度条带周界文案；终态先清 busyWeek（「重新生成中」标记随之消失）
-   * 再刷新；仅当用户仍查看该周时才动当前视图（生成期间切走不打扰、不拉回）。
-   * 返回最终 job（超时返回 null）。
+   * 轮询周报生成任务到终态。进度条带周界文案，展示服务端下发的阶段/模型输出进度与已进行时长；
+   * 不设轮询上限（面板存活期间一直跟踪，前 90 次 2s、之后降为 5s），面板被切走即静默退出
+   * （任务由服务端继续，重开页面经 customer_id+status=active 恢复）。
+   * 终态先清 busyWeek（「重新生成中」标记随之消失）再刷新；仅当用户仍查看该周时才动当前视图
+   * （生成期间切走不打扰、不拉回）。返回最终 job（面板消失返回 null）。
    */
   async function pollWeeklyJob(panel, customer, weekStart, jobId) {
+    const startedAt = Date.now();
     const notice = ensureWeeklyNotice(panel, `${weekStart.slice(5)} 周报生成中…（排队中）`);
-    for (let attempt = 0; attempt < 90; attempt++) {
+    for (let attempt = 0; panel.isConnected; attempt++) {
       const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
       const job = (data.jobs || [])[0];
       if (!job) throw new Error('生成任务不存在');
-      notice.textContent = `${weekStart.slice(5)} 周报生成中…（${job.status === 'running' ? '模型撰写中' : '排队中'}）`;
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      const minutes = Math.floor(elapsed / 60);
+      const duration = `${minutes}:${String(elapsed % 60).padStart(2, '0')}`;
+      const phase = job.progress || (job.status === 'running' ? '模型撰写中' : '排队中');
+      const slow = elapsed >= 180 ? '，耗时较长，仍在后台执行' : '';
+      notice.textContent = `${weekStart.slice(5)} 周报生成中…（${phase}，已进行 ${duration}${slow}）`;
       const stillViewing = weeklyViewWeek(panel) === weekStart;
       if (job.status === 'succeeded') {
         notice.remove();
@@ -2539,10 +2562,8 @@
         }
         return job;
       }
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, attempt < 90 ? 2000 : 5000));
     }
-    notice.textContent = '生成超时，任务仍在后台运行；稍后切换周可查看结果。';
-    delete panel.dataset.busyWeek;
     return null;
   }
 
@@ -2769,6 +2790,19 @@
       }
     });
     renderWeeklyBody(panel, customer, currentWeek());
+    // 面板重建（重开客户详情/切回 tab）时恢复当前周在途任务的进度展示与轮询；
+    // 其他周的任务不打扰当前视图，仍由服务端继续执行。
+    void (async () => {
+      try {
+        const { jobs } = await api(`/api/draft-jobs?customer_id=${encodeURIComponent(customer.id)}&status=active&kind=weekly_report`);
+        const job = (jobs || []).find((item) => item.weekStart === currentWeek());
+        if (job) {
+          panel.dataset.busyWeek = currentWeek();
+          renderWeeklyBody(panel, customer, currentWeek());
+          await pollWeeklyJob(panel, customer, currentWeek(), job.id);
+        }
+      } catch { /* 恢复失败不影响页面；任务仍在服务端继续 */ }
+    })();
     return panel;
   }
 
@@ -2817,10 +2851,9 @@
           editCase(detail.draft);
           return;
         }
-        const outcome = await pollCaseJob(customerId, result.jobId, result.fingerprint);
+        const outcome = await pollCaseJob(customerId, result.jobId, result.fingerprint, customerOverview);
         if (outcome.error) await alertDialog(`案例生成失败：${outcome.error}`);
-        else if (outcome.timeout) await alertDialog('生成超时，任务仍在后台运行；稍后重新打开客户详情可查看结果。');
-        else editCase(outcome.draft);
+        else if (outcome.draft) editCase(outcome.draft);
       } catch (error) { await alertDialog(error.message); }
       finally { generate.disabled = false; generate.textContent = '生成案例'; }
     };
@@ -2899,6 +2932,17 @@
     addTab('timeline', '统一时间线', renderTimeline(timeline));
     customerOverview.append(tabBar, tabBody);
     tabs[0].button.click();
+    // 重开客户详情时恢复在途生成任务的进度展示（不自动弹编辑窗，成功后刷新当前视图即可）。
+    void (async () => {
+      try {
+        const { jobs } = await api(`/api/draft-jobs?customer_id=${encodeURIComponent(customerId)}&status=active`);
+        const caseJob = (jobs || []).find((job) => job.kind === 'case_report');
+        if (caseJob) {
+          const outcome = await pollCaseJob(customerId, caseJob.id, caseJob.fingerprint, customerOverview);
+          if (outcome.draft && activeCustomerId === customerId) await openCustomer(customerId);
+        }
+      } catch { /* 恢复失败不影响页面；任务仍在服务端继续 */ }
+    })();
   }
 
   /**
@@ -3045,10 +3089,9 @@
             regenerate.disabled = true;
             regenerate.textContent = '重新生成中…';
             const result = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}/regenerate`, { method: 'POST' });
-            const outcome = await pollCaseJob(draft.customerId, result.jobId, result.fingerprint);
+            const outcome = await pollCaseJob(draft.customerId, result.jobId, result.fingerprint, card);
             if (outcome.error) await alertDialog(`重新生成失败：${outcome.error}`);
-            else if (outcome.timeout) await alertDialog('生成超时，任务仍在后台运行；稍后重新打开客户详情可查看结果。');
-            else editCase(outcome.draft);
+            else if (outcome.draft) editCase(outcome.draft);
           } catch (error) { await alertDialog(error.message); }
           finally { regenerate.disabled = false; regenerate.textContent = '重新生成'; }
         };
