@@ -8,19 +8,22 @@ import {
     CASE_LEGACY_SECTIONS, caseFiguresOf, caseMilestonesOf, caseSectionTexts, caseSystemUsageOf, caseV8NarrativeOf, isV8CaseDraft,
 } from './cases.js';
 
-/** docx 正文图宽（像素，≈页面可用宽度 @96dpi）；高按 viewBox 比例推导。 */
+/** docx 正文图显示宽（像素，≈页面可用宽度 @96dpi）；实际栅格化按 2x 宽渲染、transformation 减半——
+ * 显示尺寸不变、像素密度翻倍（620px 直接嵌入约 100 DPI，打印/导 PDF 发糊——vision 复核结论）。 */
 const DOCX_IMAGE_WIDTH = 620;
+const DOCX_RASTER_SCALE = 2;
 
 /** SVG → PNG（resvg 系统字体渲染中文）；失败返回 null——丢图不阻断导出，图注保留。 */
 function svgToPng(svg: string): { data: Buffer; width: number; height: number } | null {
   try {
     const resvg = new Resvg(svg, {
-      fitTo: { mode: 'width', value: DOCX_IMAGE_WIDTH },
+      fitTo: { mode: 'width', value: DOCX_IMAGE_WIDTH * DOCX_RASTER_SCALE },
       font: { loadSystemFonts: true, defaultFontFamily: 'PingFang SC' },
       background: 'rgba(255,255,255,1)',
     });
     const rendered = resvg.render();
-    return { data: rendered.asPng(), width: rendered.width, height: rendered.height };
+    // transformation 用显示尺寸（栅格尺寸/scale），Word 中物理宽度不变、清晰度 ×scale。
+    return { data: rendered.asPng(), width: Math.round(rendered.width / DOCX_RASTER_SCALE), height: Math.round(rendered.height / DOCX_RASTER_SCALE) };
   } catch {
     return null;
   }

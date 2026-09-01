@@ -627,6 +627,8 @@ test('workbench: recent Hemory sync scans a rolling 7-day Shanghai window', asyn
 // Hemory MCP 返回两条录音的分页转写；毒丸录音排在前面（Map 迭代序 = 首次出现序）。
 function hemoryTwoRecordingMcp(): { mcp: any; calls: () => number } {
   let calls = 0;
+  // 日期相对当前时间（昨天/前天）：滚动 7 天同步窗口的夹具写死历史日期会在数天后翻出窗口（日期翻转 flake）。
+  const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 19) + 'Z';
   return {
     calls: () => calls,
     mcp: {
@@ -634,13 +636,13 @@ function hemoryTwoRecordingMcp(): { mcp: any; calls: () => number } {
         calls++;
         return { text: '# more=false\n'
           + '## recording-poison\n'
-          + '2026-08-25T05:00:00Z\t客户\t当前上线流程在审批节点经常被阻塞，需要排查权限配置。\n'
-          + '2026-08-25T05:00:20Z\tCSM\t我们会收集报错时间和操作路径，先定位具体失败环节。\n'
-          + '2026-08-25T05:00:40Z\t客户\t请把排查结论和后续处理计划同步给项目负责人。\n'
+          + `${daysAgo(2)}\t客户\t当前上线流程在审批节点经常被阻塞，需要排查权限配置。\n`
+          + `${daysAgo(2)}\tCSM\t我们会收集报错时间和操作路径，先定位具体失败环节。\n`
+          + `${daysAgo(2)}\t客户\t请把排查结论和后续处理计划同步给项目负责人。\n`
           + '## recording-fresh\n'
-          + '2026-08-26T06:00:00Z\t客户\t希望月底前完成新版权限方案的评审。\n'
-          + '2026-08-26T06:00:20Z\tCSM\t我先安排评审材料和时间窗口。\n'
-          + '2026-08-26T06:00:40Z\t客户\t评审通过后再同步实施计划。\n', isError: false } as any;
+          + `${daysAgo(1)}\t客户\t希望月底前完成新版权限方案的评审。\n`
+          + `${daysAgo(1)}\tCSM\t我先安排评审材料和时间窗口。\n`
+          + `${daysAgo(1)}\t客户\t评审通过后再同步实施计划。\n`, isError: false } as any;
       },
     } as any,
   };
@@ -655,8 +657,9 @@ test('workbench: a poisoned recording fails to partial while later recordings st
     // 片段可见性走 activateHemoryFragments 代际门（listHemoryFragments 只认 active=1），fake segmenter 模拟分段服务完成时的两步。
     const service = new PortfolioSyncService(db, mcp, async (recording) => {
       if (String(recording.externalId).includes('poison')) throw new Error('Hemory 分段已达到最大重试次数');
+      // 片段时间跟随录音本身（夹具已是相对日期）：写死历史日期会在数天后滚出收件箱窗口（日期翻转 flake）。
       const event = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'v3.2:fresh:t1',
-        title: '权限方案评审', occurredAt: '2026-08-26T06:00:00Z', payload: { recordingId: 'recording-fresh' }, attributionStatus: 'unattributed' });
+        title: '权限方案评审', occurredAt: recording.occurredAt, payload: { recordingId: 'recording-fresh' }, attributionStatus: 'unattributed' });
       db.activateHemoryFragments(recording.id, `fp-${recording.externalId}`, [event.id]);
       return { events: [event], proposedCount: 1, includedCount: 1 };
     });
@@ -3563,8 +3566,8 @@ test('workbench: weekly report surfaces real model error and retries transient f
     } as any;
     const failingService = new WeeklyReportService(db, mcp, failing);
     const job1 = failingService.generate('crm-w7', '2026-08-25');
-    // 指数退避 5s+15s：等待窗口放宽到 75 秒。
-    for (let i = 0; i < 3750 && db.getDraftJob(job1.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    // 指数退避 5s+15s+45s（4 次尝试）：等待窗口放宽到 150 秒。
+    for (let i = 0; i < 7500 && db.getDraftJob(job1.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(errorCalls, 3, '必须自动重试满 3 次');
     const failed = db.getDraftJob(job1.jobId!)!;
     assert.equal(failed.status, 'failed');
@@ -4026,13 +4029,24 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal(prompts.length, 7, '规划 + 6 章节共 7 次模型调用');
     assert.match(prompts[0], /规划客户成功案例草稿的章节结构/, '首调用必须是规划阶段');
     assert.match(prompts[1], /只写这一个章节/);
-    // v7 前序章节注入（v8 沿用）：首章（客户及背景介绍）无锚点块；第 2 章起注入已定稿前章正文与一致性要求。
+    // v7 前序章节注入（v8 沿用；v8.1 起第二波并行，波内两章只见首章锚点——与波次语义一致）：
+    // 首章（客户及背景介绍）无锚点块；业务现状/业务诉求都锚定客户及背景介绍章。
     assert.ok(!prompts[1].includes('此前章节已定稿正文'), '首章（客户及背景介绍）不得注入前序章节块');
-    assert.match(prompts[2], /此前章节已定稿正文/, '第 2 章须注入前序章节锚点');
-    assert.match(prompts[2], /【客户及背景介绍】/, '锚点带章节标签');
-    assert.ok(prompts[2].includes(CASE_CONTENT.company_info), '锚点含客户及背景介绍章定稿正文');
-    assert.match(prompts[2], /专有名词、产品模块名、客户称谓必须与前章用词保持一致/);
-    assert.ok(prompts[6].includes(CASE_CONTENT.summary) && prompts[6].includes(CASE_CONTENT.company_info), '末章锚点含全部前序五章');
+    const statusPrompt = prompts.find((prompt) => prompt.includes('「业务现状」章节'))!;
+    const demandsPrompt = prompts.find((prompt) => prompt.includes('「业务诉求」章节'))!;
+    for (const anchored of [statusPrompt, demandsPrompt]) {
+      assert.match(anchored, /此前章节已定稿正文/, '第 2 波章节须注入前序章节锚点');
+      assert.match(anchored, /【客户及背景介绍】/, '锚点带章节标签');
+      assert.ok(anchored.includes(CASE_CONTENT.company_info), '锚点含客户及背景介绍章定稿正文');
+      assert.match(anchored, /专有名词、产品模块名、客户称谓必须与前章用词保持一致/);
+    }
+    // 末章（项目总结，独立波次）锚点含全部前序五章定稿文本。
+    const summaryPrompt = prompts.find((prompt) => prompt.includes('「项目总结」章节'))!;
+    assert.ok(summaryPrompt.includes(CASE_CONTENT.summary) && summaryPrompt.includes(CASE_CONTENT.company_info)
+      && summaryPrompt.includes(CASE_CONTENT.demands[0]) && summaryPrompt.includes(CASE_CONTENT.solution_sections[0].text), '末章锚点含全部前序五章');
+    // v8.1 章节瘦身：章节 prompt 不带规划脚手架，规划 prompt 带全量。
+    assert.ok(!statusPrompt.includes('"source_catalog"'), '章节 prompt 不注入来源目录');
+    assert.ok(prompts[0].includes('"source_catalog"'), '规划 prompt 保留全量目录');
     // v7 信号表兜底召回（v8 沿用）：规划 prompt 须声明信号表只是线索而非全集。
     assert.match(prompts[0], /信号表兜底/, '规划 prompt 含兜底召回规则');
     assert.match(prompts[0], /不受信号表限制/);
@@ -4143,11 +4157,11 @@ test('workbench: case generation failure marks job failed without draft', async 
     } as any;
     const service = new CaseService(db, caseMcp(), failing);
     const result = service.generate('crm-c1');
-    // 指数退避 5s+15s：等待窗口放宽到 75 秒。
-    for (let i = 0; i < 3750 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    // 指数退避 5s+15s+45s（4 次尝试）：等待窗口放宽到 150 秒。
+    for (let i = 0; i < 7500 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
     const job = db.getDraftJob(result.jobId!)!;
     assert.equal(job.status, 'failed');
-    assert.match(job.error ?? '', /规划模型调用失败（第 3\/3 次）: Request timed out\./);
+    assert.match(job.error ?? '', /规划模型调用失败（第 4\/4 次）: Request timed out\./);
     assert.equal(db.listCaseDrafts('crm-c1').length, 0, '失败不落草稿');
     // 失败任务无墓碑指纹：重新 generate 会创建新任务（不因旧任务指纹被幂等短路）——只断言任务创建，
     // 不触发执行（退避中的后台 process 会活过测试关库窗口）。
@@ -4523,18 +4537,23 @@ test('workbench: delivered_records only includes delivered ones records', async 
       externalId: 'deliv-T-1', displayId: 'T-300', title: '统计报表报错', occurredAt: '2026-03-03T03:00:00Z', payload: { field005: { name: '进行中', category: 'in_progress' } } });
     db.upsertSourceEvent({ customerId: 'crm-deliv', sourceSystem: 'crm', sourceType: 'crm_followup',
       externalId: 'deliv-F-1', title: '完成季度回访', occurredAt: '2026-03-04T03:00:00Z', payload: { active_record_content: '完成季度回访并记录' } });
-    let capturedPrompt = '';
+    let capturedPrompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
-        capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        const prompt = input.messages[0].content;
+        capturedPrompts.push(prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
     const result = service.generate('crm-deliv');
     await waitForJob(db, result.jobId!);
-    const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
+    const capturedPrompt = capturedPrompts.join('\n');
+    // v8.1：注入断言解析规划 prompt（章节 prompt 为瘦身形态，无 records/信号表）。
+    const planPrompt = capturedPrompts.find((prompt) => prompt.includes('规划客户成功案例草稿的章节结构'))!;
+    const context = JSON.parse(planPrompt.slice(planPrompt.indexOf('上下文：') + '上下文：'.length));
+    const chapterPrompt = capturedPrompts.find((prompt) => prompt.includes('「业务现状」章节'))!;
     // v6：ONES 记录明细不注入——工单/建议标题不进 prompt，records 只剩 CRM 侧非跟进记录（此处为空）。
     assert.ok(!capturedPrompt.includes('需求池模块上线'), 'ONES 建议明细不得注入');
     assert.ok(!capturedPrompt.includes('统计报表报错'), 'ONES 工单明细不得注入');
@@ -4543,10 +4562,15 @@ test('workbench: delivered_records only includes delivered ones records', async 
     // 交付事实仍以聚合统计参与：建议共 1 项已完成。
     assert.ok(capturedPrompt.includes('建议与反馈共 1 项，已完成 1 项'), 'delivery_stats 聚合须含 ONES 交付事实');
     assert.ok(context.delivery_stats?.source_ref === 'stats:delivery', 'stats 证据条目保留可引用');
-    // CRM 跟进仍作为案例素材注入。
+    // CRM 跟进仍作为案例素材注入（规划与章节瘦身形态都保留写作素材块）。
     assert.ok(capturedPrompt.includes('完成季度回访'), 'CRM 跟进仍注入');
-    // 上下文键齐备（v6 口径）。
+    assert.ok(chapterPrompt.includes('完成季度回访'), '章节瘦身形态保留 CRM 跟进素材');
+    // 上下文键齐备（v6 口径，规划全量）；章节瘦身形态剥规划脚手架但保留 delivery_stats/communications。
     for (const key of ['pain_point_signals', 'value_signals', 'web_context', 'delivery_stats']) assert.ok(key in context);
+    assert.ok(!chapterPrompt.includes('"source_catalog"'), '章节 prompt 不注入来源目录');
+    assert.ok(!chapterPrompt.includes('"allowed_source_refs"'), '章节 prompt 不注入规划用 ref 清单');
+    assert.ok(chapterPrompt.includes('"communications"'), '章节 prompt 保留转写素材');
+    assert.ok(chapterPrompt.includes('"delivery_stats"'), '章节 prompt 保留交付统计');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4781,7 +4805,7 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
     const draft = db.listCaseDrafts('crm-cov')[0];
     assert.ok(draft, '触发补写的生成仍须产出草稿');
     assert.equal(calls, 8, '规划+6 章节后覆盖不足须追加一次补写调用');
-    const enrichPrompt = prompts[7];
+    const enrichPrompt = prompts.find((prompt) => prompt.includes('未引用素材清单'))!;
     assert.match(enrichPrompt, /未引用素材清单/, '补写 prompt 须含未引用素材清单');
     assert.match(enrichPrompt, /正面反馈话题/, '补写 prompt 须列出未引用的客户正面反馈');
     const coverage = (draft.fields as any).coverage;
@@ -4923,11 +4947,13 @@ test('workbench: case figures generated, sanitized, persisted and rendered as ma
     const service = new CaseService(db, caseMcp(), runtime);
     const result = service.generate('crm-c1');
     await waitForJob(db, result.jobId!);
-    // 规划 + 6 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
+    // 规划 + 6 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）；
+    // v8.1 并行化后 prompt 顺序不再确定（配图与后续波次章节重叠），按内容定位断言。
     assert.equal(prompts.length, 8, '规划+6章+1图共 8 次模型调用');
-    assert.match(prompts[7], /章节配图/, '第 8 次调用是逐图生成');
-    assert.match(prompts[7], /绘图规范/, '图 prompt 含画法规范');
-    assert.match(prompts[7], /不得虚构环节、模块或数字/, '图内容事实边界');
+    const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图'))!;
+    assert.ok(figurePrompt, '逐图生成调用必须存在');
+    assert.match(figurePrompt, /绘图规范/, '图 prompt 含画法规范');
+    assert.match(figurePrompt, /不得虚构环节、模块或数字/, '图内容事实边界');
     const draft = db.listCaseDrafts('crm-c1')[0];
     assert.ok(draft, '带图生成必须产出草稿');
     const figures = (draft.fields as any).figures;
@@ -5022,6 +5048,51 @@ test('workbench: milestone figure kind planned for value chapter and validated',
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: plan salvage mode drops drifted items on final attempt instead of failing the job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-salvage-'));
+  const db = new WorkbenchDatabase(dir);
+  // 规划三次尝试之间的指数退避（5s/15s）远超 waitForJob 窗口，测试内加速。
+  const previousBaseMs = caseModelRetryDelays.baseMs;
+  caseModelRetryDelays.baseMs = 1;
+  try {
+    seedCaseCustomer(db);
+    let planCalls = 0;
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          planCalls += 1;
+          // 每次规划都带一条漂移摘录的业务诉求条目（摘录不在任何来源原文中）——前三次严格拒绝、末次打捞。
+          const plan = casePlanContent(CASE_CONTENT, prompt);
+          const demands = plan.plan.find((entry: any) => entry.section === 'demands')!;
+          demands.items[0].excerpt = '这条摘录不存在于任何来源原文之中用于测试打捞模式';
+          return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
+        }
+        // 业务诉求章的产出条数与打捞后的规划对位（漂移条目已丢弃）。
+        if (prompt.includes('「业务诉求」章节')) {
+          return { content: [{ type: 'text', text: JSON.stringify({ texts: CASE_CONTENT.demands.slice(1) }) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'succeeded', '第 3 次打捞模式不得让任务失败');
+    assert.equal(planCalls, 4, '前三次严格拒绝 + 末次打捞');
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '打 salvage 后仍须产出草稿');
+    // 漂移条目被丢弃：业务诉求只剩 1 条（原 2 条），丢弃轨迹进 unknowns。
+    assert.equal((draft.fields as any).demands.length, CASE_CONTENT.demands.length - 1, '漂移条目被丢弃');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('打捞模式')), '丢弃轨迹进 unknowns');
+    // 章节产出与打捞后的规划条目对位（claim_evidence 数 = 打捞后条目数）。
+    const expectedAfterSalvage = CASE_CONTENT.demands.length - 1;
+    assert.equal((draft.fields as any).demands.length, expectedAfterSalvage);
+  } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: case ones records excluded from prompt but still feed fingerprint and stats', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-budget-'));
   const db = new WorkbenchDatabase(dir);
@@ -5032,18 +5103,21 @@ test('workbench: case ones records excluded from prompt but still feed fingerpri
         externalId: `bud-T-${i}`, displayId: `T-5${String(i).padStart(3, '0')}`, title: `预算事件 ${i}`,
         occurredAt: `2026-03-${String((i % 28) + 1).padStart(2, '0')}T03:00:00Z`, payload: { field005: { category: 'in_progress' } } });
     }
-    let capturedPrompt = '';
+    let capturedPrompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
-        capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        capturedPrompts.push(input.messages[0].content);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, capturedPrompts[capturedPrompts.length - 1])) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
     const result = service.generate('crm-budget');
     await waitForJob(db, result.jobId!);
-    const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
+    const capturedPrompt = capturedPrompts.join('\n');
+    // v8.1：章节 prompt 是瘦身形态（无 records/catalog），注入断言统一解析规划 prompt 的全量上下文。
+    const planPrompt = capturedPrompts.find((prompt) => prompt.includes('规划客户成功案例草稿的章节结构'))!;
+    const context = JSON.parse(planPrompt.slice(planPrompt.indexOf('上下文：') + '上下文：'.length));
     // v6：ONES 明细（数百条工单）不注入——records 为空、目录无工单行，上下文不被工单撑爆。
     assert.deepEqual(context.records, [], 'ONES 工单不进 records');
     assert.ok(!capturedPrompt.includes('预算事件 1'), '工单标题不得注入');

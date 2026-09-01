@@ -183,6 +183,13 @@ const CASE_SECTION_MAX_CHARS = 1_200;
 export const PLAN_MAX_TOKENS = 32_768;
 /** 案例生成各阶段模型调用重试退避（默认 5s/15s/45s；测试可调 baseMs 加速，与 drafts 同款）。 */
 export const caseModelRetryDelays = { baseMs: 5_000 };
+/** 请求超时按输入规模自适应：中继大上下文的首字节延迟随 token 数线性增长（实测 ~40k token ≈ 70s，
+ * 高峰期规划级 90k token 可超 180s），固定 180s 会在首字节前击穿（真实验收连败根因）；
+ * 流一旦开始（thinking/text delta 到达）不受此限制——图调用 10 分钟长流在 180s 下历史成功。
+ * 基线 180s + 每 token 5ms 首字节预算（实测 ~1.7ms/token 的 3 倍余量）。 */
+export function caseModelTimeoutMs(prompt: string): number {
+  return 180_000 + estimateTokens(prompt) * 5;
+}
 /** 单个章节生成时 completion 上限：v8 章节正文最长数千字（方案章 2~6 小节 × 600 字）+ 推理思考余量
  * （真实验收教训：deepseek 思考 token 与输出共享上限，v5 的 8k 曾被思考吃掉截断）。 */
 const CHAPTER_MAX_TOKENS = 16_384;
@@ -239,6 +246,22 @@ export const CASE_WEB_ANGLES: ReadonlyArray<{ key: string; label: string; query:
 
 /** 每角度检索取用的最大结果数。 */
 const CASE_WEB_PER_ANGLE_LIMIT = 5;
+/** 检索并发上限（角度间独立，失败互不影响；限流友好）。 */
+const CASE_WEB_CONCURRENCY = 3;
+
+/** 有限并发映射：保持结果与输入同序（章节波次/检索角度并行的共用工具）。 */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index]!, index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
 
 /** 案例联网检索依赖（与 web_search 工具/WebIntelService 同源配置，测试可注入 fetcher）。 */
 export interface CaseWebSearchDeps {
@@ -292,7 +315,7 @@ function sourceTier(url: string, officialDomains: Set<string>): Exclude<CaseWebS
 }
 
 /**
- * 客户公开信息检索：逐角度现搜「客户名 + 角度词」，标题/摘要须含客户全称或简称（削减同名噪音）。
+ * 客户公开信息检索：并发现搜「客户名 + 角度词」（限 CASE_WEB_CONCURRENCY），标题/摘要须含客户全称或简称（削减同名噪音）。
  * 单角度失败只记入 errors 不阻断（生成不依赖检索成功）；全空由调用方按「未搜到=unknown」口径提示模型。
  */
 export async function searchCaseWebContext(customer: Customer, deps: CaseWebSearchDeps, onProgress?: (text: string) => void): Promise<CaseWebSearchContext> {
@@ -301,8 +324,8 @@ export async function searchCaseWebContext(customer: Customer, deps: CaseWebSear
   const context: CaseWebSearchContext = { searched: 0, searchedAt: new Date().toISOString(), results: [], errors: [] };
   const seenUrls = new Set<string>();
   const officialDomains = customerOfficialDomains(customer);
-  for (const [index, angle] of CASE_WEB_ANGLES.entries()) {
-    onProgress?.(`联网检索公开动态（${index + 1}/${CASE_WEB_ANGLES.length}）${angle.label}…`);
+  onProgress?.(`联网检索公开动态（${CASE_WEB_ANGLES.length} 个角度并行）…`);
+  const outcomes = await mapWithConcurrency(CASE_WEB_ANGLES, CASE_WEB_CONCURRENCY, async (angle) => {
     try {
       const outcome = await performRawWebSearch({
         query: `${searchName} ${angle.query}`,
@@ -312,38 +335,46 @@ export async function searchCaseWebContext(customer: Customer, deps: CaseWebSear
         topic: 'general',
         fetcher: deps.fetcher,
       });
-      context.searched += 1;
-      for (const result of outcome.results) {
-        if (!mentionsCustomer(result, names)) continue;
-        const url = String(result.url ?? '').trim();
-        const snippet = String(result.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
-        // 标题命中只能用于召回，不能单独成为公开事实；没有正文摘要的结果不送入模型。
-        if (!url || snippet.length < 8 || !mentionsCustomer({ title: '', content: snippet }, names)) continue;
-        let canonicalUrl = url;
-        try {
-          const parsed = new URL(url);
-          parsed.hash = '';
-          for (const key of [...parsed.searchParams.keys()]) if (/^(?:utm_|spm|from)/i.test(key)) parsed.searchParams.delete(key);
-          canonicalUrl = parsed.toString();
-        } catch { /* keep raw URL */ }
-        if (seenUrls.has(canonicalUrl)) continue;
-        seenUrls.add(canonicalUrl);
-        let domain = '';
-        try { domain = new URL(canonicalUrl).hostname; } catch { /* invalid URL already retained for audit */ }
-        context.results.push({
-          id: `web:${hash(canonicalUrl).slice(0, 16)}`,
-          angle: angle.label,
-          title: String(result.title ?? '').trim().slice(0, 160),
-          snippet,
-          domain,
-          sourceTier: sourceTier(canonicalUrl, officialDomains),
-          url: canonicalUrl,
-          date: String(result.publishedDate ?? '').trim().slice(0, 20),
-        });
-      }
+      return { angle, outcome } as const;
     } catch (error) {
-      context.errors.push(`${angle.label}: ${(error as Error).message}`);
-      onProgress?.(`联网检索公开动态（${index + 1}/${CASE_WEB_ANGLES.length}）${angle.label}（该角度检索失败，已跳过）`);
+      return { angle, error: `${angle.label}: ${(error as Error).message}` } as const;
+    }
+  });
+  for (const outcome of outcomes) {
+    if ('error' in outcome) {
+      context.errors.push(outcome.error ?? `${outcome.angle.label}: 未知错误`);
+      onProgress?.(`联网检索公开动态 ${outcome.angle.label}（该角度检索失败，已跳过）`);
+      continue;
+    }
+    context.searched += 1;
+    const angle = outcome.angle;
+    for (const result of outcome.outcome.results) {
+      if (!mentionsCustomer(result, names)) continue;
+      const url = String(result.url ?? '').trim();
+      const snippet = String(result.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
+      // 标题命中只能用于召回，不能单独成为公开事实；没有正文摘要的结果不送入模型。
+      if (!url || snippet.length < 8 || !mentionsCustomer({ title: '', content: snippet }, names)) continue;
+      let canonicalUrl = url;
+      try {
+        const parsed = new URL(url);
+        parsed.hash = '';
+        for (const key of [...parsed.searchParams.keys()]) if (/^(?:utm_|spm|from)/i.test(key)) parsed.searchParams.delete(key);
+        canonicalUrl = parsed.toString();
+      } catch { /* keep raw URL */ }
+      if (seenUrls.has(canonicalUrl)) continue;
+      seenUrls.add(canonicalUrl);
+      let domain = '';
+      try { domain = new URL(canonicalUrl).hostname; } catch { /* invalid URL already retained for audit */ }
+      context.results.push({
+        id: `web:${hash(canonicalUrl).slice(0, 16)}`,
+        angle: angle.label,
+        title: String(result.title ?? '').trim().slice(0, 160),
+        snippet,
+        domain,
+        sourceTier: sourceTier(canonicalUrl, officialDomains),
+        url: canonicalUrl,
+        date: String(result.publishedDate ?? '').trim().slice(0, 20),
+      });
     }
   }
   return context;
@@ -1145,8 +1176,18 @@ interface RenderedInput {
   budget: InputBudget;
 }
 
-/** 渲染注入上下文（按预算等级截断素材规模）。v6：ONES 记录明细不注入（只经 delivery_stats 聚合参与）。 */
-function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): string {
+/** 章节撰写注入保留的素材块：写作素材本体；source_catalog/信号表/allowed_refs 等规划脚手架不注入
+ * （摘录校验由服务端对位组装执行，章节写作不需要目录索引——省下的输入 token 是逐章重复注入的大头）。 */
+const CHAPTER_CONTEXT_KEYS = new Set(['customer', 'delivery_stats', 'evidence_signals', 'communications', 'crm_followups', 'web_context']);
+
+/** 章节注入形态：从全量 blocks 中只保留写作素材块；摘要路径的压缩文本已最小化，整体复用。 */
+function chapterContextOf(blocks: Record<string, unknown>, fallbackText: string): string {
+  if (!Object.keys(blocks).length) return fallbackText;
+  return JSON.stringify(Object.fromEntries(Object.entries(blocks).filter(([key]) => CHAPTER_CONTEXT_KEYS.has(key))));
+}
+
+/** 渲染注入上下文的素材块对象（按预算等级截断素材规模）。v6：ONES 记录明细不注入（只经 delivery_stats 聚合参与）。 */
+function renderInputBlocks(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): Record<string, unknown> {
   const { customer, timeline, hemory, evidence, risk, opportunities, webContext } = input;
   const confirmed = timeline.filter((event) => event.attributionStatus === 'confirmed');
   // records 只保留 CRM 侧非跟进记录（ONES 明细已剔除，实践上该块通常为空——保留 schema 键避免下游断言漂移）。
@@ -1174,7 +1215,7 @@ function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, 
   const signals = caseFragmentSignals(hemory, customer.csmName);
   const clip = (list: CaseFragmentSignal[]) => list.slice(0, budget.maxSignal);
   const statsSource = snapshot.sources.find((item) => item.id === CASE_STATS_SOURCE_ID);
-  return JSON.stringify({
+  return {
     customer: { source_ref: `customer:${customer.id}`, ...customerPublicProfile(customer) },
     delivery_stats: statsSource ? { source_ref: CASE_STATS_SOURCE_ID, facts: statsSource.excerpt } : undefined,
     evidence_signals: evidence.slice(0, budget.maxEvidence).map((item) => ({ source_ref: item.id, kind: item.kind, label: item.label,
@@ -1197,7 +1238,12 @@ function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, 
     web_context: webContext
       ? { searched: webContext.searched, results: webContext.results, errors: webContext.errors.length ? webContext.errors : undefined }
       : '本次生成未联网检索，背景只依据内部档案与沟通记录',
-  });
+  };
+}
+
+/** 全量注入文本（规划/补写/摘要判定共用；预算分级判定也以它为准）。 */
+function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): string {
+  return JSON.stringify(renderInputBlocks(input, snapshot, budget));
 }
 
 /**
@@ -1208,10 +1254,11 @@ function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, 
  * 降级/摘要轨迹记入 fields.input_summary 供 CLI/UI 展示。
  */
 async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
-  onProgress?: (text: string) => void): Promise<{ contextText: string; inputSummary: Record<string, unknown> | null }> {
+  onProgress?: (text: string) => void): Promise<{ contextText: string; chapterContextText: string; inputSummary: Record<string, unknown> | null }> {
   const trials: Array<{ level: number; tokens: number; action: string }> = [];
   let budget = INPUT_DEGRADATION_BUDGETS[0];
-  let text = renderInputText(input, snapshot, budget);
+  let blocks = renderInputBlocks(input, snapshot, budget);
+  let text = JSON.stringify(blocks);
   let tokens = estimateTokens(text);
   trials.push({ level: 0, tokens, action: '完整注入' });
   let summary: string | null = null;
@@ -1219,7 +1266,8 @@ async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapsh
     for (const candidate of INPUT_DEGRADATION_BUDGETS.slice(1)) {
       onProgress?.(`输入素材约 ${tokens} tokens 超出预算 ${INPUT_BUDGET_TOKENS}，${candidate.description}…`);
       budget = candidate;
-      text = renderInputText(input, snapshot, budget);
+      blocks = renderInputBlocks(input, snapshot, budget);
+      text = JSON.stringify(blocks);
       tokens = estimateTokens(text);
       trials.push({ level: candidate.level, tokens, action: candidate.description });
       if (tokens <= INPUT_BUDGET_TOKENS) break;
@@ -1232,6 +1280,7 @@ async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapsh
     if (compressed) {
       summary = compressed;
       text = renderSummaryContext(summary, snapshot);
+      blocks = {};
       tokens = estimateTokens(text);
       trials.push({ level: budget.level, tokens, action: '素材摘要压缩' });
       if (tokens > INPUT_BUDGET_TOKENS) throw new Error(`上下文预算超限：摘要后仍约 ${tokens} tokens（上限 ${INPUT_BUDGET_TOKENS}），降级轨迹：${trials.map((t) => `${t.level}:${t.action}=${t.tokens}`).join(' → ')}`);
@@ -1239,9 +1288,12 @@ async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapsh
       throw new Error(`上下文预算超限：素材摘要失败，降级轨迹：${trials.map((t) => `${t.level}:${t.action}=${t.tokens}`).join(' → ')}`);
     }
   }
-  if (!trials.some((t) => t.level > 0) && !summary) return { contextText: text, inputSummary: null };
+  // 章节注入形态：同一预算等级下的写作素材子集（目录/信号表等规划脚手架剥离）；摘要路径整体复用压缩文本。
+  const chapterContextText = chapterContextOf(blocks, text);
+  if (!trials.some((t) => t.level > 0) && !summary) return { contextText: text, chapterContextText, inputSummary: null };
   return {
     contextText: text,
+    chapterContextText,
     inputSummary: {
       budget_tokens: INPUT_BUDGET_TOKENS,
       trials: trials.map((t) => ({ ...t, tokens: t.tokens })),
@@ -1267,7 +1319,7 @@ async function summarizeCaseInput(runtime: Runtime, input: CasePromptInput, mate
       systemPrompt: '你是素材压缩助手。只做忠实压缩：保留 source_ref、日期、状态、数字与客户原话要点，不添加任何新事实。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(prompt) });
     if (response.stopReason === 'error') {
       if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 5_000));
       continue;
@@ -1306,9 +1358,11 @@ function renderSummaryContext(summary: string, snapshot: CaseContextSnapshot): s
 const CASE_SYSTEM_PROMPT = '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。';
 
 /** 规划产物契约校验：六章节齐全且条目形态合规、source_refs 合法；excerpt 必须能在来源原文定位
- * （与组装后的 parseCaseContent 同一口径——规划期即拦截摘录漂移，让 3 次规划重试真正兜住，
- * 避免章节全部写完后才在组装校验失败浪费整轮调用）。 */
-function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseEvidenceSnapshotItem[], communications?: CaseCommunicationSource[]): CasePlan {
+ * （与组装后的 parseCaseContent 同一口径——规划期即拦截摘录漂移，让规划重试真正兜住，
+ * 避免章节全部写完后才在组装校验失败浪费整轮调用）。
+ * salvage 模式（第 3 次尝试兜底）：非 intro/summary 章节的漂移条目直接丢弃（各章保底 ≥1 条），
+ * 宁少一条不因单条漂移报废整轮生成；丢弃轨迹进 unknowns 供 CSM 复核。 */
+function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseEvidenceSnapshotItem[], communications?: CaseCommunicationSource[], options: { salvage?: boolean } = {}): CasePlan {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型未返回规划 JSON 对象');
   const raw = value as Record<string, unknown>;
   const plan: Array<{ section: CaseChapterKey; items: PlanItem[] }> = Array.isArray(raw.plan) ? raw.plan.flatMap((entry) => {
@@ -1357,7 +1411,7 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
         return !!source && sourceSupportsExcerpt(source, item.excerpt!, communications);
       });
     for (const entry of plan) {
-      if (entry.section !== 'intro' && entry.section !== 'summary') {
+      if (entry.section !== 'intro' && entry.section !== 'summary' && !options.salvage) {
         for (const item of entry.items) {
           const label = CASE_SECTIONS.find((section) => section.key === entry.section)!.label;
           if (!item.excerpt) throw new Error(`${label}条目缺少原文摘录`);
@@ -1426,6 +1480,26 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
   if (valueItems.filter((item) => item.slot === 'lesson').length > 3) throw new Error('规划 value 章节复盘条目（slot=lesson）至多 3 条');
   const unknowns = Array.isArray(raw.unknowns) ? raw.unknowns.map(String).map((item) => item.trim()).filter(Boolean) : [];
   const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : undefined;
+  // 摘录定位校验：非 intro/summary 章节默认整份拒绝（重试兜底，v7 口径）；
+  // salvage 模式（第 3 次尝试）改为丢弃漂移条目——各章保底 ≥1 条，宁少一条不报废整轮。
+  if (sources?.length && options.salvage) {
+    const sourceMap = new Map(sources.map((item) => [item.id, item]));
+    const excerptLocatable = (item: PlanItem) => !!item.excerpt
+      && item.source_refs.some((ref) => {
+        const source = sourceMap.get(ref);
+        return !!source && sourceSupportsExcerpt(source, item.excerpt!, communications);
+      });
+    let droppedCount = 0;
+    for (const entry of plan) {
+      if (entry.section === 'intro' || entry.section === 'summary') continue; // 这两章有档案锚点回退
+      const before = entry.items.length;
+      entry.items = entry.items.filter((item) => excerptLocatable(item));
+      droppedCount += before - entry.items.length;
+    }
+    if (droppedCount) unknowns.push(`规划期 ${droppedCount} 条要点因摘录漂移被丢弃（末次尝试打捞模式），如需补全请重新生成`);
+    const empty = plan.filter((entry) => !entry.items.length);
+    if (empty.length) throw new Error(`打捞后章节条目为空: ${empty.map((entry) => CASE_SECTIONS.find((section) => section.key === entry.section)!.label).join('、')}`);
+  }
   // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 4 张。
   const figures: PlanFigure[] = [];
   if (Array.isArray(raw.figures)) {
@@ -1616,15 +1690,16 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     + `- unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」（如系统使用情况表缺账号数/有效期/使用部门，建议向客户成功经理或合同记录确认）。\n`
     + `${onesAsrAliasRule()}该订正适用于全部正文与摘录。\n`
     + `上下文：${contextText}`;
-  const MAX_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
+  // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
+  const MAX_ATTEMPTS = 4;
+  const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
   let lastError = '模型未返回可解析的案例规划 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
       systemPrompt: CASE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(prompt) });
     if (response.stopReason === 'error') {
       lastError = `规划模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_ATTEMPTS) {
@@ -1635,7 +1710,10 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     }
     const value = cleanJson(extractText(response.content));
     if (value) {
-      try { return parseCasePlan(value, new Set(snapshot.sources.map((item) => item.id)), snapshot.sources, communications); }
+      try {
+        // 末次尝试启用打捞模式：漂移条目丢弃而非整份拒绝（真实验收教训：单条漂移连败报废整轮生成）。
+        return parseCasePlan(value, new Set(snapshot.sources.map((item) => item.id)), snapshot.sources, communications,
+          { salvage: attempt >= MAX_ATTEMPTS }); }
       catch (error) {
         lastError = `模型规划契约不合格（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${(error as Error).message}`;
         onProgress?.(lastError);
@@ -1686,15 +1764,16 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
     + `- 篇幅契约是质量要求而非硬性字符数：素材不足以支撑下限时允许略低，禁止空泛注水。\n`
     + `${onesAsrAliasRule()}该订正适用于全部正文。\n`
     + `上下文：${contextText}`;
-  const MAX_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
+  // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
+  const MAX_ATTEMPTS = 4;
+  const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
   let lastError = `模型未返回「${definition.label}」章节 JSON`;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
       systemPrompt: CASE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(`撰写「${definition.label}」中… ${modelProgressText(tick)}`) : undefined, { maxTokens: CHAPTER_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(`撰写「${definition.label}」中… ${modelProgressText(tick)}`) : undefined, { maxTokens: CHAPTER_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(prompt) });
     if (response.stopReason === 'error') {
       lastError = `「${definition.label}」模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_ATTEMPTS) {
@@ -1764,6 +1843,7 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
   if (!materials.length) return null; // 规划引用的来源已不可解析（如降级摘要后），直接放弃该图
   const prompt = `为客户「${input.customer.name}」的客户成功案例绘制「${sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[figure.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。只输出 JSON：{"svg":"...","caption":"..."}\n`
     + `绘图规范：\n`
+    + `- 思考从简：先在思考里直接定下节点清单与连接关系（节点总数不超过 10 个、每个标签不超过 10 个字）就立即开始输出，不要反复推敲布局与配色；{"svg","caption"} JSON 是唯一交付物，SVG 通常 2~4k 字符即可。\n`
     + `- svg 是一个自包含的 <svg>…</svg> 字符串（不引用外部资源、不含脚本与交互属性），画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）。\n`
     + `- 节点用 <rect> 圆角框 + <text> 中文标签（font-size 不小于 12；每行不超过 10 个汉字，长标签用 <tspan> 拆行且每个 tspan 必须带递增 dy（如 dy="18"，首个可不带），否则多行文字会叠在一起）；<text> 元素内严禁直接换行写多行文字——多行必须且只能用 tspan 逐行拆分；连线用 <line> 或 <path> 并以 marker 箭头指向流转方向；整体横向布局，节点不重叠、连线不穿越文字。\n`
     + `- 配色克制：浅色填充 + 深色描边 + 深色文字；只使用纯 SVG 绘制元素，不使用 <image>、外链或 CSS 样式表。\n`
@@ -1771,15 +1851,16 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     + `- 本图要表达的内容（来自章节规划）：${figure.idea}\n`
     + `- 该章节定稿正文（图内容须与正文口径一致）：${chapterText}\n`
     + `- 支撑素材原文（图内容的事实依据，图中的环节/模块/角色/数字必须能在这里找到）：\n${materials.join('\n\n')}`;
-  const MAX_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
+  // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
+  const MAX_ATTEMPTS = 4;
+  const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
   let lastError = '配图生成未返回可解析 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
       systemPrompt: CASE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: FIGURE_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: FIGURE_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(prompt) });
     if (response.stopReason === 'error') {
       lastError = `配图模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
@@ -1872,44 +1953,112 @@ function chapterAnchorText(section: CaseChapterKey, output: ChapterOutput): stri
   return output.texts.join('\n');
 }
 
+/** 章节波次（提速并行，锚点语义不变）：简介先行 → 现状+诉求并行（互不依赖，素材在规划期已分流）→
+ * 方案（锚点=前两波）→ 价值 → 总结。波内并行、波间串行，前序章节锚点与串行版完全一致。 */
+const CHAPTER_WAVES: ReadonlyArray<readonly CaseChapterKey[]> = [['intro'], ['status', 'demands'], ['solution'], ['value'], ['summary']];
+/** 模型调用全局并发上限（章节+配图共享）：中继对同 key 的长流并发存在 ~2 的隐性上限——
+ * 第 3 路并发重流会零字节停顿直至 180s 超时（真实验收三连败均为「第 3 路流」）。章节优先于配图取槽。 */
+const MODEL_CALL_CONCURRENCY = 2;
+
+/** 全局模型调用槽位（章节优先的两级等待队列）：acquire 时有空槽直接占用，否则按优先级排队；
+ * 释放时槽位直接转移给队首等待者（不经过空闲态，避免插队超发）。 */
+function createModelSlotLimiter() {
+  let active = 0;
+  const chapterWaiters: Array<() => void> = [];
+  const figureWaiters: Array<() => void> = [];
+  const release = () => {
+    const next = chapterWaiters.shift() ?? figureWaiters.shift();
+    if (next) next(); // 槽位转移给等待者
+    else active -= 1;
+  };
+  const acquire = (kind: 'chapter' | 'figure'): Promise<() => void> => {
+    if (active < MODEL_CALL_CONCURRENCY) {
+      active += 1;
+      return Promise.resolve(release);
+    }
+    return new Promise((resolve) => {
+      (kind === 'chapter' ? chapterWaiters : figureWaiters).push(() => resolve(release));
+    });
+  };
+  return { acquire };
+}
+
+/** 生成阶段耗时标注（进度列/CLI 可见，阶段瓶颈一眼可辨）。 */
+function elapsedStamp(startedAt: number): string {
+  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  return `[${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s]`;
+}
+
 /**
- * 案例生成主编排（v8 分章节流水线）：
+ * 案例生成主编排（v8 分章节流水线，v8.1 并行化提速）：
  * 1. 输入预算决策（超预算才降级/摘要，正常路径完整原文——分级与摘要兜底逻辑不变）；
- * 2. 规划章节骨架（plan，一次小 JSON 调用）；
- * 3. 逐章节生成正文（每章一次小 JSON 调用，输出 token 可预测，不受单次 maxTokens 约束）；
- * 4. 服务端派生系统使用情况表与服务里程碑（LLM 不写，防虚构）；
- * 5. 逐图生成配图（可选，含 milestone 时间轴）；
+ * 2. 规划章节骨架（plan，一次小 JSON 调用，注入全量上下文）；
+ * 3. 章节按波次并行撰写（波间串行保前序锚点；章节注入瘦身形态——只带写作素材不带规划脚手架）；
+ * 4. 配图流水线：某章定稿立即开画（限并发），与后续波次重叠，波次全部结束后统一收图；
+ * 5. 服务端派生系统使用情况表与服务里程碑（LLM 不写，防虚构）；
  * 6. 服务端组装 + 全套公开契约校验（含摘录逐字校验）。
  * 返回 inputSummary 供 process 落 fields.input_summary（降级/摘要轨迹）。
  */
 async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
   onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; figures: CaseFigure[]; inputSummary: Record<string, unknown> | null; systemUsage: { rows: CaseSystemUsageRow[]; missing: string[] }; milestones: CaseMilestone[] }> {
+  const startedAt = Date.now();
+  const stamped = onProgress ? (text: string) => onProgress(`${elapsedStamp(startedAt)} ${text}`) : undefined;
   const communications = caseCommunicationSources(input);
-  const { contextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, onProgress);
+  const { contextText, chapterContextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, stamped);
   // 服务端派生数据（确定性，LLM 不写）：系统使用情况表 + 服务里程碑。
   const stats = caseDeliveryStats(input);
   const systemUsage = caseSystemUsageRows(input.customer, stats);
   const milestones = caseMilestoneEvents(input);
-  onProgress?.('规划章节结构…');
-  const plan = await planCaseWithModel(runtime, input, snapshot, contextText, communications, onProgress);
+  stamped?.('规划章节结构…');
+  const plan = await planCaseWithModel(runtime, input, snapshot, contextText, communications, stamped);
   const chapters = new Map<CaseChapterKey, ChapterOutput>();
   const priorChapters: Array<{ label: string; text: string }> = [];
-  for (const [index, section] of CASE_SECTIONS.entries()) {
-    onProgress?.(`第 ${index + 1}/${CASE_SECTIONS.length} 章「${section.label}」撰写中…`);
-    const output = await generateChapterWithModel(runtime, input, snapshot, plan, section.key, contextText, priorChapters, onProgress);
-    chapters.set(section.key, output);
-    // 各章定稿文本作为后续章节的一致性锚点（不重复、口径一致）。
-    priorChapters.push({ label: section.label, text: chapterAnchorText(section.key, output) });
+  // 配图流水线：图与图独立（v7 设计），章节定稿即开画、限并发 2，与后续章节波次重叠；
+  // 失败只丢弃该图（generateFigureWithModel 永不抛错），不阻断正文。
+  const figureTasks: Array<Promise<CaseFigure | null>> = [];
+  // 全局槽位限流（章节优先）：图任务章定稿即入队，但只有拿到槽位才真正发起调用——
+  // 任何时刻在飞的重流（章+图合计）不超过 MODEL_CALL_CONCURRENCY。
+  const slots = createModelSlotLimiter();
+  const startFigure = (figure: PlanFigure, chapterOutput: ChapterOutput) => {
+    stamped?.(`配图（${CASE_FIGURE_KIND_BRIEFS[figure.kind].split('：')[0]}）绘制中…`);
+    figureTasks.push((async () => {
+      const release = await slots.acquire('figure');
+      try {
+        return await generateFigureWithModel(runtime, input, snapshot, figure, communications,
+          chapterAnchorText(figure.section as CaseChapterKey, chapterOutput), milestones, stamped);
+      } finally {
+        release();
+      }
+    })());
+  };
+  for (const [waveIndex, wave] of CHAPTER_WAVES.entries()) {
+    const waveLabels = wave.map((key) => CASE_SECTIONS.find((item) => item.key === key)!.label).join('、');
+    if (wave.length > 1) stamped?.(`第 ${waveIndex + 1}/${CHAPTER_WAVES.length} 波（${waveLabels}）并行撰写中…`);
+    // 波内并行、allSettled 后首个失败即抛（与串行版失败语义一致）；成功结果按波内顺序登记锚点。
+    const settled = await Promise.allSettled(wave.map(async (key) => {
+      const definition = CASE_SECTIONS.find((item) => item.key === key)!;
+      stamped?.(`撰写「${definition.label}」中…`);
+      const release = await slots.acquire('chapter');
+      try {
+        const output = await generateChapterWithModel(runtime, input, snapshot, plan, key, chapterContextText, priorChapters, stamped);
+        return { key, label: definition.label, output };
+      } finally {
+        release();
+      }
+    }));
+    const failure = settled.find((result) => result.status === 'rejected');
+    if (failure) throw (failure as PromiseRejectedResult).reason;
+    for (const result of settled) {
+      const { key, label, output } = (result as PromiseFulfilledResult<{ key: CaseChapterKey; label: string; output: ChapterOutput }>).value;
+      chapters.set(key, output);
+      // 各章定稿文本作为后续章节的一致性锚点（不重复、口径一致）。
+      priorChapters.push({ label, text: chapterAnchorText(key, output) });
+      for (const figure of plan.figures ?? []) {
+        if (figure.section === key) startFigure(figure, output);
+      }
+    }
   }
-  // 配图（可选增强）：规划了 figures 且素材可解析才逐图生成；任一失败只丢弃该图，不影响正文。
-  const figures: CaseFigure[] = [];
-  for (const [index, figure] of (plan.figures ?? []).entries()) {
-    onProgress?.(`配图 ${index + 1}/${(plan.figures ?? []).length}（${CASE_FIGURE_KIND_BRIEFS[figure.kind].split('：')[0]}）绘制中…`);
-    const chapterOutput = chapters.get(figure.section as CaseChapterKey);
-    const generated = await generateFigureWithModel(runtime, input, snapshot, figure, communications,
-      chapterOutput ? chapterAnchorText(figure.section as CaseChapterKey, chapterOutput) : '', milestones, onProgress);
-    if (generated) figures.push(generated);
-  }
+  const figures = (await Promise.all(figureTasks)).filter((figure): figure is CaseFigure => !!figure);
   const content = assembleCase(plan, chapters);
   parseCaseContent(content as unknown as Record<string, unknown>, {
     requirePublic: true,
@@ -2001,7 +2150,7 @@ async function enrichCaseWithModel(runtime: Runtime, input: CasePromptInput, sna
       systemPrompt: CASE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: basePrompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(basePrompt) });
     if (response.stopReason === 'error') {
       lastError = `补充完善模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
