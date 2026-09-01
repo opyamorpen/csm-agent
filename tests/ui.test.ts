@@ -339,8 +339,9 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(loader, /'customer-group'/);
   assert.match(loader, /group\.open = true;/);
   assert.match(loader, /fragmentCustomerLabel\(customerId\)\} · \$\{rows\.length\} 项/);
-  // 客户名懒加载：进行动页时 customersCache 为空才请求 /api/customers。
-  assert.match(loader, /if \(!customersCache\.length\) customersCache = \(await api\('\/api\/customers'\)\)\.customers \|\| \[\];/);
+  // 客户名懒加载统一走 ensureCustomersCache（全量缓存仅空时拉取）。
+  assert.match(loader, /await ensureCustomersCache\(\);/);
+  assert.doesNotMatch(loader, /customersCache = /);
   // 选中 tab 态随重渲染同步：切 tab 后高亮跟随 activeActionTab，不残留在初始按钮上。
   assert.match(loader, /querySelectorAll\('\.action-subtab'\)\) tab\.classList\.toggle\('active', tab\.dataset\.actionTab === activeActionTab\)/);;
   // 导航角标与 tab 计数同源（未完成数）。
@@ -1510,4 +1511,24 @@ test('Hemory sync waits for terminal state and refreshes the inbox only after co
   assert.match(trigger, /pollHemorySync\(run\.id\)/);
   assert.match(trigger, /if \(finished\) await loadHemoryInbox\(\)/);
   assert.match(poller, /run\.status === 'partial' \? '部分完成' : '失败'/);
+});
+
+test('customersCache stays a full customer list: search-filtered portfolio views must not poison it', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+  // 全局缓存唯一写入点是 ensureCustomersCache（仅空时拉全量）；归属候选 datalist 与它共享数据源。
+  const helper = source.match(/async function ensureCustomersCache[\s\S]*?\n  \}\n\n  async function ensureCustomerOptions/)?.[0];
+  assert.ok(helper, 'ensureCustomersCache source was not found');
+  assert.match(helper, /if \(!customersCache\.length\) customersCache = \(await api\('\/api\/customers'\)\)\.customers \|\| \[\];/);
+  const options = source.match(/async function ensureCustomerOptions[\s\S]*?\n  \}\n\n  \/\*\* 某个片段列表容器内已勾选的片段 ID/)?.[0];
+  assert.ok(options, 'ensureCustomerOptions source was not found');
+  assert.match(options, /await ensureCustomersCache\(\);/);
+  // 回归根因：loadPortfolio 用带 q 的过滤结果渲染组合页，但不得写回 customersCache——
+  // 搜索子集覆盖全量缓存曾致 Hemory 已归属/行动页客户名 join 不上，回退显示「CRM <十六进制id>」（观感乱码）。
+  const portfolio = source.match(/async function loadPortfolio[\s\S]*?\n  \}\n\n  function definition/)?.[0];
+  assert.ok(portfolio, 'loadPortfolio source was not found');
+  assert.doesNotMatch(portfolio, /customersCache = /, 'loadPortfolio must render from a local list and never overwrite customersCache');
+  assert.match(portfolio, /const customers = data\.customers \|\| \[\];/);
+  // 全文兜底：除声明与 ensureCustomersCache 外不允许任何其它 customersCache 赋值。
+  assert.doesNotMatch(source.replace(/let customersCache = \[\];/, '').replace(helper, ''), /customersCache\s*=[^=]/);
 });

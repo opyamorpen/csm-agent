@@ -1183,8 +1183,14 @@
 
   // ── Agent Hemory workspace ─────────────────────────────────────
 
-  async function ensureCustomerOptions() {
+  /** 全量客户缓存（名称解析/归属候选的唯一数据源）：仅空时拉取，绝不被组合页搜索过滤子集覆盖。 */
+  async function ensureCustomersCache() {
     if (!customersCache.length) customersCache = (await api('/api/customers')).customers || [];
+    return customersCache;
+  }
+
+  async function ensureCustomerOptions() {
+    await ensureCustomersCache();
     hemoryCustomerOptions.innerHTML = '';
     for (const customer of customersCache) {
       const option = document.createElement('option');
@@ -2009,17 +2015,19 @@
 
   async function loadPortfolio() {
     const data = await api(`/api/customers?q=${encodeURIComponent(customerSearch.value.trim())}&sort=${encodeURIComponent(customerSort.value)}`);
-    customersCache = data.customers || [];
-    const high = customersCache.filter((c) => c.health === 'high').length;
-    const renewal = customersCache.filter((c) => c.renewalWithin120Days).length;
-    const opportunities = customersCache.reduce((sum, c) => sum + (c.opportunityCount || 0), 0);
-    const candidates = customersCache.filter((c) => c.caseCandidate).length;
+    // 组合页只展示当前搜索视图，绝不写回 customersCache——搜索子集覆盖全量缓存曾致
+    // Hemory/行动页客户名 join 不上而回退显示「CRM <十六进制id>」。
+    const customers = data.customers || [];
+    const high = customers.filter((c) => c.health === 'high').length;
+    const renewal = customers.filter((c) => c.renewalWithin120Days).length;
+    const opportunities = customers.reduce((sum, c) => sum + (c.opportunityCount || 0), 0);
+    const candidates = customers.filter((c) => c.caseCandidate).length;
     portfolioMetrics.innerHTML = '';
-    portfolioMetrics.append(metric('售后客户', customersCache.length), metric('120天内续约', renewal), metric('高风险', high, 'tone-danger'),
+    portfolioMetrics.append(metric('售后客户', customers.length), metric('120天内续约', renewal), metric('高风险', high, 'tone-danger'),
       metric('增购假设', opportunities), metric('案例候选', candidates));
     customerRows.innerHTML = '';
-    portfolioEmpty.classList.toggle('hidden', customersCache.length > 0);
-    for (const customer of customersCache) {
+    portfolioEmpty.classList.toggle('hidden', customers.length > 0);
+    for (const customer of customers) {
       const row = document.createElement('tr');
       const customerCell = document.createElement('td');
       const open = el('button', 'customer-link', customer.name);
@@ -3013,7 +3021,7 @@
   async function loadActions() {
     const data = await api('/api/action-items');
     const actions = data.actions || [];
-    if (!customersCache.length) customersCache = (await api('/api/customers')).customers || [];
+    await ensureCustomersCache();
     const pending = actions.filter((a) => a.status === 'new');
     const completed = actions.filter((a) => a.status === 'completed')
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
