@@ -126,8 +126,9 @@ export const caseModelRetryDelays = { baseMs: 5_000 };
 /** 单个章节生成时 completion 上限：章节正文 400~800 字中文 + 推理思考余量。 */
 const CHAPTER_MAX_TOKENS = 8_192;
 /** 单张配图生成时 completion 上限：SVG 标记 + 中文标签 + 推理模型思考余量
- * （真实验收教训：敏锐达素材下图生成 3 连败 stopReason=length——8k 被思考吃光，思考+SVG 须 16k）。 */
-const FIGURE_MAX_TOKENS = 16_384;
+ * （真实验收教训：8k 与 16k 均被思考吃光 stopReason=length——小素材客户 16k 够、
+ * 大素材客户（掌趣级，图 prompt 注入多片段完整转写）须与规划同级的 32k）。 */
+const FIGURE_MAX_TOKENS = 32_768;
 /** 配图 SVG 尺寸上限（字符）：模型偶发整段正文塞进图注/图形文本时的硬闸。 */
 const FIGURE_SVG_MAX_CHARS = 65_536;
 /** 输入上下文 token 预算：按「中文 1 字符 ≈ 0.6 token、ASCII 4 字符 ≈ 1 token」估算。 */
