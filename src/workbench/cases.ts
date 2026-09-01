@@ -11,7 +11,7 @@ import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 
-export const CASE_GENERATION_VERSION = 'case-v5-pipeline';
+export const CASE_GENERATION_VERSION = 'case-v6-no-ones-records';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /** 案例五段叙事的字段契约（templates/case.json 同源描述，供前端/CLI 展示）。 */
@@ -95,9 +95,10 @@ const CASE_LIST_ITEM_LIMIT = 12;
 /** 单条正文/单段的写回护栏长度上限（字符）。 */
 const CASE_ITEM_MAX_CHARS = 500;
 
-/** 规划阶段 completion 上限：plan 正文 ~2k token，但推理模型的思考 token 与输出共享上限
- * （真实验收教训：deepseek 思考超过 8k，plan JSON 被截成 stopReason=length），须覆盖思考余量。 */
-export const PLAN_MAX_TOKENS = 16_384;
+/** 规划阶段 completion 上限：plan 正文 ~3k token，但推理模型的思考 token 与输出共享上限
+ * （真实验收教训：deepseek 对大素材客户在思考中做全文分析，8k/16k 均被思考吃掉后 plan JSON
+ * 截断成 stopReason=length——3 连败实测思考可达 12k+，须给足思考余量）。 */
+export const PLAN_MAX_TOKENS = 32_768;
 /** 单个章节生成时 completion 上限：章节正文 400~800 字中文 + 推理思考余量。 */
 const CHAPTER_MAX_TOKENS = 8_192;
 /** 输入上下文 token 预算：按「中文 1 字符 ≈ 0.6 token、ASCII 4 字符 ≈ 1 token」估算。 */
@@ -799,6 +800,9 @@ function buildContextSnapshot(input: CasePromptInput): CaseContextSnapshot {
   const seen = new Set(sources.map((item) => item.id));
   for (const event of [...input.timeline, ...input.hemory]) {
     if (seen.has(event.id)) continue;
+    // v6 口径（用户拍板）：ONES 记录明细（建议/工单/运维/私有云实例/工时行）不作为案例输入——
+    // 不进来源目录即不可被 claim_evidence 引用；ONES 数据只经 delivery_stats 聚合事实参与生成。
+    if (event.sourceSystem === 'ones') continue;
     seen.add(event.id);
     // speaker_lines 只保留「角色:行数」摘要行——完整逐句文本已在 communications（注入的片段）与
     // 摘录校验的第二查找源中，catalog 再放一份全量转写会让大客户上下文重复注入数万字符。
@@ -854,14 +858,16 @@ function catalogRows(input: CasePromptInput, snapshot: CaseContextSnapshot, budg
   const base = snapshot.sources.map((item) => ({ source_ref: item.id, title: item.title, excerpt: item.excerpt,
     speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type }));
   if (budget.level === 0) return base;
-  // 优先保留：客户档案、交付统计、公开检索、Hemory 片段（摘录校验的主要命中源，数量可控）。
+  // 优先保留：客户档案、交付统计、公开检索（数量可控）；Hemory 片段目录行按预算收缩——
+  // ONES 明细剔除后片段目录行成为目录体量主源，不收缩则降级失效。
   const prioritized = base.filter((row) => String(row.source_ref).startsWith('customer:')
     || String(row.source_ref) === CASE_STATS_SOURCE_ID
-    || String(row.source_type).startsWith('web:')
-    || String(row.source_type) === 'ai_topic_segment');
-  const rest = base.filter((row) => !prioritized.includes(row));
+    || String(row.source_type).startsWith('web:'));
+  const fragments = base.filter((row) => String(row.source_type) === 'ai_topic_segment');
+  const rest = base.filter((row) => !prioritized.includes(row) && !fragments.includes(row));
   const restLimit = Math.max(budget.maxRecords, budget.maxEvidence + budget.maxFollowups + budget.maxSignal);
-  return [...prioritized, ...rest.slice(0, restLimit)];
+  const fragmentLimit = Math.max(budget.maxRecords, Math.floor(MAX_CASE_FRAGMENTS * (budget.transcriptBudget / TRANSCRIPT_BUDGET)));
+  return [...prioritized, ...fragments.slice(0, fragmentLimit), ...rest.slice(0, restLimit)];
 }
 
 /** 素材块注入的统一载体：renderInputText 产出 JSON 文本与各块 token 估算，供预算循环复用。 */
@@ -871,23 +877,19 @@ interface RenderedInput {
   budget: InputBudget;
 }
 
-/** 渲染注入上下文（按预算等级截断素材规模）。 */
+/** 渲染注入上下文（按预算等级截断素材规模）。v6：ONES 记录明细不注入（只经 delivery_stats 聚合参与）。 */
 function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): string {
   const { customer, timeline, hemory, evidence, risk, opportunities, webContext } = input;
   const confirmed = timeline.filter((event) => event.attributionStatus === 'confirmed');
+  // records 只保留 CRM 侧非跟进记录（ONES 明细已剔除，实践上该块通常为空——保留 schema 键避免下游断言漂移）。
   const recordEvents = confirmed
-    .filter((event) => event.sourceSystem !== 'hemory' && event.sourceType !== 'crm_followup');
+    .filter((event) => event.sourceSystem !== 'hemory' && event.sourceSystem !== 'ones' && event.sourceType !== 'crm_followup');
   const keptRecords = recordEvents.length <= budget.maxRecords
     ? recordEvents
     : [...recordEvents.slice(0, Math.max(1, Math.floor(budget.maxRecords / 6))), ...recordEvents.slice(-(budget.maxRecords - Math.max(1, Math.floor(budget.maxRecords / 6))))];
   const records = keptRecords
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), system: event.sourceSystem, type: event.sourceType,
       display: event.displayId ?? '', title: event.title.slice(0, 120), status: nestedName(event.payload?.field005) || '', status_category: statusCategory(event) }));
-  const delivered = confirmed
-    .filter((event) => event.sourceSystem === 'ones' && isDeliveredOnesEvent(event))
-    .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), type: event.sourceType,
-      display: event.displayId ?? '', title: event.title.slice(0, 120), status_category: statusCategory(event) }))
-    .slice(0, budget.maxDelivered);
   const followups = confirmed
     .filter((event) => event.sourceType === 'crm_followup')
     .slice(-budget.maxFollowups)
@@ -912,7 +914,6 @@ function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, 
     communications,
     records,
     crm_followups: followups,
-    delivered_records: delivered,
     pain_point_signals: clip(signals.painPoints),
     requirement_signals: clip(signals.requirements),
     solution_signals: clip(signals.solutions),
@@ -987,7 +988,7 @@ async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapsh
 async function summarizeCaseInput(runtime: Runtime, input: CasePromptInput, materialText: string, onProgress?: (text: string) => void): Promise<string | null> {
   const prompt = `以下是客户「${input.customer.name}」案例生成的全部素材上下文（JSON）。素材总量超出模型输入预算，需要你压缩为一份保真的分块摘要，供后续案例写作使用。\n`
     + `要求：\n`
-    + `- 输出纯文本摘要（非 JSON）：按素材块分组（communications 转写、records 工单/建议记录、delivered_records 已交付、crm_followups 跟进、各 signal 信号、web_context 公开信息），每块先写「# 块名」，块内逐 source_ref 归并要点。\n`
+    + `- 输出纯文本摘要（非 JSON）：按素材块分组（communications 转写、records CRM 记录、crm_followups 跟进、各 signal 信号、web_context 公开信息），每块先写「# 块名」，块内逐 source_ref 归并要点。\n`
     + `- 必须保留每个素材条目的 source_ref ID（形如 xxxxxxxx-xxxx 的 ID 或 customer:/stats:/web: 前缀 ID）与日期、状态、说话人角色——这些是后续引用与摘录校验的锚点，丢失即无法对位。\n`
     + `- 客户原话（痛点/诉求/正面反馈）尽量保留原句或压缩句；数字、日期、状态、规模逐字保留。\n`
     + `- 不新增任何素材中没有的事实，不推测。\n`
@@ -1036,8 +1037,10 @@ function renderSummaryContext(summary: string, snapshot: CaseContextSnapshot): s
 /** 章节规划 prompt 的共用说明（规划与逐章生成共用同一份契约说明）。 */
 const CASE_SYSTEM_PROMPT = '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。';
 
-/** 规划产物契约校验：五章节齐全、条目非空、source_refs 合法（excerpt 校验留给组装后的 parseCaseContent）。 */
-function parseCasePlan(value: unknown, allowedRefs: Set<string>): CasePlan {
+/** 规划产物契约校验：五章节齐全、条目非空、source_refs 合法；excerpt 必须能在来源原文定位
+ * （与组装后的 parseCaseContent 同一口径——规划期即拦截摘录漂移，让 3 次规划重试真正兜住，
+ * 避免五章全部写完后才在组装校验失败浪费整轮调用）。 */
+function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseEvidenceSnapshotItem[], communications?: CaseCommunicationSource[]): CasePlan {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型未返回规划 JSON 对象');
   const raw = value as Record<string, unknown>;
   const plan = Array.isArray(raw.plan) ? raw.plan.flatMap((entry) => {
@@ -1067,6 +1070,18 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>): CasePlan {
   if (missing.length) throw new Error(`规划缺少章节或条目: ${missing.map((item) => item.label).join('、')}`);
   const unknownRefs = plan.flatMap((entry) => entry.items.flatMap((item) => item.source_refs)).filter((ref) => !allowedRefs.has(ref));
   if (unknownRefs.length) throw new Error(`规划引用了未知证据: ${[...new Set(unknownRefs)].slice(0, 5).join('、')}`);
+  // 摘录定位校验（规划期拦截，与组装校验同口径）：excerpt 必须能在引用来源的原文中找到。
+  if (sources?.length) {
+    const sourceMap = new Map(sources.map((item) => [item.id, item]));
+    for (const entry of plan) {
+      for (const item of entry.items) {
+        if (!item.excerpt) throw new Error(`${CASE_SECTIONS.find((section) => section.key === entry.section)!.label}条目缺少原文摘录`);
+        const supporting = item.source_refs.map((ref) => sourceMap.get(ref)).filter((source): source is CaseEvidenceSnapshotItem => !!source)
+          .filter((source) => sourceSupportsExcerpt(source, item.excerpt!, communications));
+        if (!supporting.length) throw new Error(`${CASE_SECTIONS.find((section) => section.key === entry.section)!.label}条目的摘录未在引用证据中找到`);
+      }
+    }
+  }
   const unknowns = Array.isArray(raw.unknowns) ? raw.unknowns.map(String).map((item) => item.trim()).filter(Boolean) : [];
   const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : undefined;
   return { title, plan, unknowns };
@@ -1091,14 +1106,15 @@ function parseChapterContent(section: CaseSectionKey, value: unknown): string[] 
  * plan.items 的 excerpt/source_refs 将原样进入 claim_evidence，逐字校验在组装阶段统一执行。
  */
 async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, contextText: string,
-  onProgress?: (text: string) => void): Promise<CasePlan> {
+  communications: CaseCommunicationSource[], onProgress?: (text: string) => void): Promise<CasePlan> {
   const prompt = `为客户「${input.customer.name}」规划客户成功案例草稿的章节结构。这份案例经 CSM 审核后用于对外展示。你只做规划不写正文，只输出 JSON：\n`
     + `{"title":"...","plan":[{"section":"background|challenges|requirements|solution|value","items":[{"idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"unknowns":["..."]}\n`
     + `规划规则：\n`
+    + `- 先在思考中通读素材再输出：思考从简（只做章节路由与证据挑选判断），plan JSON 是唯一交付物。\n`
     + `- 五个章节都必须有条目：background 1 条、solution 2~5 条（每条一个方案级举措）、challenges 3~6 条、requirements 2~6 条、value 2~6 条；素材不足时宁少勿注水，没有把握写入的素材收进 unknowns。\n`
-    + `- 每个条目的 idea 是「这一条要写什么」的要点描述（如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
-    + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
-    + `- 章节路由：背景取档案/早期记录/权威公开信息；痛点必须是合作前或当前问题；需求是客户明确诉求；方案条目必须对应已交付（ONES 记录 status_category=done）；价值必须来自客户说话人或可复核指标且发生在方案落地之后。\n`
+    + `- 每个条目的 idea 是「这一条要写什么」的要点描述（40 字以内，如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
+    + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
+    + `- 章节路由：背景取档案/早期记录/权威公开信息；痛点必须是合作前或当前问题；需求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值必须来自客户说话人或可复核指标且发生在方案落地之后。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
     + `- 交付统计（delivery_stats）可被 background/solution/value 条目引用（source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其 facts 原文）；只可作事实陈述，不得自行计算百分比。\n`
     + `- unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」。\n`
@@ -1123,7 +1139,7 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     }
     const value = cleanJson(extractText(response.content));
     if (value) {
-      try { return parseCasePlan(value, new Set(snapshot.sources.map((item) => item.id))); }
+      try { return parseCasePlan(value, new Set(snapshot.sources.map((item) => item.id)), snapshot.sources, communications); }
       catch (error) {
         lastError = `模型规划契约不合格（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${(error as Error).message}`;
         onProgress?.(lastError);
@@ -1251,7 +1267,7 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
   const communications = caseCommunicationSources(input);
   const { contextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, onProgress);
   onProgress?.('规划章节结构…');
-  const plan = await planCaseWithModel(runtime, input, snapshot, contextText, onProgress);
+  const plan = await planCaseWithModel(runtime, input, snapshot, contextText, communications, onProgress);
   const chapters = new Map<CaseSectionKey, string[]>();
   for (const [index, section] of CASE_SECTIONS.entries()) {
     onProgress?.(`第 ${index + 1}/${CASE_SECTIONS.length} 章「${section.label}」撰写中…`);
@@ -1267,44 +1283,36 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
   return { content, inputSummary };
 }
 
-/** 素材覆盖度：关键素材被 claim_evidence 实际引用的比例（诊断生成是否浪费素材，非正确性判定）。 */
+/** 素材覆盖度：关键素材被 claim_evidence 实际引用的比例（诊断生成是否浪费素材，非正确性判定）。
+ * v6：ONES 明细已剔除输入，交付记录池取消——覆盖度衡量价值/痛点信号与权威公开资料。 */
 export interface CaseCoverage {
-  delivered: { total: number; cited: number };
   valueSignals: { total: number; cited: number };
   painSignals: { total: number; cited: number };
   authoritativeWeb: { total: number; cited: number };
 }
 
 /** 补写触发阈值（从严）：单一素材池引用率过低且样本足够多才补写；单边聚焦是正常写作不算浪费。 */
-const COVERAGE_DELIVERED_MIN = 5;
-const COVERAGE_DELIVERED_RATIO = 1 / 3;
 const COVERAGE_VALUE_MIN = 4;
 const COVERAGE_VALUE_RATIO = 1 / 4;
 
 export function caseCoverage(content: { claim_evidence: Array<{ source_refs: string[] }> }, input: CasePromptInput): CaseCoverage {
   const cited = new Set(content.claim_evidence.flatMap((item) => item.source_refs));
-  const confirmed = input.timeline.filter((event) => event.attributionStatus === 'confirmed');
-  const deliveredTotal = confirmed.filter((event) => event.sourceSystem === 'ones' && isDeliveredOnesEvent(event)).map((event) => event.id);
   const signals = caseFragmentSignals(input.hemory, input.customer.csmName);
   const authoritativeWeb = (input.webContext?.results ?? []).filter((item) => item.sourceTier === 'customer_official' || item.sourceTier === 'government_procurement' || item.sourceTier === 'official').map((item) => item.id);
   const count = (ids: string[]) => ({ total: ids.length, cited: ids.filter((id) => cited.has(id)).length });
-  return { delivered: count(deliveredTotal), valueSignals: count(signals.values.map((item) => item.fragment_id)),
+  return { valueSignals: count(signals.values.map((item) => item.fragment_id)),
     painSignals: count(signals.painPoints.map((item) => item.fragment_id)), authoritativeWeb: count(authoritativeWeb) };
 }
 
 /** 覆盖率是否低到值得追加一次「补充完善」调用（从严阈值：只在主要素材池大量闲置时触发）。 */
 export function coverageNeedsEnrichment(coverage: CaseCoverage): boolean {
-  const deliveredLow = coverage.delivered.total > COVERAGE_DELIVERED_MIN
-    && coverage.delivered.cited < coverage.delivered.total * COVERAGE_DELIVERED_RATIO;
-  const valueLow = coverage.valueSignals.total > COVERAGE_VALUE_MIN
+  return coverage.valueSignals.total > COVERAGE_VALUE_MIN
     && coverage.valueSignals.cited < coverage.valueSignals.total * COVERAGE_VALUE_RATIO;
-  return deliveredLow || valueLow;
 }
 
 /** 覆盖率的一行人类可读描述（进度列/CLI 共用）。 */
 export function coverageSummary(coverage: CaseCoverage): string {
-  return `素材覆盖率：交付记录 ${coverage.delivered.cited}/${coverage.delivered.total}`
-    + `，价值信号 ${coverage.valueSignals.cited}/${coverage.valueSignals.total}`
+  return `素材覆盖率：价值信号 ${coverage.valueSignals.cited}/${coverage.valueSignals.total}`
     + `，痛点信号 ${coverage.painSignals.cited}/${coverage.painSignals.total}`
     + `，权威公开资料 ${coverage.authoritativeWeb.cited}/${coverage.authoritativeWeb.total}`;
 }
@@ -1313,13 +1321,8 @@ export function coverageSummary(coverage: CaseCoverage): string {
 function uncoveredMaterialList(content: { claim_evidence: Array<{ source_refs: string[] }> }, input: CasePromptInput, snapshot: CaseContextSnapshot): string[] {
   const cited = new Set(content.claim_evidence.flatMap((item) => item.source_refs));
   const sourceMap = new Map(snapshot.sources.map((item) => [item.id, item]));
-  const confirmed = input.timeline.filter((event) => event.attributionStatus === 'confirmed');
-  const items: string[] = [];
-  for (const event of confirmed.filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item))) {
-    if (cited.has(event.id)) continue;
-    items.push(`- [已交付记录] ${event.occurredAt.slice(0, 10)} ${event.title.slice(0, 80)}（source_ref: ${event.id}）`);
-  }
   const signals = caseFragmentSignals(input.hemory, input.customer.csmName);
+  const items: string[] = [];
   for (const signal of signals.values) {
     if (cited.has(signal.fragment_id)) continue;
     items.push(`- [客户正面反馈] ${signal.date} ${signal.theme}：${signal.excerpt.slice(0, 80)}（source_ref: ${signal.fragment_id}）`);
@@ -1341,7 +1344,7 @@ async function enrichCaseWithModel(runtime: Runtime, input: CasePromptInput, sna
   const basePrompt = `为客户「${input.customer.name}」补充完善客户成功案例草稿。第一稿已通过契约校验，但以下关键素材未被引用，说明案例内容还不够充实。\n`
     + `未引用素材清单（全部真实存在，source_ref 可直接引用）：\n${uncovered.slice(0, 40).join('\n')}\n`
     + `要求：\n`
-    + `- 在第一稿基础上充实内容：优先把上述素材中有价值的内容并入对应章节（已交付记录进 solution、客户正面反馈进 value），并为其新增 claim_evidence（claim 与正文逐字一致、摘录取素材原文）。\n`
+    + `- 在第一稿基础上充实内容：优先把上述素材中有价值的内容并入对应章节（会议中的交付讨论进 solution、客户正面反馈进 value），并为其新增 claim_evidence（claim 与正文逐字一致、摘录取素材原文）。\n`
     + `- 已合格且与素材无关的章节内容保持第一稿原文，不为了引用而引用、不堆砌清单；确实无价值的素材允许继续不引用。\n`
     + `- 输出完整的五章 JSON（与第一稿相同的 schema），不是增量补丁。\n`
     + `- 第一稿正文：\n${JSON.stringify({ title: first.title, background: first.background, challenges: first.challenges, requirements: first.requirements, solution: first.solution, value: first.value })}\n`
@@ -1535,9 +1538,7 @@ export function caseQualityReview(draft: CaseDraft, options: { currentInternalDi
       && supportingSources.some((source) => source.source_type === 'crm_followup') && mapping.speaker_role !== 'customer') {
       warnings.push(`「${item.text.slice(0, 36)}」仅引用了 CSM 记录的 CRM 跟进，缺少明确客户说话人或正式来源`);
     }
-    if (item.section === 'solution' && sources.some((source) => source.source_system === 'ones' && source.status_category !== 'done')) {
-      warnings.push(`「${item.text.slice(0, 36)}」引用了未完成的 ONES 记录作为已交付方案`);
-    }
+    // （v6 起 ONES 明细不进快照，「引用未完成 ONES 记录」分支随之移除；stats 披露口径警告保留。）
     if (item.section === 'value') {
       const valueTimes = sources.map((source) => Date.parse(source.occurred_at)).filter(Number.isFinite);
       if (!solutionTimes.length || !valueTimes.some((valueTime) => solutionTimes.some((solutionTime) => solutionTime <= valueTime))) {

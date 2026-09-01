@@ -3890,6 +3890,7 @@ function casePlanContent(content: any, prompt: string): any {
   const refs = context.allowed_source_refs as string[];
   const sourceCatalog = new Map((context.source_catalog as any[]).map((item) => [item.source_ref, item]));
   const profileRef = refs.find((ref) => ref.startsWith('customer:')) ?? refs[0];
+  // 事实引用固定取首个非档案来源（不轮换）：多片段客户的价值/痛点信号引用率保持低值，覆盖度补写测试才有触发空间。
   const factRef = refs.find((ref) => !ref.startsWith('customer:') && sourceCatalog.get(ref)?.source_type !== 'ai_topic_segment')
     ?? refs.find((ref) => !ref.startsWith('customer:')) ?? profileRef;
   const excerptFor = (ref: string) => String(sourceCatalog.get(ref)?.speaker_lines?.[0]?.text ?? sourceCatalog.get(ref)?.excerpt ?? sourceCatalog.get(ref)?.title ?? 'source');
@@ -4019,22 +4020,24 @@ test('workbench: case generation runs full-context model job and persists narrat
       [CASE_CONTENT.background, CASE_CONTENT.solution, ...CASE_CONTENT.challenges, ...CASE_CONTENT.requirements, ...CASE_CONTENT.value].includes(claim.claim)));
     // 素材未超预算：不落 input_summary 降级轨迹。
     assert.equal((draft.fields as any).input_summary, undefined, '预算内不记录降级轨迹');
-    // 证据引用含时间线事件与片段。
-    assert.ok(draft.evidenceRefs.length >= 2);
-    // 全量上下文注入：工单记录、片段转写、客户档案都在 prompt 里。
-    assert.match(capturedPrompt, /导出超时/);
+    // 证据引用含片段（ONES 工单明细已剔除，不再进证据引用）。
+    assert.ok(draft.evidenceRefs.length >= 1);
+    // v6 全量上下文注入：片段转写与客户档案在 prompt 里；ONES 工单明细不得注入。
     assert.match(capturedPrompt, /统一管理研发项目/);
     assert.match(capturedPrompt, /案例客户一/);
+    assert.doesNotMatch(capturedPrompt, /导出超时/, 'ONES 工单明细不得注入案例上下文');
+    assert.ok(!capturedPrompt.includes('"delivered_records"'), 'delivered_records 注入块已移除');
+    // 交付事实仍以聚合统计形态注入（ONES 数据只经 delivery_stats 参与）。
+    assert.ok(capturedPrompt.includes('"delivery_stats"'), '上下文须含交付统计聚合');
     // 叙事契约关键规则（规划与章节 prompt 合并断言）。
     assert.match(capturedPrompt, /客户叙事视角/);
     assert.match(capturedPrompt, /禁止流水账/);
     assert.match(capturedPrompt, /不得虚构数字\/引语\/ROI|禁止虚构/);
     assert.match(capturedPrompt, /收进 unknowns/);
     assert.match(capturedPrompt, /五段叙事|五个章节/);
-    // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律、交付记录底料。
+    // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律。
     assert.match(capturedPrompt, /pain_point_signals/);
     assert.match(capturedPrompt, /value_signals/);
-    assert.match(capturedPrompt, /delivered_records/);
     assert.match(capturedPrompt, /web_context/);
     assert.match(capturedPrompt, /标题命中客户名不能单独成文/);
     assert.match(capturedPrompt, /同名或业务不符/);
@@ -4042,7 +4045,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.match(capturedPrompt, /不得写成功能点罗列/);
     assert.ok(capturedPrompt.includes('"pain_point_signals":'), '上下文须含痛点信号块');
     assert.ok(capturedPrompt.includes('"value_signals":'), '上下文须含价值信号块');
-    assert.ok(capturedPrompt.includes('"delivered_records":'), '上下文须含已交付记录块');
+    assert.ok(!capturedPrompt.includes('"delivered_records":'), '已交付记录明细块已移除（v6）');
     assert.ok(capturedPrompt.includes('本次生成未联网检索'), '未注入检索依赖时明确告知模型无联网信息');
     // 幂等：同指纹再次生成复用最新草稿。
     const again = service.generate('crm-c1');
@@ -4055,7 +4058,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v5-pipeline');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v6-no-ones-records');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4156,14 +4159,11 @@ test('workbench: case v5 pipeline degrades input budget and summarizes before fa
   const db = new WorkbenchDatabase(dir);
   try {
     db.upsertCustomer({ id: 'crm-deg', name: '降级客户' });
-    // 素材超预算：3000 条工单（source_catalog 每事件一条目录行且不受 records 截断）+ 长转写片段。
-    for (let i = 1; i <= 3000; i++) {
-      db.upsertSourceEvent({ customerId: 'crm-deg', sourceSystem: 'ones', sourceType: 'support_ticket',
-        externalId: `deg-T-${i}`, displayId: `T-6${String(i).padStart(4, '0')}`, title: `降级事件之工单标题第${i}号交付问题排查与处理`,
-        occurredAt: `2026-03-${String((i % 28) + 1).padStart(2, '0')}T03:00:00Z`, payload: { field005: { category: 'in_progress' } } });
-    }
-    for (let i = 1; i <= 30; i++) {
-      segment(db, 'crm-deg', `deg:t${i}`, 'deg-r1', `长话题 ${i}`, '2026-03-05T05:00:00Z', `客户反复提到跨部门进度不透明依赖人工汇总。`.repeat(120));
+    // v6 素材超预算：ONES 明细已剔除，超限主体改为 800 个长转写片段
+    // （片段目录行 + communications 转写均摊预算 + 信号扫描共同撑爆 INPUT_BUDGET_TOKENS）。
+    for (let i = 1; i <= 800; i++) {
+      segment(db, 'crm-deg', `deg:t${i}`, `deg-r${Math.ceil(i / 20)}`, `长话题 ${i}`, '2026-03-05T05:00:00Z',
+        `客户反复提到跨部门进度不透明依赖人工汇总。`.repeat(60));
     }
     const prompts: string[] = [];
     const runtime = {
@@ -4187,13 +4187,13 @@ test('workbench: case v5 pipeline degrades input budget and summarizes before fa
     const contextPrompt = prompts.find((p) => p.includes('规划客户成功案例草稿的章节结构'))!;
     const context = JSON.parse(contextPrompt.slice(contextPrompt.indexOf('上下文：') + '上下文：'.length));
     if (context.input_summary) {
-      // 摘要兜底路径：prompt 是摘要形态（input_summary + source_catalog 原文目录）。
+      // 摘要兜底路径：prompt 是摘要形态（input_summary + 收缩目录）。
       assert.ok(context.input_summary.length > 0, '摘要文本非空');
       assert.ok(context.source_catalog.length > 0, '原文目录保留供摘录校验');
       assert.equal(inputSummary.summarized, true);
     } else {
-      // 降级路径：素材注入规模收缩（records ≤150）。
-      assert.ok(context.records?.length != null && context.records.length <= 150, `降级后 records 收缩（实际 ${context.records?.length}）`);
+      // 降级路径：素材注入规模收缩（communications ≤150 片段、转写预算 24000）。
+      assert.ok(context.communications?.length != null && context.communications.length <= 150, `降级后片段收缩（实际 ${context.communications?.length}）`);
     }
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -4347,9 +4347,10 @@ test('workbench: case generation injects web search context and persists audit s
     assert.ok(capturedPrompt.includes('信息化制度建设招标公告'));
     assert.ok(!capturedPrompt.includes('Another company'));
     assert.ok(capturedPrompt.includes('"web_context"'), '上下文须含 web_context 块');
-    // 已交付记录进上下文（isDeliveredOnesEvent 口径：结构化状态类型 done）。
-    assert.ok(capturedPrompt.includes('"delivered_records"'));
-    assert.ok(capturedPrompt.includes('需求池功能已完成交付'));
+    // v6：ONES 建议明细不注入，交付事实只经聚合统计参与。
+    assert.ok(!capturedPrompt.includes('"delivered_records"'), 'delivered_records 注入块已移除');
+    assert.ok(!capturedPrompt.includes('需求池功能已完成交付'), 'ONES 建议明细不得注入');
+    assert.ok(capturedPrompt.includes('"delivery_stats"'), '交付统计聚合仍注入');
     // 检索审计快照随草稿落库。
     const draft = db.listCaseDrafts('crm-web-1')[0];
     const webSearch = (draft.fields as any).web_search;
@@ -4436,13 +4437,18 @@ test('workbench: delivered_records only includes delivered ones records', async 
     const result = service.generate('crm-deliv');
     await waitForJob(db, result.jobId!);
     const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
-    assert.equal(context.delivered_records.length, 1, '只含已交付的 ONES 记录');
-    assert.equal(context.delivered_records[0].title, '需求池模块上线');
-    // 「完成」出现于 CRM 跟进与工单标题但非 ONES 源/非交付态，不得混入。
-    assert.ok(!context.delivered_records.some((item: any) => item.title === '统计报表报错'));
-    assert.ok(!context.delivered_records.some((item: any) => item.title === '完成季度回访'));
-    // v2 新上下文键齐备。
-    for (const key of ['delivered_records', 'pain_point_signals', 'value_signals', 'web_context']) assert.ok(key in context);
+    // v6：ONES 记录明细不注入——工单/建议标题不进 prompt，records 只剩 CRM 侧非跟进记录（此处为空）。
+    assert.ok(!capturedPrompt.includes('需求池模块上线'), 'ONES 建议明细不得注入');
+    assert.ok(!capturedPrompt.includes('统计报表报错'), 'ONES 工单明细不得注入');
+    assert.ok(!('delivered_records' in context), 'delivered_records 注入块已移除');
+    assert.deepEqual(context.records, [], 'ONES 剔除后 records 只剩 CRM 非跟进记录（此处为空）');
+    // 交付事实仍以聚合统计参与：建议共 1 项已完成。
+    assert.ok(capturedPrompt.includes('建议与反馈共 1 项，已完成 1 项'), 'delivery_stats 聚合须含 ONES 交付事实');
+    assert.ok(context.delivery_stats?.source_ref === 'stats:delivery', 'stats 证据条目保留可引用');
+    // CRM 跟进仍作为案例素材注入。
+    assert.ok(capturedPrompt.includes('完成季度回访'), 'CRM 跟进仍注入');
+    // 上下文键齐备（v6 口径）。
+    for (const key of ['pain_point_signals', 'value_signals', 'web_context', 'delivery_stats']) assert.ok(key in context);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4611,11 +4617,11 @@ test('workbench: case generation injects delivery stats as citable source and co
     assert.match(capturedPrompt, /只可作事实陈述/);
     assert.match(capturedPrompt, /不得自行计算百分比/);
     assert.ok((draft.fields as any).context_snapshot.sources.some((item: any) => item.id === 'stats:delivery'), 'stats 条目固化进快照');
-    // coverage 内部字段持久化（样本小不触发补写：enriched=false）。
+    // coverage 内部字段持久化（样本小不触发补写：enriched=false）；v6 无 delivered 池。
     const coverage = (draft.fields as any).coverage;
     assert.ok(coverage, 'coverage 必须落库');
     assert.equal(coverage.enriched, false);
-    assert.ok(coverage.delivered.total >= 1, '交付记录计入覆盖率分母');
+    assert.equal(coverage.delivered, undefined, 'v6 覆盖度不再含交付记录池');
     // 篇幅契约进入 prompt。
     assert.match(capturedPrompt, /150~400 字/);
     assert.match(capturedPrompt, /250~800 字/);
@@ -4623,6 +4629,8 @@ test('workbench: case generation injects delivery stats as citable source and co
     assert.match(capturedPrompt, /篇幅契约是质量要求而非硬性字符数/);
     // 摘录抄写规则（防「摘录未在引用证据中找到」复发）。
     assert.match(capturedPrompt, /连续逐字截取/);
+    // ONES 明细剔除后，快照来源不含工单条目。
+    assert.ok(!(draft.fields as any).context_snapshot.sources.some((item: any) => item.source_system === 'ones'), 'ONES 工单不进快照来源');
     // detail 的 contextSummary 含 stats 行。
     const detail = service.detail(draft.id)!;
     assert.ok(detail.contextSummary.some((entry) => entry.system === 'stats'));
@@ -4630,29 +4638,31 @@ test('workbench: case generation injects delivery stats as citable source and co
 });
 
 test('workbench: case coverage thresholds gate enrichment and uncovered materials feed the second pass', async () => {
-  // 覆盖度阈值：delivered>5 且引用 <1/3，或 value 信号 >4 且引用 <1/4。
-  const cited = (delivered: number, values: number) => ({
-    delivered: { total: delivered, cited: 0 }, valueSignals: { total: values, cited: 0 },
+  // 覆盖度阈值（v6：只有价值信号池）——value 信号 >4 且引用 <1/4 才补写。
+  const cited = (values: number) => ({
+    valueSignals: { total: values, cited: 0 },
     painSignals: { total: 0, cited: 0 }, authoritativeWeb: { total: 0, cited: 0 },
   });
-  assert.equal(coverageNeedsEnrichment(cited(6, 0)), true, '交付记录 6 条零引用须触发');
-  assert.equal(coverageNeedsEnrichment(cited(5, 0)), false, '交付记录 5 条（≤阈值下限）不触发');
-  assert.equal(coverageNeedsEnrichment({ ...cited(0, 0), valueSignals: { total: 5, cited: 0 } }), true, '价值信号 5 条零引用须触发');
-  assert.equal(coverageNeedsEnrichment({ ...cited(0, 0), valueSignals: { total: 5, cited: 2 } }), false, '价值信号引用 2/5 不触发');
-  assert.equal(coverageNeedsEnrichment(cited(0, 0)), false, '无素材不触发');
-  const summary = coverageSummary(cited(6, 5));
-  assert.match(summary, /交付记录 0\/6/);
+  assert.equal(coverageNeedsEnrichment({ ...cited(0), valueSignals: { total: 5, cited: 0 } }), true, '价值信号 5 条零引用须触发');
+  assert.equal(coverageNeedsEnrichment({ ...cited(0), valueSignals: { total: 5, cited: 2 } }), false, '价值信号引用 2/5 不触发');
+  assert.equal(coverageNeedsEnrichment({ ...cited(0), valueSignals: { total: 4, cited: 0 } }), false, '价值信号 4 条（≤阈值下限）不触发');
+  assert.equal(coverageNeedsEnrichment(cited(0)), false, '无素材不触发');
+  const summary = coverageSummary({ ...cited(5), painSignals: { total: 3, cited: 1 } });
   assert.match(summary, /价值信号 0\/5/);
+  assert.match(summary, /痛点信号 1\/3/);
+  assert.ok(!summary.includes('交付记录'), 'v6 覆盖率文案不含交付记录');
 
-  // 端到端：多数交付记录未被引用 → 自动追加第二遍模型调用，第二稿须引用更多素材才被采纳。
+  // 端到端：多数客户正面反馈未被引用 → 自动追加第二遍模型调用，第二稿须引用更多素材才被采纳。
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-cov-'));
   const db = new WorkbenchDatabase(dir);
   try {
     db.upsertCustomer({ id: 'crm-cov', name: '覆盖客户' });
-    for (let i = 1; i <= 8; i++) {
-      db.upsertSourceEvent({ customerId: 'crm-cov', sourceSystem: 'ones', sourceType: 'support_ticket',
-        externalId: `cov-T-${i}`, displayId: `T-3${i}0${i}`, title: `覆盖交付事项 ${i}`, occurredAt: `2026-03-0${i}T03:00:00Z`,
-        payload: { field005: { name: '已完成', category: 'done' }, field009: `2026-03-0${i} 10:00:00`, field010: `2026-03-0${i} 18:00:00` } });
+    // 6 个含客户说话人正面反馈的片段（valueSignals>4）；假模型第一稿只引用首个片段 → 引用 1/6 <1/4 触发补写。
+    for (let i = 1; i <= 6; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-cov', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: `cov:t${i}`,
+        title: `正面反馈话题 ${i}`, occurredAt: '2026-03-05T05:00:00Z', attributionStatus: 'confirmed',
+        payload: { recordingId: `cov-r${i}`, speakers: ['客户'], evidence: [
+          { speaker: '客户', text: `客户说这套系统挺好用的，效率提升明显，流程顺畅多了（第${i}次反馈）` }] } });
     }
     let calls = 0;
     const prompts: string[] = [];
@@ -4663,7 +4673,7 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
         const prompt = input.messages[0].content;
         prompts.push(prompt);
         // 补写阶段产出引用更多证据的第二稿（value 增条目，claim_evidence 引用随之增加）。
-        const enrichedContent = { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '已累计完成 8 项交付事项'] };
+        const enrichedContent = { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '客户反馈系统好用且效率显著提升'] };
         return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(calls >= 7 ? enrichedContent : CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
@@ -4675,10 +4685,10 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
     assert.equal(calls, 7, '规划+5 章节后覆盖不足须追加一次补写调用');
     const enrichPrompt = prompts[6];
     assert.match(enrichPrompt, /未引用素材清单/, '补写 prompt 须含未引用素材清单');
-    assert.match(enrichPrompt, /覆盖交付事项/, '补写 prompt 须列出未引用的交付记录');
+    assert.match(enrichPrompt, /正面反馈话题/, '补写 prompt 须列出未引用的客户正面反馈');
     const coverage = (draft.fields as any).coverage;
     assert.equal(coverage.enriched, true, 'coverage.enriched 须记录补写发生');
-    assert.ok((draft.fields as any).value.includes('已累计完成 8 项交付事项'), '采纳第二稿正文');
+    assert.ok((draft.fields as any).value.includes('客户反馈系统好用且效率显著提升'), '采纳第二稿正文');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4687,10 +4697,11 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
   const db = new WorkbenchDatabase(dir);
   try {
     db.upsertCustomer({ id: 'crm-cf', name: '补写失败客户' });
-    for (let i = 1; i <= 8; i++) {
-      db.upsertSourceEvent({ customerId: 'crm-cf', sourceSystem: 'ones', sourceType: 'support_ticket',
-        externalId: `cf-T-${i}`, displayId: `T-4${i}0${i}`, title: `补写失败交付 ${i}`, occurredAt: `2026-03-1${i}T03:00:00Z`,
-        payload: { field005: { name: '已完成', category: 'done' } } });
+    for (let i = 1; i <= 6; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-cf', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: `cf:t${i}`,
+        title: `补写失败反馈话题 ${i}`, occurredAt: '2026-03-05T05:00:00Z', attributionStatus: 'confirmed',
+        payload: { recordingId: `cf-r${i}`, speakers: ['客户'], evidence: [
+          { speaker: '客户', text: `客户说这套系统挺好用的，效率提升明显（第${i}次反馈）` }] } });
     }
     let calls = 0;
     const runtime = {
@@ -4716,7 +4727,7 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: case records budget keeps early sixth and recent five sixths', async () => {
+test('workbench: case ones records excluded from prompt but still feed fingerprint and stats', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-budget-'));
   const db = new WorkbenchDatabase(dir);
   try {
@@ -4738,15 +4749,16 @@ test('workbench: case records budget keeps early sixth and recent five sixths', 
     const result = service.generate('crm-budget');
     await waitForJob(db, result.jobId!);
     const context = JSON.parse(capturedPrompt.slice(capturedPrompt.indexOf('上下文：') + '上下文：'.length));
-    assert.equal(context.records.length, 300, 'records 注入 300 条上限');
-    // 最早 1/6（50 条）+ 最近 5/6（250 条）：首条来自最早一批、总数不超上限。
-    assert.ok(context.records.some((item: any) => item.title === '预算事件 1'), '最早事件保留');
-    // 指纹仍基于全量事件（含被截断的中间事件）→ 数据变化必然触发 contextStale。
+    // v6：ONES 明细（数百条工单）不注入——records 为空、目录无工单行，上下文不被工单撑爆。
+    assert.deepEqual(context.records, [], 'ONES 工单不进 records');
+    assert.ok(!capturedPrompt.includes('预算事件 1'), '工单标题不得注入');
+    assert.ok((capturedPrompt.match(/预算事件/g) ?? []).length === 0, '320 条工单明细零注入');
+    // 指纹仍基于全量事件（ONES 仍喂 delivery_stats）→ ONES 数据变化必须触发 contextStale。
     const draft = db.listCaseDrafts('crm-budget')[0];
     assert.ok(draft);
     db.upsertSourceEvent({ customerId: 'crm-budget', sourceSystem: 'ones', sourceType: 'support_ticket',
       externalId: 'bud-T-new', title: '新增事件', occurredAt: '2026-08-01T00:00:00Z', payload: {} });
-    assert.equal(service.detail(draft.id)!.contextStale, true, '预算截断不影响指纹全量口径');
+    assert.equal(service.detail(draft.id)!.contextStale, true, 'ONES 明细剔除不影响指纹全量口径');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

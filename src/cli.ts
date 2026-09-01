@@ -60,7 +60,7 @@ const CLI_CAPABILITIES = [
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/draft-jobs'],
     editableFields: ['title', 'background', 'challenges', 'requirements', 'solution', 'value'],
     readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage'],
-    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；show 输出素材覆盖率（已交付记录/价值信号被正文引用比例）' },
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -442,8 +442,10 @@ function printCaseDraft(draft: any, markdown = '', coverage?: any): void {
   // 正文 = 服务端 renderCaseMarkdown 权威渲染的客户版 Markdown（与 Web 复制、Wiki 发布同源）；
   // claim_evidence/context_snapshot/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
   if (coverage) {
-    const { delivered, valueSignals, painSignals, enriched } = coverage;
-    console.log(`素材覆盖率：交付记录 ${delivered.cited}/${delivered.total} · 价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${enriched ? ' · 已自动补充完善' : ''}`);
+    // v6：ONES 明细剔除后覆盖度只衡量价值/痛点信号与权威公开资料（存量草稿仍带 delivered 字段时兼容展示）。
+    const { valueSignals, painSignals, enriched, delivered } = coverage;
+    const deliveredPart = delivered ? ` · 交付记录 ${delivered.cited}/${delivered.total}` : '';
+    console.log(`素材覆盖率：价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${deliveredPart}${enriched ? ' · 已自动补充完善' : ''}`);
   }
   if (markdown) console.log(`\n${markdown}`);
   console.log(`\n（完整内部证据：csm-agent case show ${draft.id} --json）`);
