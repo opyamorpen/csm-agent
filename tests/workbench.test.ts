@@ -3367,7 +3367,8 @@ test('workbench: case generation writes web-search stage progress', async () => 
     await waitForJob(db, result.jobId!);
     const job = db.getDraftJob(result.jobId!)!;
     assert.equal(job.status, 'succeeded');
-    assert.match(job.progress ?? '', /模型撰写中… 已输出 \d+ 字/);
+    // v5 流水线进度：规划/章节阶段都有流式字数 tick（最后一次 tick 保留在 progress 列）。
+    assert.match(job.progress ?? '', /已输出 \d+ 字/);
     assert.equal(job.attempts, 1);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -3858,9 +3859,15 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFragmentSignals, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
-function publicCaseModelContent(content: any, prompt: string): any {
+/** 从任一阶段 prompt 尾部的上下文 JSON 中解析 allowed_source_refs/source_catalog（规划/章节/补写共用同一份注入）。 */
+function casePromptContext(prompt: string): any {
   const contextText = prompt.slice(prompt.indexOf('上下文：') + '上下文：'.length);
-  const context = JSON.parse(contextText);
+  return JSON.parse(contextText);
+}
+
+/** 整稿 JSON（补写路径/旧契约兼容）：从上下文解析真实 source_ref，为五章正文生成 claim_evidence。 */
+function publicCaseModelContent(content: any, prompt: string): any {
+  const context = casePromptContext(prompt);
   const refs = context.allowed_source_refs as string[];
   const sourceCatalog = new Map((context.source_catalog as any[]).map((item) => [item.source_ref, item]));
   const profileRef = refs.find((ref) => ref.startsWith('customer:')) ?? refs[0];
@@ -3877,17 +3884,66 @@ function publicCaseModelContent(content: any, prompt: string): any {
   return { ...content, claim_evidence: claims };
 }
 
+/** 规划阶段产物：从上下文解析真实 source_ref，为 CASE_CONTENT 五章节生成带证据的 plan 骨架。 */
+function casePlanContent(content: any, prompt: string): any {
+  const context = casePromptContext(prompt);
+  const refs = context.allowed_source_refs as string[];
+  const sourceCatalog = new Map((context.source_catalog as any[]).map((item) => [item.source_ref, item]));
+  const profileRef = refs.find((ref) => ref.startsWith('customer:')) ?? refs[0];
+  const factRef = refs.find((ref) => !ref.startsWith('customer:') && sourceCatalog.get(ref)?.source_type !== 'ai_topic_segment')
+    ?? refs.find((ref) => !ref.startsWith('customer:')) ?? profileRef;
+  const excerptFor = (ref: string) => String(sourceCatalog.get(ref)?.speaker_lines?.[0]?.text ?? sourceCatalog.get(ref)?.excerpt ?? sourceCatalog.get(ref)?.title ?? 'source');
+  const item = (idea: string, ref: string, extra: Record<string, unknown> = {}) =>
+    ({ idea, excerpt: excerptFor(ref), source_refs: [ref], speaker_role: 'customer', status_category: 'unknown', confidence: 0.8, ...extra });
+  return {
+    title: content.title,
+    plan: [
+      { section: 'background', items: [item(content.background, profileRef, { speaker_role: 'unknown' })] },
+      { section: 'challenges', items: content.challenges.map((claim: string) => item(claim, factRef)) },
+      { section: 'requirements', items: content.requirements.map((claim: string) => item(claim, factRef)) },
+      { section: 'solution', items: [item(content.solution, factRef, { status_category: 'done' })] },
+      { section: 'value', items: content.value.map((claim: string) => item(claim, factRef)) },
+    ],
+    unknowns: content.unknowns,
+  };
+}
+
+/** 章节阶段产物：按 prompt 声明的章节 label 返回 {text} 或 {texts}，正文取自 CASE_CONTENT。 */
+function caseChapterContent(content: any, prompt: string): any {
+  const labels: Record<string, string> = { background: '客户背景', challenges: '痛点、现状与挑战', requirements: '需求与要求', solution: '解决方案', value: '价值与成效' };
+  const section = Object.keys(labels).find((key) => prompt.includes(`「${labels[key]}」章节`));
+  if (!section) return { text: content.background };
+  if (section === 'background') return { text: content.background };
+  if (section === 'solution') return { text: content.solution };
+  return { texts: content[section] };
+}
+
+/**
+ * 阶段感知路由（v5 分章节流水线）：按 prompt 特征区分四类模型调用——
+ * 素材摘要（超预算才触发）、规划（章节骨架 plan）、章节生成（单章正文）、补写（整稿第二遍）。
+ * 自定义 runtime 的测试统一复用本函数，避免每个测试重复实现阶段判断。
+ */
+function casePhaseRespond(content: any, prompt: string, opts: { enrichContent?: (prompt: string) => any } = {}): any {
+  const body = String(prompt);
+  if (body.includes('压缩为一份保真的分块摘要')) return { text: '# communications\n- 摘要内容（source_ref: fake）' };
+  if (body.includes('规划客户成功案例草稿的章节结构')) return casePlanContent(content, body);
+  if (body.includes('补充完善客户成功案例草稿')) return publicCaseModelContent(opts.enrichContent?.(body) ?? content, body);
+  if (body.includes('只写这一个章节')) return caseChapterContent(content, body);
+  return publicCaseModelContent(content, body);
+}
+
 function fakeCaseModel(content: unknown, streaming = false): any {
+  const respond = (prompt: string) => casePhaseRespond(content, prompt);
   const runtime: any = {
     llm: { provider: 'fake', model: 'fake-model' },
     models: { complete: async (_model: unknown, input: any) => ({
-      content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(content, input.messages[0].content)) }], stopReason: 'stop' }) },
+      content: [{ type: 'text', text: JSON.stringify(respond(input.messages[0].content)) }], stopReason: 'stop' }) },
   };
   if (streaming) {
     // 流式包装：stream 转发 complete 的最终输出为一次性 delta，验证进度助手对流式模型的消费。
     runtime.models.stream = (_model: unknown, input: any) => ({
       async *[Symbol.asyncIterator]() {
-        const text = JSON.stringify(publicCaseModelContent(content, input.messages[0].content));
+        const text = JSON.stringify(respond(input.messages[0].content));
         yield { type: 'text_delta', contentIndex: 0, delta: text, partial: {} };
       },
       result: async () => runtime.models.complete(_model, input),
@@ -3926,12 +3982,13 @@ test('workbench: case generation runs full-context model job and persists narrat
   const db = new WorkbenchDatabase(dir);
   try {
     seedCaseCustomer(db);
-    let capturedPrompt = '';
+    const prompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
-        capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -3939,9 +3996,14 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.ok(result.jobId, '首次生成必须返回任务');
     assert.equal(result.fingerprint.length, 64);
     await waitForJob(db, result.jobId!);
+    // v5 流水线调用序：规划 1 次 + 五章节各 1 次（素材未超预算不触发摘要、覆盖度达标不触发补写）。
+    assert.equal(prompts.length, 6, '规划 + 5 章节共 6 次模型调用');
+    assert.match(prompts[0], /规划客户成功案例草稿的章节结构/, '首调用必须是规划阶段');
+    assert.match(prompts[1], /只写这一个章节/);
+    const capturedPrompt = prompts.join('\n');
     const draft = db.listCaseDrafts('crm-c1')[0];
     assert.ok(draft, '案例草稿必须落库');
-    assert.equal(draft.title, CASE_CONTENT.title, '标题取模型 title');
+    assert.equal(draft.title, CASE_CONTENT.title, '标题取规划 title');
     assert.equal(draft.status, 'draft');
     assert.equal(draft.version, 1);
     assert.equal(draft.generator, 'fake/fake-model');
@@ -3949,20 +4011,25 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal((draft.fields as any).customer_name, '案例客户一');
     assert.equal((draft.fields as any).background, CASE_CONTENT.background);
     assert.deepEqual((draft.fields as any).challenges, CASE_CONTENT.challenges);
-    assert.equal((draft.fields as any).claim_evidence.length, 8);
+    assert.equal((draft.fields as any).claim_evidence.length, 8, '每章正文条目对应一条 claim_evidence');
     assert.ok((draft.fields as any).context_snapshot.digest);
     assert.deepEqual((draft.fields as any).unknowns, CASE_CONTENT.unknowns);
+    // 组装契约：claim 与正文逐字一致（服务端对位组装，非模型复写）。
+    assert.ok((draft.fields as any).claim_evidence.every((claim: any) =>
+      [CASE_CONTENT.background, CASE_CONTENT.solution, ...CASE_CONTENT.challenges, ...CASE_CONTENT.requirements, ...CASE_CONTENT.value].includes(claim.claim)));
+    // 素材未超预算：不落 input_summary 降级轨迹。
+    assert.equal((draft.fields as any).input_summary, undefined, '预算内不记录降级轨迹');
     // 证据引用含时间线事件与片段。
     assert.ok(draft.evidenceRefs.length >= 2);
     // 全量上下文注入：工单记录、片段转写、客户档案都在 prompt 里。
     assert.match(capturedPrompt, /导出超时/);
     assert.match(capturedPrompt, /统一管理研发项目/);
     assert.match(capturedPrompt, /案例客户一/);
-    // 叙事契约关键规则。
+    // 叙事契约关键规则（规划与章节 prompt 合并断言）。
     assert.match(capturedPrompt, /客户叙事视角/);
-    assert.match(capturedPrompt, /禁止会议流水账与工单流水账/);
-    assert.match(capturedPrompt, /禁止虚构 ROI/);
-    assert.match(capturedPrompt, /只能写入 unknowns/);
+    assert.match(capturedPrompt, /禁止流水账/);
+    assert.match(capturedPrompt, /不得虚构数字\/引语\/ROI|禁止虚构/);
+    assert.match(capturedPrompt, /收进 unknowns/);
     assert.match(capturedPrompt, /五段叙事|五个章节/);
     // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律、交付记录底料。
     assert.match(capturedPrompt, /pain_point_signals/);
@@ -3988,7 +4055,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v4-rich-narrative');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v5-pipeline');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4028,7 +4095,7 @@ test('workbench: case generation failure marks job failed without draft', async 
     for (let i = 0; i < 3750 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 20));
     const job = db.getDraftJob(result.jobId!)!;
     assert.equal(job.status, 'failed');
-    assert.match(job.error ?? '', /模型调用失败（第 3\/3 次）: Request timed out\./);
+    assert.match(job.error ?? '', /规划模型调用失败（第 3\/3 次）: Request timed out\./);
     assert.equal(db.listCaseDrafts('crm-c1').length, 0, '失败不落草稿');
     // 失败任务无墓碑指纹：重新 generate 会创建新任务（不因旧任务指纹被幂等短路）——只断言任务创建，
     // 不触发执行（退避中的后台 process 会活过测试关库窗口）。
@@ -4082,6 +4149,53 @@ test('workbench: case renderContract five sections, ordered numbering, legacy fa
   assert.deepEqual(minimal.claim_evidence, []);
   // 章节契约锁定。
   assert.deepEqual(CASE_SECTIONS.map((section) => section.key), ['background', 'challenges', 'requirements', 'solution', 'value']);
+});
+
+test('workbench: case v5 pipeline degrades input budget and summarizes before failing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-degrade-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-deg', name: '降级客户' });
+    // 素材超预算：3000 条工单（source_catalog 每事件一条目录行且不受 records 截断）+ 长转写片段。
+    for (let i = 1; i <= 3000; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-deg', sourceSystem: 'ones', sourceType: 'support_ticket',
+        externalId: `deg-T-${i}`, displayId: `T-6${String(i).padStart(4, '0')}`, title: `降级事件之工单标题第${i}号交付问题排查与处理`,
+        occurredAt: `2026-03-${String((i % 28) + 1).padStart(2, '0')}T03:00:00Z`, payload: { field005: { category: 'in_progress' } } });
+    }
+    for (let i = 1; i <= 30; i++) {
+      segment(db, 'crm-deg', `deg:t${i}`, 'deg-r1', `长话题 ${i}`, '2026-03-05T05:00:00Z', `客户反复提到跨部门进度不透明依赖人工汇总。`.repeat(120));
+    }
+    const prompts: string[] = [];
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-deg');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-deg')[0];
+    assert.ok(draft, '降级/摘要后仍须产出草稿');
+    const inputSummary = (draft.fields as any).input_summary;
+    assert.ok(inputSummary, '超预算必须记录 input_summary 轨迹');
+    assert.ok(Array.isArray(inputSummary.trials) && inputSummary.trials.length >= 2, '轨迹须含完整注入与降级/摘要尝试');
+    assert.equal(inputSummary.trials[0].action, '完整注入');
+    assert.ok(inputSummary.trials[0].tokens > 96_000, '首次估算须确实超预算');
+    const contextPrompt = prompts.find((p) => p.includes('规划客户成功案例草稿的章节结构'))!;
+    const context = JSON.parse(contextPrompt.slice(contextPrompt.indexOf('上下文：') + '上下文：'.length));
+    if (context.input_summary) {
+      // 摘要兜底路径：prompt 是摘要形态（input_summary + source_catalog 原文目录）。
+      assert.ok(context.input_summary.length > 0, '摘要文本非空');
+      assert.ok(context.source_catalog.length > 0, '原文目录保留供摘录校验');
+      assert.equal(inputSummary.summarized, true);
+    } else {
+      // 降级路径：素材注入规模收缩（records ≤150）。
+      assert.ok(context.records?.length != null && context.records.length <= 150, `降级后 records 收缩（实际 ${context.records?.length}）`);
+    }
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: case fingerprint is deterministic per customer-eventset', () => withDb((db) => {
@@ -4211,12 +4325,13 @@ test('workbench: case generation injects web search context and persists audit s
         { title: '某无关公司中标公告', url: 'https://bid.example.com/2', published_date: '2026-02-01', content: 'Another company procurement' },
       ] });
     };
-    let capturedPrompt = '';
+    const prompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
-        capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime, {
@@ -4227,6 +4342,7 @@ test('workbench: case generation injects web search context and persists audit s
     // 5 个角度各检索一次，查询 = 客户名（简称优先）+ 角度词。
     assert.equal(queries.length, CASE_WEB_ANGLES.length);
     for (const angle of CASE_WEB_ANGLES) assert.ok(queries.includes(`客户甲 ${angle.query}`));
+    const capturedPrompt = prompts.join('\n');
     // mentionsCustomer 预过滤：无关公司结果不进上下文。
     assert.ok(capturedPrompt.includes('信息化制度建设招标公告'));
     assert.ok(!capturedPrompt.includes('Another company'));
@@ -4313,7 +4429,7 @@ test('workbench: delivered_records only includes delivered ones records', async 
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -4470,12 +4586,13 @@ test('workbench: case generation injects delivery stats as citable source and co
   const db = new WorkbenchDatabase(dir);
   try {
     seedCaseCustomer(db);
-    let capturedPrompt = '';
+    const prompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
-        capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -4487,11 +4604,12 @@ test('workbench: case generation injects delivery stats as citable source and co
     assert.ok(profileSource, '档案来源必须进快照');
     assert.doesNotMatch(profileSource.excerpt, /^\{/, '档案摘录不得是 JSON 串');
     assert.match(profileSource.excerpt, /客户名称：/);
+    const capturedPrompt = prompts.join('\n');
     // stats 证据条目进入来源目录且 prompt 说明其引用规则。
     assert.ok(capturedPrompt.includes('"delivery_stats"'), '上下文须含交付统计块');
     assert.ok(capturedPrompt.includes('stats:delivery'), 'prompt 须说明 stats 引用 source_ref');
     assert.match(capturedPrompt, /只可作事实陈述/);
-    assert.match(capturedPrompt, /不得自行计算任何提升百分比或完成率/);
+    assert.match(capturedPrompt, /不得自行计算百分比/);
     assert.ok((draft.fields as any).context_snapshot.sources.some((item: any) => item.id === 'stats:delivery'), 'stats 条目固化进快照');
     // coverage 内部字段持久化（样本小不触发补写：enriched=false）。
     const coverage = (draft.fields as any).coverage;
@@ -4542,12 +4660,11 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         calls += 1;
-        prompts.push(input.messages[0].content);
-        // 第二遍（补写）prompt 含未引用素材清单；产出引用更多证据的第二稿。
-        const enrichedContent = calls >= 2
-          ? { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '已累计完成 8 项交付事项'] }
-          : CASE_CONTENT;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(enrichedContent, input.messages[0].content)) }], stopReason: 'stop' };
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        // 补写阶段产出引用更多证据的第二稿（value 增条目，claim_evidence 引用随之增加）。
+        const enrichedContent = { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '已累计完成 8 项交付事项'] };
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(calls >= 7 ? enrichedContent : CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -4555,9 +4672,10 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
     await waitForJob(db, result.jobId!);
     const draft = db.listCaseDrafts('crm-cov')[0];
     assert.ok(draft, '触发补写的生成仍须产出草稿');
-    assert.equal(calls, 2, '覆盖不足须追加一次补写调用');
-    assert.match(prompts[1], /未引用素材清单/, '补写 prompt 须含未引用素材清单');
-    assert.match(prompts[1], /覆盖交付事项/, '补写 prompt 须列出未引用的交付记录');
+    assert.equal(calls, 7, '规划+5 章节后覆盖不足须追加一次补写调用');
+    const enrichPrompt = prompts[6];
+    assert.match(enrichPrompt, /未引用素材清单/, '补写 prompt 须含未引用素材清单');
+    assert.match(enrichPrompt, /覆盖交付事项/, '补写 prompt 须列出未引用的交付记录');
     const coverage = (draft.fields as any).coverage;
     assert.equal(coverage.enriched, true, 'coverage.enriched 须记录补写发生');
     assert.ok((draft.fields as any).value.includes('已累计完成 8 项交付事项'), '采纳第二稿正文');
@@ -4579,8 +4697,9 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         calls += 1;
-        if (calls >= 2) return { stopReason: 'error', errorMessage: 'relay down', content: [] };
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, input.messages[0].content)) }], stopReason: 'stop' };
+        // 第 7 次调用起（规划+5 章节后）模拟补写模型连续失败：任务仍须成功并保留第一稿。
+        if (calls >= 7) return { stopReason: 'error', errorMessage: 'relay down', content: [] };
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, input.messages[0].content)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -4593,7 +4712,7 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
     assert.ok(draft, '补写失败仍保留第一稿');
     assert.equal((draft.fields as any).coverage.enriched, false);
     assert.equal((draft.fields as any).background, CASE_CONTENT.background, '保留第一稿正文');
-    assert.equal(calls, 3, '补写自身重试 1 次（2 次尝试：第 2 次失败即止于 3 次总调用）');
+    assert.equal(calls, 8, '补写尝试 2 次（第 7 次失败后退避、第 8 次仍失败即止）');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4612,7 +4731,7 @@ test('workbench: case records budget keeps early sixth and recent five sixths', 
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         capturedPrompt = input.messages[0].content;
-        return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, capturedPrompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);

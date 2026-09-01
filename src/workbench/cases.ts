@@ -11,7 +11,7 @@ import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 
-export const CASE_GENERATION_VERSION = 'case-v4-rich-narrative';
+export const CASE_GENERATION_VERSION = 'case-v5-pipeline';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /** 案例五段叙事的字段契约（templates/case.json 同源描述，供前端/CLI 展示）。 */
@@ -94,8 +94,40 @@ const MAX_CASE_FOLLOWUPS = 30;
 const CASE_LIST_ITEM_LIMIT = 12;
 /** 单条正文/单段的写回护栏长度上限（字符）。 */
 const CASE_ITEM_MAX_CHARS = 500;
-/** 案例生成输出预算：五章+claim_evidence 的 JSON 输出与 reasoning 共享 completion 上限，服务端默认 8k 会截断（stopReason=length）。 */
-const CASE_MODEL_MAX_TOKENS = 16_384;
+
+/** 规划阶段 completion 上限：plan 正文 ~2k token，但推理模型的思考 token 与输出共享上限
+ * （真实验收教训：deepseek 思考超过 8k，plan JSON 被截成 stopReason=length），须覆盖思考余量。 */
+export const PLAN_MAX_TOKENS = 16_384;
+/** 单个章节生成时 completion 上限：章节正文 400~800 字中文 + 推理思考余量。 */
+const CHAPTER_MAX_TOKENS = 8_192;
+/** 输入上下文 token 预算：按「中文 1 字符 ≈ 0.6 token、ASCII 4 字符 ≈ 1 token」估算。 */
+const INPUT_BUDGET_TOKENS = 96_000;
+/** 摘要降级单次调用输出上限。 */
+const SUMMARY_MAX_TOKENS = 4_096;
+
+/** 输入源就绪时估算 prompt 中各项素材块的 token 成本（中文按 1 字符≈0.6、英文按 4 字符≈1）。 */
+export function estimateTokens(text: string): number {
+  let tokens = 0;
+  for (const char of text) tokens += /[一-龥]/.test(char) ? 0.6 : 0.25;
+  return Math.ceil(tokens);
+}
+
+/** 列表章节（challenges/requirements/value）或单段章节（background/solution）的产出格式。 */
+/** 规划阶段的单个章节条目骨架：idea 是写作要点（非最终正文），其余字段与 claim_evidence 同形。 */
+interface PlanItem {
+  idea: string;
+  excerpt?: string;
+  source_refs: string[];
+  speaker_role?: string;
+  status_category?: string;
+  confidence?: number;
+}
+/** 规划阶段的完整产物：五个章节各自的要点与证据骨架。 */
+interface CasePlan {
+  title?: string;
+  plan: Array<{ section: CaseSectionKey; items: PlanItem[] }>;
+  unknowns?: string[];
+}
 
 /** 案例联网检索角度（生成时现搜，低频手动动作不做新鲜度门）：背景与制度要求类信息不限时间窗。 */
 export const CASE_WEB_ANGLES: ReadonlyArray<{ key: string; label: string; query: string }> = [
@@ -586,7 +618,7 @@ function selectFragments(hemory: SourceEvent[]): SourceEvent[] {
   return [...sorted.slice(0, early), ...sorted.slice(-(MAX_CASE_FRAGMENTS - early))];
 }
 
-/** 摘录校验第二查找源：与 renderContext 注入的 communications 同口径（同选择、同预算、同截取）。 */
+/** 摘录校验第二查找源：与注入 prompt 的 communications 同口径（同选择、同预算、同截取）。 */
 function caseCommunicationSources(input: CasePromptInput): CaseCommunicationSource[] {
   const fragments = selectFragments(input.hemory);
   const perFragment = Math.max(400, Math.floor(TRANSCRIPT_BUDGET / Math.max(1, fragments.length)));
@@ -795,15 +827,59 @@ function buildContextSnapshot(input: CasePromptInput): CaseContextSnapshot {
   return { generated_at: generatedAt, internal_digest: internalDigest, digest, sources };
 }
 
-function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): string {
+
+
+
+/** 输入预算分级：正常路径（level 0）注入完整原文；溢出时先逐级收缩注入规模，仍溢出才走摘要压缩。 */
+interface InputBudget {
+  level: number;
+  maxRecords: number;
+  maxDelivered: number;
+  maxFollowups: number;
+  maxSignal: number;
+  transcriptBudget: number;
+  maxEvidence: number;
+  description: string;
+}
+
+const INPUT_DEGRADATION_BUDGETS: InputBudget[] = [
+  { level: 0, maxRecords: MAX_CASE_RECORDS, maxDelivered: MAX_DELIVERED_RECORDS, maxFollowups: MAX_CASE_FOLLOWUPS, maxSignal: MAX_CASE_SIGNALS, transcriptBudget: TRANSCRIPT_BUDGET, maxEvidence: MAX_CASE_EVIDENCE, description: '原始预算' },
+  { level: 1, maxRecords: 150, maxDelivered: 20, maxFollowups: 16, maxSignal: 24, transcriptBudget: 24_000, maxEvidence: 36, description: '一级降级（records 150、转写 24000 字符）' },
+  { level: 2, maxRecords: 80, maxDelivered: 10, maxFollowups: 8, maxSignal: 16, transcriptBudget: 12_000, maxEvidence: 24, description: '二级降级（records 80、转写 12000 字符）' },
+];
+
+/** 目录行（source_catalog）收缩：正常路径全量；降级路径优先保留 customer/stats/web/片段（摘录校验主命中源），
+ * 工单/建议等记录行按预算等比收缩（数千条目录行本身就是超限大户）。 */
+function catalogRows(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): Array<Record<string, unknown>> {
+  const base = snapshot.sources.map((item) => ({ source_ref: item.id, title: item.title, excerpt: item.excerpt,
+    speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type }));
+  if (budget.level === 0) return base;
+  // 优先保留：客户档案、交付统计、公开检索、Hemory 片段（摘录校验的主要命中源，数量可控）。
+  const prioritized = base.filter((row) => String(row.source_ref).startsWith('customer:')
+    || String(row.source_ref) === CASE_STATS_SOURCE_ID
+    || String(row.source_type).startsWith('web:')
+    || String(row.source_type) === 'ai_topic_segment');
+  const rest = base.filter((row) => !prioritized.includes(row));
+  const restLimit = Math.max(budget.maxRecords, budget.maxEvidence + budget.maxFollowups + budget.maxSignal);
+  return [...prioritized, ...rest.slice(0, restLimit)];
+}
+
+/** 素材块注入的统一载体：renderInputText 产出 JSON 文本与各块 token 估算，供预算循环复用。 */
+interface RenderedInput {
+  text: string;
+  tokens: number;
+  budget: InputBudget;
+}
+
+/** 渲染注入上下文（按预算等级截断素材规模）。 */
+function renderInputText(input: CasePromptInput, snapshot: CaseContextSnapshot, budget: InputBudget): string {
   const { customer, timeline, hemory, evidence, risk, opportunities, webContext } = input;
   const confirmed = timeline.filter((event) => event.attributionStatus === 'confirmed');
-  // records 预算：全量事件清单无上限时大客户（数百条）会稀释注意力——保最早 1/6 + 最近 5/6。
   const recordEvents = confirmed
     .filter((event) => event.sourceSystem !== 'hemory' && event.sourceType !== 'crm_followup');
-  const keptRecords = recordEvents.length <= MAX_CASE_RECORDS
+  const keptRecords = recordEvents.length <= budget.maxRecords
     ? recordEvents
-    : [...recordEvents.slice(0, Math.max(1, Math.floor(MAX_CASE_RECORDS / 6))), ...recordEvents.slice(-(MAX_CASE_RECORDS - Math.max(1, Math.floor(MAX_CASE_RECORDS / 6))))];
+    : [...recordEvents.slice(0, Math.max(1, Math.floor(budget.maxRecords / 6))), ...recordEvents.slice(-(budget.maxRecords - Math.max(1, Math.floor(budget.maxRecords / 6))))];
   const records = keptRecords
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), system: event.sourceSystem, type: event.sourceType,
       display: event.displayId ?? '', title: event.title.slice(0, 120), status: nestedName(event.payload?.field005) || '', status_category: statusCategory(event) }));
@@ -811,14 +887,14 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
     .filter((event) => event.sourceSystem === 'ones' && isDeliveredOnesEvent(event))
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), type: event.sourceType,
       display: event.displayId ?? '', title: event.title.slice(0, 120), status_category: statusCategory(event) }))
-    .slice(0, MAX_DELIVERED_RECORDS);
+    .slice(0, budget.maxDelivered);
   const followups = confirmed
     .filter((event) => event.sourceType === 'crm_followup')
-    .slice(-MAX_CASE_FOLLOWUPS)
+    .slice(-budget.maxFollowups)
     .map((event) => ({ source_ref: event.id, date: event.occurredAt.slice(0, 10), title: event.title.slice(0, 120),
       content: String(event.payload?.active_record_content ?? event.title).slice(0, 400) }));
   const fragments = selectFragments(hemory);
-  const perFragment = Math.max(400, Math.floor(TRANSCRIPT_BUDGET / Math.max(1, fragments.length)));
+  const perFragment = Math.max(400, Math.floor(budget.transcriptBudget / Math.max(1, fragments.length)));
   const communications = fragments.map((event) => ({
     id: event.id, occurred_at: event.occurredAt, topic: event.title, recording_id: String(event.payload?.recordingId ?? ''),
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [],
@@ -826,28 +902,28 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
     transcript: textOf(event).slice(0, perFragment),
   }));
   const signals = caseFragmentSignals(hemory, customer.csmName);
+  const clip = (list: CaseFragmentSignal[]) => list.slice(0, budget.maxSignal);
   const statsSource = snapshot.sources.find((item) => item.id === CASE_STATS_SOURCE_ID);
   return JSON.stringify({
     customer: { source_ref: `customer:${customer.id}`, ...customerPublicProfile(customer) },
     delivery_stats: statsSource ? { source_ref: CASE_STATS_SOURCE_ID, facts: statsSource.excerpt } : undefined,
-    evidence_signals: evidence.slice(0, MAX_CASE_EVIDENCE).map((item) => ({ source_ref: item.id, kind: item.kind, label: item.label,
+    evidence_signals: evidence.slice(0, budget.maxEvidence).map((item) => ({ source_ref: item.id, kind: item.kind, label: item.label,
       detail: item.detail.slice(0, 200), occurred_at: item.occurredAt })),
     communications,
     records,
     crm_followups: followups,
     delivered_records: delivered,
-    pain_point_signals: signals.painPoints,
-    requirement_signals: signals.requirements,
-    solution_signals: signals.solutions,
-    value_signals: signals.values,
-    internal_review_signals: signals.review,
+    pain_point_signals: clip(signals.painPoints),
+    requirement_signals: clip(signals.requirements),
+    solution_signals: clip(signals.solutions),
+    value_signals: clip(signals.values),
+    internal_review_signals: clip(signals.review),
     internal_business_review: {
       note: '仅供识别内部缺口并写入 unknowns，不得写入公开正文，也不得作为 claim_evidence',
       risk: risk ? { level: risk.level, dimensions: Object.keys(risk.dimensions ?? {}), unknowns: risk.unknowns } : null,
       opportunities: opportunities.map((item) => ({ title: item.title, detail: item.detail.slice(0, 200), status: item.status })),
     },
-    source_catalog: snapshot.sources.map((item) => ({ source_ref: item.id, title: item.title, excerpt: item.excerpt,
-      speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type })),
+    source_catalog: catalogRows(input, snapshot, budget),
     allowed_source_refs: snapshot.sources.map((item) => item.id),
     web_context: webContext
       ? { searched: webContext.searched, results: webContext.results, errors: webContext.errors.length ? webContext.errors : undefined }
@@ -855,60 +931,191 @@ function renderContext(input: CasePromptInput, snapshot: CaseContextSnapshot): s
   });
 }
 
-async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, onProgress?: (text: string) => void): Promise<ParsedCaseContent> {
-  // 摘录校验的第二查找源：catalog 的 hemory 条目只带角色摘要，逐句定位回退到注入片段正文。
-  const communications = caseCommunicationSources(input);
-  const prompt = `为客户「${input.customer.name}」生成一篇客户成功案例草稿。这份案例经 CSM 审核后会用于对外展示与复用，是正式的客户叙事型案例。你只能基于下面提供的上下文证据写作，不执行任何工具或外部写入。\n`
-    + `按固定叙事路径输出五个章节，只输出 JSON：\n`
-    + `{"title":"...","background":"...","challenges":["..."],"requirements":["..."],"solution":"...","value":["..."],"claim_evidence":[{"section":"background|challenges|requirements|solution|value","claim":"与正文逐字一致的完整主张","source_refs":["上下文中的 source_ref"],"excerpt":"支持该主张的原文摘录","speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}],"unknowns":["..."]}\n`
-    + `写作总则（全部章节适用）：\n`
-    + `- 客户叙事视角：客户是主角，按「背景 → 痛点/现状/挑战 → 需求/要求 → 解决方案 → 价值」的故事路径组织；不按 CRM、ONES、会议记录等数据来源罗列过程。\n`
-    + `- 多个系统中同一件事必须合并为一条叙述，禁止会议流水账与工单流水账。\n`
-    + `- 动笔前先通读 pain_point_signals、value_signals、delivered_records、delivery_stats 与 web_context，按素材充分度决定各章节条数：素材充足时取条数区间上限，素材不足时宁少勿注水；没有把握写入正文的素材收进 unknowns，不得硬凑条目。\n`
-    + `- 只写有证据的事实。每个背景/方案段以及每条列表正文都必须在 claim_evidence 中逐字复写并绑定真实 source_ref；claim 字段是对正文整段/整条的逐字符复制（不是摘要、不得增删或改写任何一个字），background 与 solution 整段作为一条 claim 完整复制。禁止引用 allowed_source_refs 之外的 ID。摘录（excerpt）必须从某一个来源（source_refs 中列出的任一来源）的 title/excerpt/事实原文中连续逐字截取，不得自行改写、不得拼接多个来源的片段、不得跨来源拼凑——正文若综合了多个来源的信息，excerpt 只需截取其中最能支撑该主张的那一个来源的连续原文（如 delivery_stats 的 facts 原文、customer 档案的「行业：…」句、某一条 web snippet）。\n`
-    + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
-    + `- 交付统计（delivery_stats）的数字由服务端从交付记录预计算，可直接引用（引用 source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其原文），但只可作事实陈述（如累计完成 N 项、合作 N 个月、解决时长中位 N 天）；不得自行计算任何提升百分比或完成率。若某类「已完成数」不足「总数」的一半，只写已完成的部分，不在对外正文中暴露未完成口径。\n`
-    + `- 价值纪律：优先使用已确认的量化结果（含 delivery_stats 中的交付事实）；没有量化证据时只写有证据支持的定性价值，禁止虚构 ROI、百分比或任何数字。\n`
-    + `- 未确认内容只能写入 unknowns，绝不在正文写「待确认」「待补充」「unknown」或其他占位词。unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」（如「量化收益数据待补：建议向客户项目负责人索取上线前后对比数据」）。\n`
-    + `- 正文禁止出现 unknown 等占位词、内部系统名（Hemory、CRM）、风险评级/评分、工时统计、行动事项等内部信息，禁止出现联系人姓名、联系方式、合同金额，不得泄露其他客户或其他项目的信息。delivery_stats 中的工时投入不得写成客户价值，只能作为背景里的服务投入事实。\n`
-    + `- internal_business_review 只用于发现需线下复核的内部缺口并写入 unknowns，绝不能进入正文或 claim_evidence。\n`
-    + `- 禁止生成直接或间接的虚构客户引语；只有 speakerRole=customer 的逐句证据才能概括为客户反馈，且正文不加引号。CSM/unknown 说话人的判断只能进 unknowns。\n`
-    + `- 所有数字、比例、效率、成本、时长和规模必须能在 claim_evidence 引用的原文（含 delivery_stats 的 facts 原文）中找到，不得自行计算提升百分比。\n`
-    + `章节路由判定（关键词只是线索，必须同时看 speakerRole、timeScope、statusCategory、来源和上下文）：\n`
-    + `- 背景：行业、业务、组织、产品线、项目范围、合作起点、建设目标；只取客户档案、早期沟通记录，以及 web_context 中可信的公开信息（招投标、制度要求、公开报道等）。\n`
-    + `- 痛点：无法、困难、低效、耗时、人工/表格、孤岛、分散、不透明、重复、协作不畅、缺少规范/追溯；必须是合作前或当前问题，已解决事项不再写成现状。\n`
-    + `- 需求：希望、需要、必须、期望、要求、支持、集成、迁移、权限、安全、合规、验收、SLA、时间节点；必须是客户明确诉求或正式招采要求。\n`
-    + `- 方案：已建立/配置/部署/迁移/打通/培训/交付/完成上线；ONES 记录必须 status_category=done，讨论、计划和待办不得写成已交付。\n`
-    + `- 价值：提升、缩短、减少、节省、统一、透明、规范、可追溯、覆盖、采用、满意、认可；必须来自客户说话人或可复核指标，并发生在方案落地之后，泛泛「很好」不能单独成项。\n`
-    + `冲突示例：「希望 9 月上线」属于需求；「尚未上线」不属于方案；「已完成上线」属于方案；「全面使用」只有真实采用证据时才属于价值；CSM 说「效率提升」只进入 unknowns。\n`
-    + `章节要求：\n`
-    + `1. background（客户背景）：一段 150~400 字的连贯叙述——客户所处行业与业务概况、与 ONES 合作的起点与目标，可自然融入合作时长与服务投入（delivery_stats）。依据客户档案（customer 来源，其 excerpt 为「行业：…；使用版本：…」等自然语言句，摘录从中逐字截取）、早期沟通记录，以及 web_context 中可信的公开信息（招投标、制度要求、公开报道等）。\n`
-    + `2. challenges（痛点、现状与挑战）：3~6 条，客户在合作前或合作中面临的核心业务痛点与现状困难，每条 30~120 字且包含「痛点现象 + 具体场景或影响」两层，禁止一句话条目。重点从 pain_point_signals 中客户原话表达的痛点线索（系统未打通、效率低、表格/人工管理、信息不透明、协作不畅等）分析整理并归纳为主题；信号只是线索，须结合上下文甄别（如转述他人情形、已解决的历史问题不写入）；工单/建议/运维记录作为补充佐证。\n`
-    + `3. requirements（需求与要求）：2~6 条，客户明确提出的需求与要求（功能诉求、交付要求、服务标准），每条 30~120 字；有明确时间节点的要求保留节点；web_context 中可信的招投标/制度类公开信息可作为佐证。\n`
-    + `4. solution（解决方案）：以「我们为客户提供了什么方案」为主线的连贯叙述，全文 250~800 字、2~5 个自然段——从 delivered_records（已完成交付）与会议讨论中提炼方案级举措（如建立需求池/需求管理机制、提供资源管理、二次开发打通既有系统、开发定制插件、搭建知识库等），每项举措一段（80~250 字）说明其内容与所解决的问题，可引用 delivery_stats 的交付完成量佐证规模；不得写成功能点罗列、按日期排列的事件流水或需求清单；每一项举措都必须有交付记录或会议证据支撑，不得虚构。\n`
-    + `5. value（价值与成效）：2~6 条，客户获得的已确认价值，每条 30~150 字。重点从 value_signals 中客户的正面反馈表述（如对效率提升、流程改善的认可）与 signals 中的成果反馈分析总结；量化结果优先（上线时间、效率改善、问题下降等，含 delivery_stats 的交付事实），无量化写有证据支持的定性价值，可适度转述客户反馈但不得出现人名；禁止虚构数字。\n`
-    + `篇幅契约是质量要求而非硬性字符数：上下文素材不足以支撑下限时允许略低，但禁止明显低于下限的空泛正文；超出上限的冗长堆砌同样不合格。\n`
-    + `内部字段（不进入正文）：claim_evidence 为逐条事实依据；unknowns 为 CSM 需补充确认的关键信息清单。\n`
-    + `title：案例标题，概括客户从痛点到价值的实践，也可朴素地写「${input.customer.name}客户成功案例」。\n`
-    + `${onesAsrAliasRule()}该订正适用于全部正文。\n`
-    + `上下文：${renderContext(input, snapshot)}`;
-  // 中继端点偶发连接超时（undici 10s 连接超时，实测坏窗口可持续数分钟）：complete 不抛异常而是
-  // 返回 stopReason='error' + errorMessage，必须显式透出真实原因并自动重试；固定短间隔重试会整个
-  // 落在同一坏窗口内，指数退避（5s→15s→45s）才能跨出去。
-  const MAX_MODEL_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
-  let lastError = '模型未返回可解析的案例 JSON';
-  for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
-    // 输出预算：五章正文 + claim_evidence 的 JSON 常达 8k+ 中文字符，reasoning token 与正文共享
-    // completion 上限——服务端默认 8k 会截断成 stopReason=length（真实验收教训），显式给大预算。
+/**
+ * 输入预算决策（用户拍板原则：只有输入超出模型上下文限制才摘要，正常路径完整原文注入）：
+ * 1. level 0 完整注入；超预算 → 逐级收缩注入规模（level 1/2），每级用收缩后的素材重新渲染重新估算；
+ * 2. 二级收缩后仍超 → 追加一次「素材摘要」模型调用，把大块素材压缩成分块摘要再渲染；
+ * 3. 摘要后仍超或摘要失败 → 抛「上下文预算超限」（含降级轨迹），任务失败并明示原因。
+ * 降级/摘要轨迹记入 fields.input_summary 供 CLI/UI 展示。
+ */
+async function prepareCaseInput(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
+  onProgress?: (text: string) => void): Promise<{ contextText: string; inputSummary: Record<string, unknown> | null }> {
+  const trials: Array<{ level: number; tokens: number; action: string }> = [];
+  let budget = INPUT_DEGRADATION_BUDGETS[0];
+  let text = renderInputText(input, snapshot, budget);
+  let tokens = estimateTokens(text);
+  trials.push({ level: 0, tokens, action: '完整注入' });
+  let summary: string | null = null;
+  if (tokens > INPUT_BUDGET_TOKENS) {
+    for (const candidate of INPUT_DEGRADATION_BUDGETS.slice(1)) {
+      onProgress?.(`输入素材约 ${tokens} tokens 超出预算 ${INPUT_BUDGET_TOKENS}，${candidate.description}…`);
+      budget = candidate;
+      text = renderInputText(input, snapshot, budget);
+      tokens = estimateTokens(text);
+      trials.push({ level: candidate.level, tokens, action: candidate.description });
+      if (tokens <= INPUT_BUDGET_TOKENS) break;
+    }
+  }
+  if (tokens > INPUT_BUDGET_TOKENS) {
+    // 二级收缩后仍超预算：先摘要压缩（唯一兜底），保留 source_ref 对位以便摘录校验。
+    onProgress?.(`降级后仍约 ${tokens} tokens，调用模型压缩素材摘要…`);
+    const compressed = await summarizeCaseInput(runtime, input, text, onProgress);
+    if (compressed) {
+      summary = compressed;
+      text = renderSummaryContext(summary, snapshot);
+      tokens = estimateTokens(text);
+      trials.push({ level: budget.level, tokens, action: '素材摘要压缩' });
+      if (tokens > INPUT_BUDGET_TOKENS) throw new Error(`上下文预算超限：摘要后仍约 ${tokens} tokens（上限 ${INPUT_BUDGET_TOKENS}），降级轨迹：${trials.map((t) => `${t.level}:${t.action}=${t.tokens}`).join(' → ')}`);
+    } else {
+      throw new Error(`上下文预算超限：素材摘要失败，降级轨迹：${trials.map((t) => `${t.level}:${t.action}=${t.tokens}`).join(' → ')}`);
+    }
+  }
+  if (!trials.some((t) => t.level > 0) && !summary) return { contextText: text, inputSummary: null };
+  return {
+    contextText: text,
+    inputSummary: {
+      budget_tokens: INPUT_BUDGET_TOKENS,
+      trials: trials.map((t) => ({ ...t, tokens: t.tokens })),
+      degraded: trials.filter((t) => t.level > 0).map((t) => t.action),
+      summarized: !!summary,
+      summary: summary ?? undefined,
+    },
+  };
+}
+
+/** 摘要模型调用：把超出预算的素材文本压缩为分块摘要（保留 source_ref 对位）。失败返回 null 由调用方兜底报错。 */
+async function summarizeCaseInput(runtime: Runtime, input: CasePromptInput, materialText: string, onProgress?: (text: string) => void): Promise<string | null> {
+  const prompt = `以下是客户「${input.customer.name}」案例生成的全部素材上下文（JSON）。素材总量超出模型输入预算，需要你压缩为一份保真的分块摘要，供后续案例写作使用。\n`
+    + `要求：\n`
+    + `- 输出纯文本摘要（非 JSON）：按素材块分组（communications 转写、records 工单/建议记录、delivered_records 已交付、crm_followups 跟进、各 signal 信号、web_context 公开信息），每块先写「# 块名」，块内逐 source_ref 归并要点。\n`
+    + `- 必须保留每个素材条目的 source_ref ID（形如 xxxxxxxx-xxxx 的 ID 或 customer:/stats:/web: 前缀 ID）与日期、状态、说话人角色——这些是后续引用与摘录校验的锚点，丢失即无法对位。\n`
+    + `- 客户原话（痛点/诉求/正面反馈）尽量保留原句或压缩句；数字、日期、状态、规模逐字保留。\n`
+    + `- 不新增任何素材中没有的事实，不推测。\n`
+    + `素材：${materialText}`;
+  const MAX_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
-      systemPrompt: '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。',
+      systemPrompt: '你是素材压缩助手。只做忠实压缩：保留 source_ref、日期、状态、数字与客户原话要点，不添加任何新事实。',
       messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: CASE_MODEL_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: 180_000 });
     if (response.stopReason === 'error') {
-      lastError = `模型调用失败（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
-      if (attempt < MAX_MODEL_ATTEMPTS) {
+      if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 5_000));
+      continue;
+    }
+    const text = extractText(response.content).trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+/** 摘要形态的目录行预算：摘要路径下 source_catalog 也要收缩（3000 条目录行本身≈20 万 tokens），
+ * 保留 customer/stats/web 与 hemory 片段（摘录校验主要命中源），其余按标题行精简。 */
+const SUMMARY_CATALOG_FRAGMENT_LIMIT = 120;
+const SUMMARY_CATALOG_ROW_LIMIT = 400;
+
+/** 摘要后的上下文形态：摘要正文 + 收缩后的来源目录（customer/stats/片段保留原文 excerpt 供摘录校验）。 */
+function renderSummaryContext(summary: string, snapshot: CaseContextSnapshot): string {
+  const priority = (source: CaseEvidenceSnapshotItem): number =>
+    source.id.startsWith('customer:') || source.id === CASE_STATS_SOURCE_ID ? 0
+      : source.source_system === 'hemory' ? 1
+        : source.source_system === 'web' ? 2 : 3;
+  const ranked = [...snapshot.sources].sort((a, b) => priority(a) - priority(b));
+  const fragments = ranked.filter((item) => item.source_system === 'hemory').slice(0, SUMMARY_CATALOG_FRAGMENT_LIMIT);
+  const rest = ranked.filter((item) => item.source_system !== 'hemory').slice(0, SUMMARY_CATALOG_ROW_LIMIT);
+  const catalog = [...fragments, ...rest].map((item) => ({ source_ref: item.id, title: item.title, excerpt: item.excerpt,
+    speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type }));
+  return JSON.stringify({
+    input_summary: summary,
+    source_catalog: catalog,
+    allowed_source_refs: snapshot.sources.map((item) => item.id),
+    note: '素材总量超出输入预算，以上为分块摘要；目录已收缩（customer/stats/沟通片段优先保留原文 excerpt），写作与摘录校验以目录原文为准',
+  });
+}
+
+/** 章节规划 prompt 的共用说明（规划与逐章生成共用同一份契约说明）。 */
+const CASE_SYSTEM_PROMPT = '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。';
+
+/** 规划产物契约校验：五章节齐全、条目非空、source_refs 合法（excerpt 校验留给组装后的 parseCaseContent）。 */
+function parseCasePlan(value: unknown, allowedRefs: Set<string>): CasePlan {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型未返回规划 JSON 对象');
+  const raw = value as Record<string, unknown>;
+  const plan = Array.isArray(raw.plan) ? raw.plan.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const section = String(record.section ?? '') as CaseSectionKey;
+    if (!CASE_SECTIONS.some((item) => item.key === section)) return [];
+    const items = Array.isArray(record.items) ? record.items.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const row = item as Record<string, unknown>;
+      const idea = typeof row.idea === 'string' ? row.idea.trim() : '';
+      const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).map((ref) => ref.trim()).filter(Boolean) : [];
+      if (!idea || !refs.length) return [];
+      return [{
+        idea,
+        excerpt: typeof row.excerpt === 'string' ? row.excerpt.trim() : undefined,
+        source_refs: refs,
+        speaker_role: ['customer', 'csm', 'unknown'].includes(String(row.speaker_role)) ? String(row.speaker_role) : undefined,
+        status_category: typeof row.status_category === 'string' ? row.status_category : undefined,
+        confidence: Number.isFinite(Number(row.confidence)) ? Math.max(0, Math.min(1, Number(row.confidence))) : undefined,
+      } satisfies PlanItem];
+    }) : [];
+    return [{ section, items }];
+  }) : [];
+  const sections = new Map(plan.map((entry) => [entry.section, entry.items.length]));
+  const missing = CASE_SECTIONS.filter((section) => !sections.has(section.key) || !sections.get(section.key));
+  if (missing.length) throw new Error(`规划缺少章节或条目: ${missing.map((item) => item.label).join('、')}`);
+  const unknownRefs = plan.flatMap((entry) => entry.items.flatMap((item) => item.source_refs)).filter((ref) => !allowedRefs.has(ref));
+  if (unknownRefs.length) throw new Error(`规划引用了未知证据: ${[...new Set(unknownRefs)].slice(0, 5).join('、')}`);
+  const unknowns = Array.isArray(raw.unknowns) ? raw.unknowns.map(String).map((item) => item.trim()).filter(Boolean) : [];
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : undefined;
+  return { title, plan, unknowns };
+}
+
+/** 章节产物校验：单段章节要求非空 text；列表章节要求非空 texts 且无占位词。 */
+function parseChapterContent(section: CaseSectionKey, value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`模型未返回「${CASE_SECTIONS.find((item) => item.key === section)!.label}」章节 JSON`);
+  const raw = value as Record<string, unknown>;
+  const single = typeof raw.text === 'string' ? raw.text.trim() : '';
+  const list = Array.isArray(raw.texts) ? raw.texts.map(String).map((item) => item.trim()).filter(Boolean) : [];
+  const isSingle = section === 'background' || section === 'solution';
+  if (isSingle && !single) throw new Error(`模型未返回「${CASE_SECTIONS.find((item) => item.key === section)!.label}」正文`);
+  if (!isSingle && !list.length) throw new Error(`模型未返回「${CASE_SECTIONS.find((item) => item.key === section)!.label}」条目`);
+  const items = isSingle ? [single] : list;
+  if (items.some((item) => /待确认|待补充|\bunknown\b/i.test(item))) throw new Error(`「${CASE_SECTIONS.find((item) => item.key === section)!.label}」包含待确认/待补充占位词`);
+  return items;
+}
+
+/**
+ * 规划阶段模型调用：产出五章节的要点与证据骨架（plan）。
+ * plan.items 的 excerpt/source_refs 将原样进入 claim_evidence，逐字校验在组装阶段统一执行。
+ */
+async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, contextText: string,
+  onProgress?: (text: string) => void): Promise<CasePlan> {
+  const prompt = `为客户「${input.customer.name}」规划客户成功案例草稿的章节结构。这份案例经 CSM 审核后用于对外展示。你只做规划不写正文，只输出 JSON：\n`
+    + `{"title":"...","plan":[{"section":"background|challenges|requirements|solution|value","items":[{"idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"unknowns":["..."]}\n`
+    + `规划规则：\n`
+    + `- 五个章节都必须有条目：background 1 条、solution 2~5 条（每条一个方案级举措）、challenges 3~6 条、requirements 2~6 条、value 2~6 条；素材不足时宁少勿注水，没有把握写入的素材收进 unknowns。\n`
+    + `- 每个条目的 idea 是「这一条要写什么」的要点描述（如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
+    + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
+    + `- 章节路由：背景取档案/早期记录/权威公开信息；痛点必须是合作前或当前问题；需求是客户明确诉求；方案条目必须对应已交付（ONES 记录 status_category=done）；价值必须来自客户说话人或可复核指标且发生在方案落地之后。\n`
+    + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
+    + `- 交付统计（delivery_stats）可被 background/solution/value 条目引用（source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其 facts 原文）；只可作事实陈述，不得自行计算百分比。\n`
+    + `- unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」。\n`
+    + `${onesAsrAliasRule()}该订正适用于全部正文与摘录。\n`
+    + `上下文：${contextText}`;
+  const MAX_ATTEMPTS = 3;
+  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  let lastError = '模型未返回可解析的案例规划 JSON';
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await completeModelWithProgress(runtime, {
+      systemPrompt: CASE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: 180_000 });
+    if (response.stopReason === 'error') {
+      lastError = `规划模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_ATTEMPTS) {
         onProgress?.(`${lastError}，${Math.round(retryDelayMs(attempt) / 1000)} 秒后自动重试`);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
       }
@@ -916,20 +1123,148 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     }
     const value = cleanJson(extractText(response.content));
     if (value) {
-      try { return parseCaseContent(value, { requirePublic: true, allowedRefs: new Set(snapshot.sources.map((item) => item.id)), sources: snapshot.sources, communications }); }
+      try { return parseCasePlan(value, new Set(snapshot.sources.map((item) => item.id))); }
       catch (error) {
-        lastError = `模型案例契约不合格（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次）: ${(error as Error).message}`;
+        lastError = `模型规划契约不合格（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${(error as Error).message}`;
         onProgress?.(lastError);
       }
     } else {
-      lastError = `模型未返回可解析的案例 JSON（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+      lastError = `模型未返回可解析的案例规划 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
     }
-    if (attempt < MAX_MODEL_ATTEMPTS) {
-      onProgress?.(`模型输出未通过校验（第 ${attempt}/${MAX_MODEL_ATTEMPTS} 次），正在重写`);
+    if (attempt < MAX_ATTEMPTS) {
+      onProgress?.(`规划输出未通过校验（第 ${attempt}/${MAX_ATTEMPTS} 次），正在重写`);
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }
   throw new Error(lastError);
+}
+
+/**
+ * 章节生成模型调用：按 plan 的单章节撰写正文。单次输出只有一章（数百字），彻底规避 maxTokens 截断。
+ * 每章 3 次指数退避重试；单章失败抛错由调用方判任务失败（已完成的章节不重复消耗）。
+ */
+async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, plan: CasePlan,
+  section: CaseSectionKey, contextText: string, onProgress?: (text: string) => void): Promise<string[]> {
+  const definition = CASE_SECTIONS.find((item) => item.key === section)!;
+  const sectionPlan = plan.plan.find((entry) => entry.section === section)!;
+  const isSingle = section === 'background' || section === 'solution';
+  const chapterBriefs = sectionPlan.items.map((item, index) => `第 ${index + 1} 条：${item.idea}（证据摘录：${item.excerpt ?? '无'}）`).join('\n');
+  const prompt = `为客户「${input.customer.name}」的客户成功案例撰写「${definition.label}」章节正文（案例叙事路径「背景 → 痛点/现状/挑战 → 需求/要求 → 解决方案 → 价值」中的${definition.description}）。只写这一个章节，只输出 JSON：\n`
+    + (isSingle ? `{"text":"..."}（text 为本章正文，一段连贯叙述）\n` : `{"texts":["...","..."]}（texts 为本章条目数组，顺序与下面的写作要点一一对应）\n`)
+    + `写作要点（来自已确认的章节规划，每条已有绑定证据，按顺序逐条撰写正文）：\n${chapterBriefs}\n`
+    + `写作要求：\n`
+    + `- 客户叙事视角：客户是主角；多个系统中同一件事合并为一条叙述，禁止流水账。\n`
+    + `- 只写有证据的事实：正文内容须与写作要点及其证据一致，不得虚构数字/引语/ROI；没有量化证据时只写有证据支持的定性表述。\n`
+    + `- 正文禁止出现 unknown 等占位词、内部系统名（Hemory、CRM）、风险评级、工时统计、联系人姓名/联系方式/合同金额，不得泄露其他客户或其他项目信息。\n`
+    + `${definition.key === 'background' ? '- 一段 150~400 字的连贯叙述：客户行业与业务概况、与 ONES 合作的起点与目标，可自然融入合作时长与服务投入（delivery_stats）。可依据客户档案与 web_context 中可信的公开信息（招投标、制度要求、公开报道）。\n' : ''}`
+    + `${definition.key === 'challenges' ? '- 每条 30~120 字且包含「痛点现象 + 具体场景或影响」两层，禁止一句话条目；必须是合作前或当前问题，已解决事项不写成现状。\n' : ''}`
+    + `${definition.key === 'requirements' ? '- 每条 30~120 字：客户明确提出的需求与要求，有明确时间节点的保留节点；可信的招投标/制度类公开信息可作佐证。\n' : ''}`
+    + `${definition.key === 'solution' ? '- 以「我们为客户提供了什么方案」为主线，全文 250~800 字、2~5 个自然段；每条要点一段（80~250 字）说明举措内容与所解决的问题，可引用 delivery_stats 佐证规模；不得写成功能点罗列或事件流水。\n' : ''}`
+    + `${definition.key === 'value' ? '- 每条 30~150 字：客户获得的已确认价值，量化结果优先，无量化写有证据支持的定性价值；不得出现人名，禁止虚构数字。\n' : ''}`
+    + `- 篇幅契约是质量要求而非硬性字符数：素材不足以支撑下限时允许略低，禁止空泛注水。\n`
+    + `${onesAsrAliasRule()}该订正适用于全部正文。\n`
+    + `上下文：${contextText}`;
+  const MAX_ATTEMPTS = 3;
+  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  let lastError = `模型未返回「${definition.label}」章节 JSON`;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await completeModelWithProgress(runtime, {
+      systemPrompt: CASE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    }, onProgress ? (tick) => onProgress(`撰写「${definition.label}」中… ${modelProgressText(tick)}`) : undefined, { maxTokens: CHAPTER_MAX_TOKENS, timeoutMs: 180_000 });
+    if (response.stopReason === 'error') {
+      lastError = `「${definition.label}」模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_ATTEMPTS) {
+        onProgress?.(`${lastError}，${Math.round(retryDelayMs(attempt) / 1000)} 秒后自动重试`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      }
+      continue;
+    }
+    const value = cleanJson(extractText(response.content));
+    if (value) {
+      try {
+        const items = parseChapterContent(section, value);
+        // 列表章节条数须与规划一致（服务端按序号对位组装 claim_evidence）。
+        if (!isSingle && items.length !== sectionPlan.items.length) throw new Error(`条目数 ${items.length} 与规划 ${sectionPlan.items.length} 不一致`);
+        return items;
+      } catch (error) {
+        lastError = `「${definition.label}」契约不合格（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${(error as Error).message}`;
+        onProgress?.(lastError);
+      }
+    } else {
+      lastError = `「${definition.label}」未返回可解析 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      onProgress?.(`「${definition.label}」输出未通过校验（第 ${attempt}/${MAX_ATTEMPTS} 次），正在重写`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    }
+  }
+  throw new Error(lastError);
+}
+
+/**
+ * 组装：plan 骨架 + 各章正文 → 完整 ParsedCaseContent，再走 parseCaseContent(requirePublic) 全套公开契约校验。
+ * claim_evidence 的 claim 直接取章节正文（整段/整条逐字），excerpt/source_refs 来自规划骨架——
+ * 服务端对位组装使「claim 与正文逐字一致」天然成立，模型不再被要求复写正文（输出 token 减半的根因）。
+ */
+function assembleCase(plan: CasePlan, chapters: Map<CaseSectionKey, string[]>): ParsedCaseContent {
+  const claimEvidence: CaseClaimEvidence[] = [];
+  for (const section of CASE_SECTIONS) {
+    const sectionPlan = plan.plan.find((entry) => entry.section === section.key)!;
+    const texts = chapters.get(section.key)!;
+    texts.forEach((text, index) => {
+      const item = sectionPlan.items[index];
+      claimEvidence.push({
+        section: section.key,
+        claim: text,
+        source_refs: item.source_refs,
+        excerpt: item.excerpt,
+        speaker_role: item.speaker_role as CaseSpeakerRole | undefined,
+        status_category: item.status_category,
+        confidence: item.confidence,
+      });
+    });
+  }
+  return {
+    title: plan.title,
+    background: chapters.get('background')![0],
+    challenges: chapters.get('challenges')!,
+    requirements: chapters.get('requirements')!,
+    solution: chapters.get('solution')![0],
+    value: chapters.get('value')!,
+    claim_evidence: claimEvidence,
+    unknowns: plan.unknowns ?? [],
+  };
+}
+
+/**
+ * 案例生成主编排（v5 分章节流水线）：
+ * 1. 输入预算决策（超预算才降级/摘要，正常路径完整原文）；
+ * 2. 规划章节骨架（plan，一次小 JSON 调用）；
+ * 3. 逐章节生成正文（每章一次小 JSON 调用，输出 token 可预测，不受单次 maxTokens 约束）；
+ * 4. 服务端组装 + 全套公开契约校验（含摘录逐字校验）。
+ * 返回 inputSummary 供 process 落 fields.input_summary（降级/摘要轨迹）。
+ */
+async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
+  onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; inputSummary: Record<string, unknown> | null }> {
+  const communications = caseCommunicationSources(input);
+  const { contextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, onProgress);
+  onProgress?.('规划章节结构…');
+  const plan = await planCaseWithModel(runtime, input, snapshot, contextText, onProgress);
+  const chapters = new Map<CaseSectionKey, string[]>();
+  for (const [index, section] of CASE_SECTIONS.entries()) {
+    onProgress?.(`第 ${index + 1}/${CASE_SECTIONS.length} 章「${section.label}」撰写中…`);
+    chapters.set(section.key, await generateChapterWithModel(runtime, input, snapshot, plan, section.key, contextText, onProgress));
+  }
+  const content = assembleCase(plan, chapters);
+  parseCaseContent(content as unknown as Record<string, unknown>, {
+    requirePublic: true,
+    allowedRefs: new Set(snapshot.sources.map((item) => item.id)),
+    sources: snapshot.sources,
+    communications,
+  });
+  return { content, inputSummary };
 }
 
 /** 素材覆盖度：关键素材被 claim_evidence 实际引用的比例（诊断生成是否浪费素材，非正确性判定）。 */
@@ -997,29 +1332,29 @@ function uncoveredMaterialList(content: { claim_evidence: Array<{ source_refs: s
 }
 
 /**
- * 追加一次「补充完善」生成：把未引用素材清单反馈给模型重写一稿。
+ * 追加一次「补充完善」生成（章节级）：把未引用素材清单反馈给模型重写对应章节。
  * 同样过全套公开契约校验；失败保留第一稿（返回 null 由调用方降级），不因补写失败判任务失败。
  */
 async function enrichCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, first: ParsedCaseContent,
-  uncovered: string[], onProgress?: (text: string) => void): Promise<ParsedCaseContent | null> {
+  uncovered: string[], contextText: string, onProgress?: (text: string) => void): Promise<ParsedCaseContent | null> {
   const communications = caseCommunicationSources(input);
-  const basePrompt = `为客户「${input.customer.name}」补充完善客户成功案例草稿。这是第二遍生成：第一稿已通过契约校验，但以下关键素材未被引用，说明案例内容还不够充实。\n`
+  const basePrompt = `为客户「${input.customer.name}」补充完善客户成功案例草稿。第一稿已通过契约校验，但以下关键素材未被引用，说明案例内容还不够充实。\n`
     + `未引用素材清单（全部真实存在，source_ref 可直接引用）：\n${uncovered.slice(0, 40).join('\n')}\n`
     + `要求：\n`
     + `- 在第一稿基础上充实内容：优先把上述素材中有价值的内容并入对应章节（已交付记录进 solution、客户正面反馈进 value），并为其新增 claim_evidence（claim 与正文逐字一致、摘录取素材原文）。\n`
     + `- 已合格且与素材无关的章节内容保持第一稿原文，不为了引用而引用、不堆砌清单；确实无价值的素材允许继续不引用。\n`
     + `- 输出完整的五章 JSON（与第一稿相同的 schema），不是增量补丁。\n`
     + `- 第一稿正文：\n${JSON.stringify({ title: first.title, background: first.background, challenges: first.challenges, requirements: first.requirements, solution: first.solution, value: first.value })}\n`
-    + `上下文：${renderContext(input, snapshot)}`;
+    + `上下文：${contextText}`;
   const MAX_ATTEMPTS = 2;
   const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
   let lastError = '补充完善未返回可解析的案例 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
-      systemPrompt: '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。',
+      systemPrompt: CASE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: basePrompt, timestamp: Date.now() }],
       tools: [],
-    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: CASE_MODEL_MAX_TOKENS, timeoutMs: 180_000 });
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: 180_000 });
     if (response.stopReason === 'error') {
       lastError = `补充完善模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
       if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
@@ -1318,20 +1653,26 @@ export class CaseService {
       // 联网检索客户公开信息：任一角度失败只记入 errors 不阻断生成（未搜到=unknown，不作为事实依据）。
       const webContext = this.webSearchDeps ? await searchCaseWebContext(customer, this.webSearchDeps, report_) : null;
       const promptInput = { customer, timeline, hemory, evidence, risk, opportunities, webContext };
-      report_(`上下文与信号就绪（${timeline.length} 条事件 / ${hemory.length} 个片段${webContext ? ` / ${webContext.results.length} 条公开信息` : ''}），模型撰写中…`);
+      report_(`上下文与信号就绪（${timeline.length} 条事件 / ${hemory.length} 个片段${webContext ? ` / ${webContext.results.length} 条公开信息` : ''}），规划章节…`);
       const snapshot = buildContextSnapshot(promptInput);
       let content: ParsedCaseContent;
-      try { content = await proposeCaseWithModel(this.runtime, promptInput, snapshot, report_); }
-      catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
+      let inputSummary: Record<string, unknown> | null = null;
+      try {
+        const proposed = await proposeCaseWithModel(this.runtime, promptInput, snapshot, report_);
+        content = proposed.content;
+        inputSummary = proposed.inputSummary;
+      } catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
       // 素材覆盖度诊断 + 从严阈值自动补写：主要素材池（已交付记录/客户正面反馈）大量闲置时
       // 追加一次「补充完善」调用；补写失败保留第一稿，不因补写失败判任务失败。
+      // v5：补写沿用生成阶段的同一份 contextText（含降级/摘要后的素材）。
       const coverage = caseCoverage(content, promptInput);
       let enriched = false;
       if (coverageNeedsEnrichment(coverage)) {
         const uncovered = uncoveredMaterialList(content, promptInput, snapshot);
         if (uncovered.length) {
           report_(`${coverageSummary(coverage)}——关键素材闲置较多，自动补充完善中…`);
-          const refined = await enrichCaseWithModel(this.runtime, promptInput, snapshot, content, uncovered, report_);
+          const contextText = inputSummary?.contextText as string | undefined ?? renderInputText(promptInput, snapshot, INPUT_DEGRADATION_BUDGETS[0]);
+          const refined = await enrichCaseWithModel(this.runtime, promptInput, snapshot, content, uncovered, contextText, report_);
           if (refined) { content = refined; enriched = true; }
         }
       }
@@ -1345,6 +1686,7 @@ export class CaseService {
         context_snapshot: snapshot,
         coverage: { ...finalCoverage, enriched },
       };
+      if (inputSummary) fields.input_summary = inputSummary;
       if (content.unknowns?.length) fields.unknowns = content.unknowns;
       // 检索审计快照：不渲染进正文，case show --json 可见生成时用了哪些公开信息。
       if (webContext) fields.web_search = webContext;
