@@ -3865,7 +3865,7 @@ function casePromptContext(prompt: string): any {
   return JSON.parse(contextText);
 }
 
-/** 整稿 JSON（补写路径/旧契约兼容）：从上下文解析真实 source_ref，为五章正文生成 claim_evidence。 */
+/** 整稿 JSON（补写路径/旧契约兼容）：从上下文解析真实 source_ref，为各章正文生成 claim_evidence。 */
 function publicCaseModelContent(content: any, prompt: string): any {
   const context = casePromptContext(prompt);
   const refs = context.allowed_source_refs as string[];
@@ -3875,16 +3875,21 @@ function publicCaseModelContent(content: any, prompt: string): any {
     ?? refs.find((ref) => !ref.startsWith('customer:')) ?? profileRef;
   const excerptFor = (ref: string) => String(sourceCatalog.get(ref)?.speaker_lines?.[0]?.text ?? sourceCatalog.get(ref)?.excerpt ?? sourceCatalog.get(ref)?.title ?? 'source');
   const claims = [
-    { section: 'background', claim: content.background, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 },
-    ...content.challenges.map((claim: string) => ({ section: 'challenges', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
-    ...content.requirements.map((claim: string) => ({ section: 'requirements', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
-    { section: 'solution', claim: content.solution, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'unknown', status_category: 'done', confidence: 0.8 },
-    ...content.value.map((claim: string) => ({ section: 'value', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    { section: 'intro', claim: content.company_info, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 },
+    ...(content.business_scope ? [{ section: 'intro', claim: content.business_scope, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 }] : []),
+    ...(content.competitive_strategy ? [{ section: 'intro', claim: content.competitive_strategy, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 }] : []),
+    { section: 'intro', claim: content.project_background, source_refs: [profileRef], excerpt: excerptFor(profileRef), speaker_role: 'unknown', status_category: 'unknown', confidence: 0.9 },
+    ...content.business_status.map((claim: string) => ({ section: 'status', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    ...content.demands.map((claim: string) => ({ section: 'demands', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    ...content.solution_sections.map((section: any) => ({ section: 'solution', claim: section.text, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'unknown', status_category: 'done', confidence: 0.8 })),
+    ...content.value_items.map((claim: string) => ({ section: 'value', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    ...content.lessons.map((claim: string) => ({ section: 'value', claim, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'customer', status_category: 'unknown', confidence: 0.8 })),
+    { section: 'summary', claim: content.summary, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'unknown', status_category: 'done', confidence: 0.8 },
   ];
   return { ...content, claim_evidence: claims };
 }
 
-/** 规划阶段产物：从上下文解析真实 source_ref，为 CASE_CONTENT 五章节生成带证据的 plan 骨架。 */
+/** 规划阶段产物：从上下文解析真实 source_ref，为 CASE_CONTENT 六章节生成带证据的 plan 骨架。 */
 function casePlanContent(content: any, prompt: string): any {
   const context = casePromptContext(prompt);
   const refs = context.allowed_source_refs as string[];
@@ -3899,24 +3904,36 @@ function casePlanContent(content: any, prompt: string): any {
   return {
     title: content.title,
     plan: [
-      { section: 'background', items: [item(content.background, profileRef, { speaker_role: 'unknown' })] },
-      { section: 'challenges', items: content.challenges.map((claim: string) => item(claim, factRef)) },
-      { section: 'requirements', items: content.requirements.map((claim: string) => item(claim, factRef)) },
-      { section: 'solution', items: [item(content.solution, factRef, { status_category: 'done' })] },
-      { section: 'value', items: content.value.map((claim: string) => item(claim, factRef)) },
+      { section: 'intro', items: [
+        item(content.company_info, profileRef, { slot: 'company_info', speaker_role: 'unknown' }),
+        item(content.business_scope, profileRef, { slot: 'business_scope', speaker_role: 'unknown' }),
+        item(content.competitive_strategy, profileRef, { slot: 'competitive_strategy', speaker_role: 'unknown' }),
+        item(content.project_background, profileRef, { slot: 'project_background', speaker_role: 'unknown' }),
+      ] },
+      { section: 'status', items: content.business_status.map((claim: string) => item(claim, factRef)) },
+      { section: 'demands', items: content.demands.map((claim: string) => item(claim, factRef)) },
+      { section: 'solution', items: content.solution_sections.map((section: any) => item(section.title || section.text, factRef, { status_category: 'done' })) },
+      { section: 'value', items: [
+        ...content.value_items.map((claim: string) => item(claim, factRef, { slot: 'value' })),
+        ...content.lessons.map((claim: string) => item(claim, factRef, { slot: 'lesson' })),
+      ] },
+      { section: 'summary', items: [item(content.summary, factRef, { status_category: 'done' })] },
     ],
     unknowns: content.unknowns,
   };
 }
 
-/** 章节阶段产物：按 prompt 声明的章节 label 返回 {text} 或 {texts}，正文取自 CASE_CONTENT。 */
+/** 章节阶段产物：按 prompt 声明的章节 label 返回对应形态 JSON，正文取自 CASE_CONTENT。 */
 function caseChapterContent(content: any, prompt: string): any {
-  const labels: Record<string, string> = { background: '客户背景', challenges: '痛点、现状与挑战', requirements: '需求与要求', solution: '解决方案', value: '价值与成效' };
+  const labels: Record<string, string> = { intro: '客户及背景介绍', status: '业务现状', demands: '业务诉求', solution: '业务解决方案', value: '方案价值概述', summary: '项目总结' };
   const section = Object.keys(labels).find((key) => prompt.includes(`「${labels[key]}」章节`));
-  if (!section) return { text: content.background };
-  if (section === 'background') return { text: content.background };
-  if (section === 'solution') return { text: content.solution };
-  return { texts: content[section] };
+  if (!section) return { text: content.company_info };
+  if (section === 'intro') return { company_info: content.company_info, business_scope: content.business_scope, competitive_strategy: content.competitive_strategy, project_background: content.project_background };
+  if (section === 'status') return { texts: content.business_status };
+  if (section === 'demands') return { texts: content.demands };
+  if (section === 'solution') return { sections: content.solution_sections };
+  if (section === 'value') return { texts: content.value_items, lessons: content.lessons };
+  return { text: content.summary };
 }
 
 /**
@@ -3955,11 +3972,19 @@ function fakeCaseModel(content: unknown, streaming = false): any {
 
 const CASE_CONTENT = {
   title: '制造客户数字化实践案例',
-  background: '客户戊属于装备制造行业，2025 年 3 月启动研发管理数字化建设，目标是一体化管理研发项目与交付流程。',
-  challenges: ['跨部门项目进度缺乏统一视图，依赖人工汇总', '工单处理状态不透明，客户反复催问'],
-  requirements: ['统一项目与工单管理平台，覆盖研发与售后两条线', '关键节点自动提醒与汇报'],
-  solution: '项目组从流程调研切入，先梳理研发与售后协同断点，再分阶段部署项目管理与工单模块，通过双周对齐机制持续校准方案。',
-  value: ['项目进度汇总从人工周报升级为实时看板', '工单平均响应时间显著缩短'],
+  company_info: '客户戊是装备制造行业的骨干企业，成立超过二十年，产品覆盖多个细分领域，长期服务于国内头部制造集团。',
+  business_scope: '公司业务覆盖装备研发、生产制造与售后运维三大板块，在全国设有多条产线与服务中心。',
+  competitive_strategy: '公司以智能制造与数字化转型为战略主线，持续推进研发流程标准化与数据治理。',
+  project_background: '客户戊于 2025 年 3 月启动研发管理数字化建设，目标是统一管理研发项目与交付流程，替代分散的表格与文档协作方式。',
+  business_status: ['跨部门项目进度缺乏统一视图，各团队依赖人工周报汇总，信息滞后且口径不一，管理层难以及时掌握整体进展。', '工单处理状态不透明，客户反复催问处理进度，跨部门流转依赖邮件与口头跟进，缺少可追溯的记录。'],
+  demands: ['统一项目与工单管理平台，覆盖研发与售后两条线', '关键节点自动提醒与汇报'],
+  solution_sections: [
+    { title: '流程调研与分阶段落地', text: '项目组从流程调研切入，先梳理研发与售后协同断点，再分阶段部署项目管理与工单模块，通过双周对齐机制持续校准方案。' },
+    { title: '关键节点自动提醒', text: '围绕客户关注的关键交付节点配置自动提醒与汇总汇报，减少人工盯催。' },
+  ],
+  value_items: ['项目进度汇总从人工周报升级为实时看板', '工单平均响应时间显著缩短'],
+  lessons: ['迁移过渡期保留双周人工核对，保障了统计口径的平稳切换。'],
+  summary: '通过与 ONES 合作，客户戊完成了研发管理数字化的第一步：统一平台承接项目与工单协同，进度透明可追溯，为后续深度应用奠定了基础。',
   unknowns: ['量化基线数据待客户确认'],
 };
 
@@ -3997,18 +4022,18 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.ok(result.jobId, '首次生成必须返回任务');
     assert.equal(result.fingerprint.length, 64);
     await waitForJob(db, result.jobId!);
-    // v5 流水线调用序：规划 1 次 + 五章节各 1 次（素材未超预算不触发摘要、覆盖度达标不触发补写）。
-    assert.equal(prompts.length, 6, '规划 + 5 章节共 6 次模型调用');
+    // v8 流水线调用序：规划 1 次 + 六章节各 1 次（素材未超预算不触发摘要、覆盖度达标不触发补写）。
+    assert.equal(prompts.length, 7, '规划 + 6 章节共 7 次模型调用');
     assert.match(prompts[0], /规划客户成功案例草稿的章节结构/, '首调用必须是规划阶段');
     assert.match(prompts[1], /只写这一个章节/);
-    // v7 前序章节注入：首章（背景）无锚点块；第 2 章起注入已定稿前章正文与一致性要求。
-    assert.ok(!prompts[1].includes('此前章节已定稿正文'), '首章（背景）不得注入前序章节块');
+    // v7 前序章节注入（v8 沿用）：首章（客户及背景介绍）无锚点块；第 2 章起注入已定稿前章正文与一致性要求。
+    assert.ok(!prompts[1].includes('此前章节已定稿正文'), '首章（客户及背景介绍）不得注入前序章节块');
     assert.match(prompts[2], /此前章节已定稿正文/, '第 2 章须注入前序章节锚点');
-    assert.match(prompts[2], /【客户背景】/, '锚点带章节标签');
-    assert.ok(prompts[2].includes(CASE_CONTENT.background), '锚点含背景章定稿正文');
+    assert.match(prompts[2], /【客户及背景介绍】/, '锚点带章节标签');
+    assert.ok(prompts[2].includes(CASE_CONTENT.company_info), '锚点含客户及背景介绍章定稿正文');
     assert.match(prompts[2], /专有名词、产品模块名、客户称谓必须与前章用词保持一致/);
-    assert.ok(prompts[5].includes(CASE_CONTENT.solution) && prompts[5].includes(CASE_CONTENT.background), '末章锚点含全部前序四章');
-    // v7 信号表兜底召回：规划 prompt 须声明信号表只是线索而非全集。
+    assert.ok(prompts[6].includes(CASE_CONTENT.summary) && prompts[6].includes(CASE_CONTENT.company_info), '末章锚点含全部前序五章');
+    // v7 信号表兜底召回（v8 沿用）：规划 prompt 须声明信号表只是线索而非全集。
     assert.match(prompts[0], /信号表兜底/, '规划 prompt 含兜底召回规则');
     assert.match(prompts[0], /不受信号表限制/);
     const capturedPrompt = prompts.join('\n');
@@ -4020,19 +4045,30 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal(draft.generator, 'fake/fake-model');
     assert.equal((draft.fields as any).customer_id, 'crm-c1');
     assert.equal((draft.fields as any).customer_name, '案例客户一');
-    assert.equal((draft.fields as any).background, CASE_CONTENT.background);
-    assert.deepEqual((draft.fields as any).challenges, CASE_CONTENT.challenges);
-    assert.equal((draft.fields as any).claim_evidence.length, 8, '每章正文条目对应一条 claim_evidence');
+    assert.equal((draft.fields as any).company_info, CASE_CONTENT.company_info);
+    assert.deepEqual((draft.fields as any).demands, CASE_CONTENT.demands);
+    assert.deepEqual((draft.fields as any).solution_sections, CASE_CONTENT.solution_sections);
+    assert.deepEqual((draft.fields as any).lessons, CASE_CONTENT.lessons);
+    // v8 派生数据：系统使用情况表只含有值行；unknowns 追加建议补充行。
+    const usageRows = (draft.fields as any).system_usage as any[];
+    assert.ok(Array.isArray(usageRows) && usageRows.some((row) => row.item === '客户名称' && row.content === '案例客户一'), '系统使用情况表含客户名称行');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('购买账号数')), '缺失行提示进 unknowns');
+    // seedCaseCustomer 有已交付建议工单（2026-03 交付）→ 派生里程碑至少含合作启动与工单首单。
+    const milestones = (draft.fields as any).milestones as any[];
+    assert.ok(Array.isArray(milestones) && milestones.length >= 2, '派生服务里程碑');
+    assert.ok(milestones.some((item) => item.label.includes('合作启动')));
+    const expectedClaims = [CASE_CONTENT.company_info, CASE_CONTENT.business_scope, CASE_CONTENT.competitive_strategy, CASE_CONTENT.project_background,
+      ...CASE_CONTENT.business_status, ...CASE_CONTENT.demands, ...CASE_CONTENT.solution_sections.map((section: any) => section.text),
+      ...CASE_CONTENT.value_items, ...CASE_CONTENT.lessons, CASE_CONTENT.summary];
+    assert.equal((draft.fields as any).claim_evidence.length, expectedClaims.length, '每章正文条目对应一条 claim_evidence');
     assert.ok((draft.fields as any).context_snapshot.digest);
-    assert.deepEqual((draft.fields as any).unknowns, CASE_CONTENT.unknowns);
     // 组装契约：claim 与正文逐字一致（服务端对位组装，非模型复写）。
-    assert.ok((draft.fields as any).claim_evidence.every((claim: any) =>
-      [CASE_CONTENT.background, CASE_CONTENT.solution, ...CASE_CONTENT.challenges, ...CASE_CONTENT.requirements, ...CASE_CONTENT.value].includes(claim.claim)));
+    assert.ok((draft.fields as any).claim_evidence.every((claim: any) => expectedClaims.includes(claim.claim)));
     // 素材未超预算：不落 input_summary 降级轨迹。
     assert.equal((draft.fields as any).input_summary, undefined, '预算内不记录降级轨迹');
     // 证据引用含片段（ONES 工单明细已剔除，不再进证据引用）。
     assert.ok(draft.evidenceRefs.length >= 1);
-    // v6 全量上下文注入：片段转写与客户档案在 prompt 里；ONES 工单明细不得注入。
+    // v6 全量上下文注入（v8 沿用）：片段转写与客户档案在 prompt 里；ONES 工单明细不得注入。
     assert.match(capturedPrompt, /统一管理研发项目/);
     assert.match(capturedPrompt, /案例客户一/);
     assert.doesNotMatch(capturedPrompt, /导出超时/, 'ONES 工单明细不得注入案例上下文');
@@ -4044,7 +4080,10 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.match(capturedPrompt, /禁止流水账/);
     assert.match(capturedPrompt, /不得虚构数字\/引语\/ROI|禁止虚构/);
     assert.match(capturedPrompt, /收进 unknowns/);
-    assert.match(capturedPrompt, /五段叙事|五个章节/);
+    assert.match(capturedPrompt, /六个章节|四章深结构/);
+    // v8 客户简介纪律与复盘纪律。
+    assert.match(capturedPrompt, /禁止虚构排名/);
+    assert.match(capturedPrompt, /不得负面定性客户/);
     // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律。
     assert.match(capturedPrompt, /pain_point_signals/);
     assert.match(capturedPrompt, /value_signals/);
@@ -4068,7 +4107,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v7-figures');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v8-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4083,7 +4122,7 @@ test('workbench: case detail marks context stale and summarize sources', async (
     const draft = db.listCaseDrafts('crm-c1')[0];
     const detail = service.detail(draft.id)!;
     assert.equal(detail.contextStale, false, '数据未变不提示过期');
-    assert.ok(detail.markdown.includes('## 一、客户背景'));
+    assert.ok(detail.markdown.includes('## 一、客户及背景介绍'));
     assert.ok(detail.contextSummary.some((entry) => entry.system === 'ones'));
     // 数据变化后提示过期（非阻断）。
     db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
@@ -4119,49 +4158,98 @@ test('workbench: case generation failure marks job failed without draft', async 
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: case renderContract five sections, ordered numbering, legacy fallback and warnings', () => {
-  // 新契约草稿：五章节中文数字标题 + 条目阿拉伯编号；内部键不渲染。
+test('workbench: case renderContract v8 four chapters, ordered numbering, legacy fallback and warnings', () => {
+  // v8 契约草稿：四章深结构标题 + 子节层级 + 表格 + 里程碑 + 条目阿拉伯编号；内部键不渲染。
   const draft = { id: 'd1', customerId: 'crm-x', version: 1, status: 'draft' as const, title: '案例标题',
-    fields: { ...CASE_CONTENT }, evidenceRefs: ['evt-1'], createdAt: '', updatedAt: '' };
+    fields: { customer_id: 'crm-x', ...CASE_CONTENT,
+      system_usage: [{ item: '客户名称', content: '案例客户一' }, { item: '购买版本', content: '私有部署' }],
+      milestones: [{ date: '2026-03', label: '合作启动（据最早服务记录）' }] },
+    evidenceRefs: ['evt-1'], createdAt: '', updatedAt: '' };
   const markdown = renderCaseMarkdown(draft as any);
   assert.match(markdown, /# 案例标题/);
-  assert.match(markdown, /## 一、客户背景/);
-  assert.match(markdown, /## 二、痛点、现状与挑战/);
-  assert.match(markdown, /## 三、需求与要求/);
-  assert.match(markdown, /## 四、解决方案/);
-  assert.match(markdown, /## 五、价值与成效/);
-  assert.match(markdown, /^1\. 跨部门项目进度缺乏统一视图/m);
-  assert.doesNotMatch(markdown, /^- /m);
+  assert.match(markdown, /## 一、客户及背景介绍/);
+  assert.match(markdown, /### （一）客户简介/);
+  assert.match(markdown, /#### 公司信息/);
+  assert.match(markdown, /### （二）项目背景/);
+  assert.match(markdown, /### （三）系统使用情况/);
+  assert.match(markdown, /\| 项目 \| 内容 \|/);
+  assert.match(markdown, /\| 客户名称 \| 案例客户一 \|/);
+  assert.match(markdown, /## 二、场景及解决方案/);
+  assert.match(markdown, /### （一）业务现状/);
+  assert.match(markdown, /### （二）业务诉求/);
+  assert.match(markdown, /### （三）业务解决方案/);
+  assert.match(markdown, /#### 1、流程调研与分阶段落地/);
+  assert.match(markdown, /## 三、方案价值概述/);
+  assert.match(markdown, /### 服务里程碑/);
+  assert.match(markdown, /- 2026-03 合作启动/);
+  assert.match(markdown, /### 价值成效/);
+  assert.match(markdown, /### 经验复盘与沉淀/);
+  assert.match(markdown, /## 四、项目总结/);
+  assert.match(markdown, /^1\. 统一项目与工单管理平台/m);
+  assert.doesNotMatch(markdown, /^- 统一/m);
   assert.ok(!markdown.includes('evidence_map'), '内部键不得渲染');
   assert.ok(!markdown.includes('量化基线'), 'unknowns 不得渲染');
   assert.ok(!markdown.includes('evt-1'), '证据引用不得渲染');
-  // 存量草稿兼容：旧键 pain_points/results 回退映射（results 为 {metric,value} 数组）。
+  // 可选小节缺省：business_scope/competitive_strategy/lessons 为空时小节整节省略。
+  const slim = renderCaseMarkdown({ ...draft, fields: { ...draft.fields, business_scope: '', competitive_strategy: '', lessons: [] } } as any);
+  assert.ok(!slim.includes('#### 核心业务范围'), '空小节不渲染标题');
+  assert.ok(!slim.includes('### 经验复盘与沉淀'), '空复盘整节约略');
+  assert.ok(slim.includes('#### 公司信息'));
+  // 存量旧稿（v7 五段）兼容：旧键 pain_points/results 回退映射并按五段渲染。
   const legacy = { ...draft, fields: { customer_id: 'crm-x', customer_name: '旧客户', background: '旧背景',
     pain_points: ['旧痛点'], solution: '旧方案', results: [{ metric: '上线时间', value: '2026-03' }] } };
   const legacyTexts = caseSectionTexts(legacy.fields);
   assert.deepEqual(legacyTexts.challenges, ['旧痛点']);
   assert.deepEqual(legacyTexts.value, ['上线时间: 2026-03']);
   const legacyMarkdown = renderCaseMarkdown(legacy as any);
+  assert.match(legacyMarkdown, /## 一、客户背景/);
+  assert.match(legacyMarkdown, /## 五、价值与成效/);
   assert.match(legacyMarkdown, /旧痛点/);
   assert.match(legacyMarkdown, /上线时间: 2026-03/);
   // 空章节不再注入内部占位词；质量审查负责提示 CSM。
-  const empty = renderCaseMarkdown({ ...draft, fields: { background: '', solution: '' } } as any);
+  const empty = renderCaseMarkdown({ ...draft, fields: { ...CASE_CONTENT, company_info: '', summary: '' } } as any);
   assert.doesNotMatch(empty, /待补充/);
-  // 内部信息残留告警：干净内容不告警，残留命中。
+  // 内部信息残留告警（v8）：干净内容不告警，残留命中。
   assert.deepEqual(caseContentWarnings(draft as any), []);
-  const dirty = { ...draft, fields: { ...CASE_CONTENT, value: ['工时 12 小时已节省', '客户不满情绪缓解'] } };
+  const dirty = { ...draft, fields: { ...draft.fields, value_items: ['工时 12 小时已节省', '客户不满情绪缓解'] } };
   const warnings = caseContentWarnings(dirty as any);
   assert.ok(warnings.some((warning) => /内部工时统计/.test(warning)), '必须检出工时统计残留');
   assert.ok(warnings.some((warning) => /客户情绪内部记录/.test(warning)), '必须检出客户情绪记录残留');
-  // parseCaseContent 校验：缺 background/solution 报错，数组与内部键容错缺省。
-  assert.throws(() => parseCaseContent({ solution: 'x' }), /客户背景/);
-  assert.throws(() => parseCaseContent({ background: 'x' }), /解决方案/);
-  const minimal = parseCaseContent({ background: 'b', solution: 's' });
-  assert.deepEqual([minimal.challenges, minimal.requirements, minimal.value], [[], [], []]);
+  // parseCaseContent 校验（requirePublic）：缺 company_info/summary 报错，数组与内部键容错缺省。
+  assert.throws(() => parseCaseContent({ project_background: 'x', summary: 's' }, { requirePublic: true }), /公司信息/);
+  assert.throws(() => parseCaseContent({ company_info: 'x' }, { requirePublic: true }), /项目总结/);
+  const minimal = parseCaseContent({ company_info: 'c', project_background: 'b', business_status: ['s'], demands: ['d'], solution_sections: [{ title: 't', text: 'x' }], value_items: ['v'], summary: 'm' });
+  assert.deepEqual([minimal.business_scope, minimal.competitive_strategy, minimal.lessons], ['', '', []]);
   assert.equal(minimal.evidence_map, undefined);
   assert.deepEqual(minimal.claim_evidence, []);
-  // 章节契约锁定。
-  assert.deepEqual(CASE_SECTIONS.map((section) => section.key), ['background', 'challenges', 'requirements', 'solution', 'value']);
+  // 章节契约锁定（v8 六章）。
+  assert.deepEqual(CASE_SECTIONS.map((section) => section.key), ['intro', 'status', 'demands', 'solution', 'value', 'summary']);
+});
+
+test('workbench: case v8 derived system_usage and milestones plus docx export', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-v8-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT));
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    // docx 导出：zip 结构合法，含标题/表格行/章标题；SVG 配图无（本例无 figures），正文完整。
+    const exported = await service.exportDocx(draft.id)!;
+    assert.ok(exported, '导出必须成功');
+    assert.ok(exported.filename.endsWith('.docx'));
+    assert.ok(exported.buffer.length > 4000, 'docx 非空');
+    const Zip = (await import('jszip')).default;
+    const zip = await Zip.loadAsync(exported.buffer);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    assert.ok(documentXml.includes(CASE_CONTENT.title), 'docx 含标题');
+    assert.ok(documentXml.includes('一、客户及背景介绍'), 'docx 含章标题');
+    assert.ok(documentXml.includes('系统使用情况'), 'docx 含系统使用情况表');
+    assert.ok(!/<w:script/.test(documentXml), 'docx 无脚本');
+    // 不存在的草稿导出返回 undefined。
+    assert.equal(await service.exportDocx('nonexistent'), undefined);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: case v5 pipeline degrades input budget and summarizes before failing', async () => {
@@ -4242,7 +4330,7 @@ test('workbench: case publish hash gate works with narrative markdown', async ()
     const draft = db.listCaseDrafts('crm-c1')[0];
     const preview = service.publishPreview(draft.id, 'parent-1');
     assert.equal(preview.tool, 'mcp__ones__create_page');
-    assert.match(preview.args.content as string, /## 一、客户背景/);
+    assert.match(preview.args.content as string, /## 一、客户及背景介绍/);
     // 篡改版本后旧批准哈希失效。
     await assert.rejects(() => service.publish(draft.id, draft.version + 1, 'parent-1', preview.approvalHash), /版本或批准内容已变化/);
     // 新增其他客户后，正文命中跨客户名称警告；即使正文和版本不变，旧预览也必须失效。
@@ -4632,11 +4720,11 @@ test('workbench: case generation injects delivery stats as citable source and co
     assert.ok(coverage, 'coverage 必须落库');
     assert.equal(coverage.enriched, false);
     assert.equal(coverage.delivered, undefined, 'v6 覆盖度不再含交付记录池');
-    // 篇幅契约进入 prompt。
-    assert.match(capturedPrompt, /150~400 字/);
-    assert.match(capturedPrompt, /250~800 字/);
-    assert.match(capturedPrompt, /30~120 字/);
-    assert.match(capturedPrompt, /篇幅契约是质量要求而非硬性字符数/);
+  // 篇幅契约进入 prompt（v8 口径：项目背景 200~500 字、方案小节 250~600 字、诉求条目 60~180 字）。
+  assert.match(capturedPrompt, /200~500 字/);
+  assert.match(capturedPrompt, /250~600 字/);
+  assert.match(capturedPrompt, /60~180 字/);
+  assert.match(capturedPrompt, /篇幅契约是质量要求而非硬性字符数/);
     // 摘录抄写规则（防「摘录未在引用证据中找到」复发）。
     assert.match(capturedPrompt, /连续逐字截取/);
     // ONES 明细剔除后，快照来源不含工单条目。
@@ -4682,9 +4770,9 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
         calls += 1;
         const prompt = input.messages[0].content;
         prompts.push(prompt);
-        // 补写阶段产出引用更多证据的第二稿（value 增条目，claim_evidence 引用随之增加）。
-        const enrichedContent = { ...CASE_CONTENT, value: [...CASE_CONTENT.value, '客户反馈系统好用且效率显著提升'] };
-        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(calls >= 7 ? enrichedContent : CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+        // 补写阶段产出引用更多证据的第二稿（value_items 增条目，claim_evidence 引用随之增加）。
+        const enrichedContent = { ...CASE_CONTENT, value_items: [...CASE_CONTENT.value_items, '客户反馈系统好用且效率显著提升'] };
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(calls >= 8 ? enrichedContent : CASE_CONTENT, prompt)) }], stopReason: 'stop' };
       } },
     } as any;
     const service = new CaseService(db, caseMcp(), runtime);
@@ -4692,13 +4780,13 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
     await waitForJob(db, result.jobId!);
     const draft = db.listCaseDrafts('crm-cov')[0];
     assert.ok(draft, '触发补写的生成仍须产出草稿');
-    assert.equal(calls, 7, '规划+5 章节后覆盖不足须追加一次补写调用');
-    const enrichPrompt = prompts[6];
+    assert.equal(calls, 8, '规划+6 章节后覆盖不足须追加一次补写调用');
+    const enrichPrompt = prompts[7];
     assert.match(enrichPrompt, /未引用素材清单/, '补写 prompt 须含未引用素材清单');
     assert.match(enrichPrompt, /正面反馈话题/, '补写 prompt 须列出未引用的客户正面反馈');
     const coverage = (draft.fields as any).coverage;
     assert.equal(coverage.enriched, true, 'coverage.enriched 须记录补写发生');
-    assert.ok((draft.fields as any).value.includes('客户反馈系统好用且效率显著提升'), '采纳第二稿正文');
+    assert.ok((draft.fields as any).value_items.includes('客户反馈系统好用且效率显著提升'), '采纳第二稿正文');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4718,8 +4806,8 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         calls += 1;
-        // 第 7 次调用起（规划+5 章节后）模拟补写模型连续失败：任务仍须成功并保留第一稿。
-        if (calls >= 7) return { stopReason: 'error', errorMessage: 'relay down', content: [] };
+        // 第 8 次调用起（规划+6 章节后）模拟补写模型连续失败：任务仍须成功并保留第一稿。
+        if (calls >= 8) return { stopReason: 'error', errorMessage: 'relay down', content: [] };
         return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, input.messages[0].content)) }], stopReason: 'stop' };
       } },
     } as any;
@@ -4732,8 +4820,8 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
     const draft = db.listCaseDrafts('crm-cf')[0];
     assert.ok(draft, '补写失败仍保留第一稿');
     assert.equal((draft.fields as any).coverage.enriched, false);
-    assert.equal((draft.fields as any).background, CASE_CONTENT.background, '保留第一稿正文');
-    assert.equal(calls, 8, '补写尝试 2 次（第 7 次失败后退避、第 8 次仍失败即止）');
+    assert.equal((draft.fields as any).company_info, CASE_CONTENT.company_info, '保留第一稿正文');
+    assert.equal(calls, 9, '补写尝试 2 次（第 8 次失败后退避、第 9 次仍失败即止）');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4788,6 +4876,14 @@ test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowl
   assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">来自 Hemory 的记录</text></svg>'), null);
   assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">来自 &#72;emory 的记录</text></svg>'), null, '实体编码不得绕过禁区词');
   assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">合同金额 100 万</text></svg>'), null, '金额禁区词拒绝');
+  // 叠字防御（真实验收教训：<text> 内裸换行多行文字栅格化后叠在同一基线不可读）。
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">系统直接提报\n原始需求</text></svg>'), null, 'text 内裸换行拒绝');
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1">第二行</tspan></text></svg>'), null, '第二个起 tspan 缺 dy/y 拒绝');
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">裸文字<tspan x="1" dy="18">第二行</tspan></text></svg>'), null, '裸文字与 tspan 混用拒绝');
+  assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1" dy="18">第二行</tspan></text></svg>'), '规范 tspan 拆行放行');
+  // dy 属性必须在消毒后存活（真实验收教训：dy 被当未知属性剥离 → 落库 SVG 多行叠在同一基线）。
+  assert.match(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1" dy="18">第二行</tspan></text></svg>')!, /dy="18"/, 'dy 不得被属性白名单剥离');
+  assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">单行文字</text></svg>'), '单行 text 放行');
 });
 
 /** 规划产物附带 figures 骨架（含一条非法 kind 与一条合法条目——非法条目须被丢弃）。 */
@@ -4797,9 +4893,9 @@ function casePlanContentWithFigures(content: any, prompt: string): any {
   const refs = context.allowed_source_refs as string[];
   const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
   return { ...plan, figures: [
-    { section: 'challenges', kind: 'flow_current', idea: '客户现状：三套系统并行、人工汇总对齐', source_refs: [factRef] },
-    { section: 'value', kind: 'flow_current', idea: '非法章节（value 不允许配图）', source_refs: [factRef] },
-    { section: 'challenges', kind: 'photo', idea: '非法 kind', source_refs: [factRef] },
+    { section: 'status', kind: 'flow_current', idea: '客户现状：三套系统并行、人工汇总对齐', source_refs: [factRef] },
+    { section: 'value', kind: 'flow_current', idea: '非法组合（value 章只允许 milestone）', source_refs: [factRef] },
+    { section: 'status', kind: 'photo', idea: '非法 kind', source_refs: [factRef] },
   ] };
 }
 
@@ -4827,25 +4923,25 @@ test('workbench: case figures generated, sanitized, persisted and rendered as ma
     const service = new CaseService(db, caseMcp(), runtime);
     const result = service.generate('crm-c1');
     await waitForJob(db, result.jobId!);
-    // 规划 + 5 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
-    assert.equal(prompts.length, 7, '规划+5章+1图共 7 次模型调用');
-    assert.match(prompts[6], /章节配图/, '第 7 次调用是逐图生成');
-    assert.match(prompts[6], /绘图规范/, '图 prompt 含画法规范');
-    assert.match(prompts[6], /不得虚构环节、模块或数字/, '图内容事实边界');
+    // 规划 + 6 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
+    assert.equal(prompts.length, 8, '规划+6章+1图共 8 次模型调用');
+    assert.match(prompts[7], /章节配图/, '第 8 次调用是逐图生成');
+    assert.match(prompts[7], /绘图规范/, '图 prompt 含画法规范');
+    assert.match(prompts[7], /不得虚构环节、模块或数字/, '图内容事实边界');
     const draft = db.listCaseDrafts('crm-c1')[0];
     assert.ok(draft, '带图生成必须产出草稿');
     const figures = (draft.fields as any).figures;
     assert.equal(figures.length, 1, '非法 figures 条目被丢弃、只保留 1 张');
     assert.equal(figures[0].kind, 'flow_current');
-    assert.equal(figures[0].section, 'challenges');
+    assert.equal(figures[0].section, 'status');
     assert.equal(figures[0].caption, '客户现状：三套系统并行、人工汇总对齐');
     assert.ok(figures[0].svg.startsWith('<svg') && figures[0].svg.includes('viewBox'), '落库的是消毒后 SVG');
     assert.ok(!/onload|href=/.test(figures[0].svg), '落库 SVG 已剥离危险属性');
     assert.ok(figures[0].id.startsWith('figure:'), '图 id 为确定性指纹');
-    // Markdown 以图注占位（与复制/Wiki 发布同源），位置在痛点章末尾。
+    // Markdown 以图注占位（与复制/Wiki 发布同源），位置在业务现状小节末尾。
     const markdown = renderCaseMarkdown(draft);
     assert.match(markdown, /> 图：客户现状：三套系统并行、人工汇总对齐（图示详见工作台）/, '图注占位');
-    assert.ok(markdown.indexOf('痛点、现状与挑战') < markdown.indexOf('> 图：'), '占位位于对应章节内');
+    assert.ok(markdown.indexOf('（一）业务现状') < markdown.indexOf('> 图：'), '占位位于对应小节内');
     // 图级证据：来源被正文引用 → 不触发图文不一致警告。
     const detail = service.detail(draft.id)!;
     assert.ok(!detail.qualityReview.warnings.some((warning) => /配图/.test(warning)), `图相关警告不应出现: ${detail.qualityReview.warnings.join('；')}`);
@@ -4875,11 +4971,54 @@ test('workbench: figure generation failure discards figure without failing the j
     const job = db.getDraftJob(result.jobId!)!;
     assert.equal(job.status, 'succeeded', '图生成失败不判任务失败');
     const draft = db.listCaseDrafts('crm-c1')[0];
-    assert.ok(draft, '五段正文照常成稿');
+    assert.ok(draft, '各章正文照常成稿');
     assert.equal((draft.fields as any).figures, undefined, '失败的图不落库');
-    assert.equal((draft.fields as any).background, CASE_CONTENT.background, '正文不受影响');
+    assert.equal((draft.fields as any).company_info, CASE_CONTENT.company_info, '正文不受影响');
     assert.ok(!renderCaseMarkdown(draft).includes('> 图：'), 'Markdown 无图注占位');
     caseModelRetryDelays.baseMs = previousBaseMs;
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: milestone figure kind planned for value chapter and validated', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-milefig-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const prompts: string[] = [];
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        if (prompt.includes('章节配图')) {
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '合作启动'), caption: '服务里程碑：合作启动到工单闭环' }) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          // milestone 挂 value 章合法（source_refs 用 stats:delivery——快照内的确定性事实来源）。
+          const statsRef = casePromptContext(prompt).allowed_source_refs.find((ref: string) => ref === 'stats:delivery');
+          if (statsRef) base.figures = [{ section: 'value', kind: 'milestone', idea: '合作里程碑时间轴', source_refs: [statsRef] }];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const figures = (draft.fields as any).figures ?? [];
+    if (figures.length) {
+      // 快照含 stats 来源时 milestone 图合法落库（value 章），图注占位渲染在服务里程碑小节。
+      assert.equal(figures[0].kind, 'milestone');
+      assert.equal(figures[0].section, 'value');
+      const markdown = renderCaseMarkdown(draft);
+      assert.ok(markdown.indexOf('### 服务里程碑') < markdown.indexOf('> 图：'), 'milestone 图注位于服务里程碑小节');
+    } else {
+      // 无 stats 来源（seed 数据无 ONES 统计文本）时规划缺 stats:delivery → 图被丢弃不阻断。
+      assert.ok(db.getDraftJob(result.jobId!)?.status === 'succeeded');
+    }
+    void prompts;
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4919,19 +5058,27 @@ test('workbench: case ones records excluded from prompt but still feed fingerpri
 });
 
 test('workbench: narrative warnings guard refine/update writeback without blocking', () => {
-  // 干净内容零告警。
-  assert.deepEqual(caseNarrativeWarnings({ background: '背景', solution: '方案', challenges: ['痛点一'], requirements: ['需求一'], value: ['价值一'] }), []);
+  // 干净内容零告警（v8 各章字段）。
+  const clean = { company_info: '公司信息', project_background: '项目背景', business_status: ['现状一'], demands: ['诉求一'],
+    solution_sections: [{ title: '举措一', text: '方案一' }], value_items: ['价值一'], lessons: [], summary: '总结' };
+  assert.deepEqual(caseNarrativeWarnings(clean), []);
   // 条目数失控 + 单条超长 + 占位词 + 内部残留。
-  const runaway = { background: '背景', solution: '方案',
-    challenges: Array.from({ length: 13 }, (_, i) => `痛点${i}`),
-    requirements: ['需求一'], value: ['价值一'.repeat(200)] };
+  const runaway = { ...clean,
+    demands: Array.from({ length: 13 }, (_, i) => `诉求${i}`),
+    value_items: ['价值一'.repeat(201)] };
   const warnings = caseNarrativeWarnings(runaway);
-  assert.ok(warnings.some((warning) => /痛点、现状与挑战.*超过 12 条/.test(warning)), '条目超限须告警');
-  assert.ok(warnings.some((warning) => /价值与成效.*超过 500 字/.test(warning)), '单条超长须告警');
-  const dirty = { background: '背景待确认', solution: '方案', challenges: [], requirements: [], value: ['客户不满意减少了'] };
+  assert.ok(warnings.some((warning) => /业务诉求.*超过 12 条/.test(warning)), '条目超限须告警');
+  assert.ok(warnings.some((warning) => /价值成效.*超过 600 字/.test(warning)), '单条超长须告警');
+  const overlongSection = caseNarrativeWarnings({ ...clean, solution_sections: [{ title: '举措', text: '方'.repeat(1300) }] });
+  assert.ok(overlongSection.some((warning) => /业务解决方案.*超过 1200 字/.test(warning)), '方案小节超长须告警');
+  const dirty = { ...clean, business_status: [], company_info: '公司信息待确认', lessons: [] ,
+    value_items: ['客户不满意减少了'] };
   const dirtyWarnings = caseNarrativeWarnings(dirty);
   assert.ok(dirtyWarnings.some((warning) => /待确认\/待补充占位词/.test(warning)), '占位词须告警');
   assert.ok(dirtyWarnings.some((warning) => /客户情绪内部记录/.test(warning)), '内部残留须告警');
+  // 存量旧稿（五段键）护栏口径不变。
+  const legacyWarnings = caseNarrativeWarnings({ background: '背景', solution: '方案', challenges: Array.from({ length: 13 }, (_, i) => `痛点${i}`) });
+  assert.ok(legacyWarnings.some((warning) => /痛点、现状与挑战.*超过 12 条/.test(warning)), '旧稿条目超限仍须告警');
 });
 
 test('workbench: quality review flags stats citations for disclosure confirmation', () => {
@@ -4940,14 +5087,18 @@ test('workbench: quality review flags stats citations for disclosure confirmatio
     { id: 'stats:delivery', source_system: 'internal', source_type: 'stats:delivery', external_id: 'stats:delivery', occurred_at: '2026-03-01', synced_at: '2026-03-01', title: '交付事实统计', excerpt: '工单共 8 项，已完成 8 项', url: '', payload_hash: 's' },
     { id: 'done-1', source_system: 'ones', source_type: 'support_ticket', external_id: 'd1', occurred_at: '2026-02-01', synced_at: '2026-02-01', title: '已完成上线', excerpt: '已完成上线', url: '', payload_hash: 'd', status_category: 'done' },
   ] as any[];
-  const fields = { background: '制造行业', challenges: ['流程不透明'], requirements: ['统一管理'], solution: '已完成上线', value: ['累计完成 8 项交付'],
+  const fields = { company_info: '制造行业客户', business_scope: '', competitive_strategy: '', project_background: '启动数字化建设',
+    business_status: ['流程不透明'], demands: ['统一管理'],
+    solution_sections: [{ title: '上线举措', text: '已完成上线' }], value_items: ['累计完成 8 项交付'], lessons: [], summary: '总结',
     context_snapshot: { generated_at: '2026-03-01', internal_digest: 'same', digest: 'snapshot', sources },
     claim_evidence: [
-      { section: 'background', claim: '制造行业', source_refs: ['customer:c1'], excerpt: '制造行业' },
-      { section: 'challenges', claim: '流程不透明', source_refs: ['done-1'], excerpt: '已完成上线' },
-      { section: 'requirements', claim: '统一管理', source_refs: ['done-1'], excerpt: '已完成上线' },
+      { section: 'intro', claim: '制造行业客户', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'intro', claim: '启动数字化建设', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'status', claim: '流程不透明', source_refs: ['done-1'], excerpt: '已完成上线' },
+      { section: 'demands', claim: '统一管理', source_refs: ['done-1'], excerpt: '已完成上线' },
       { section: 'solution', claim: '已完成上线', source_refs: ['done-1'], excerpt: '已完成上线' },
       { section: 'value', claim: '累计完成 8 项交付', source_refs: ['stats:delivery'], excerpt: '工单共 8 项，已完成 8 项', speaker_role: 'unknown' },
+      { section: 'summary', claim: '总结', source_refs: ['done-1'], excerpt: '已完成上线' },
     ] };
   const draft = { id: 'case-st', customerId: 'c1', version: 1, status: 'draft', title: '统计引用案例', fields, evidenceRefs: [], createdAt: '2026-03-01', updatedAt: '2026-03-01' } as any;
   const review = caseQualityReview(draft, { now: new Date('2026-08-30T00:00:00Z') });
@@ -4955,7 +5106,8 @@ test('workbench: quality review flags stats citations for disclosure confirmatio
 });
 
 test('workbench: public case parsing requires traceable excerpts and derives Hemory speaker role', () => {
-  const content = { title: '公开案例', background: '背景事实', challenges: ['现状痛点'], requirements: ['明确需求'], solution: '已落地方案', value: ['效率提升'], unknowns: [] };
+  const content = { title: '公开案例', company_info: '公司背景事实', business_scope: '', competitive_strategy: '', project_background: '合作背景',
+    business_status: ['现状痛点'], demands: ['明确需求'], solution_sections: [{ title: '举措', text: '已落地方案' }], value_items: ['效率提升'], lessons: [], summary: '总结', unknowns: [] };
   const profile = { id: 'customer:c1', source_system: 'crm', source_type: 'customer_profile', external_id: 'c1', occurred_at: '2026-01-01', synced_at: '2026-01-01',
     title: '客户', excerpt: '制造行业客户', url: '', payload_hash: 'p' } as any;
   const done = { id: 'done-1', source_system: 'ones', source_type: 'support_ticket', external_id: 'd1', occurred_at: '2026-02-01', synced_at: '2026-02-01',
@@ -4963,11 +5115,13 @@ test('workbench: public case parsing requires traceable excerpts and derives Hem
   const csm = { id: 'voice-1', source_system: 'hemory', source_type: 'ai_topic_segment', external_id: 'v1', occurred_at: '2026-03-01', synced_at: '2026-03-01',
     title: '效果回访', excerpt: 'CSM: 我认为效率提升', url: '', payload_hash: 'v', speaker_lines: [{ speaker: 'CSM', speaker_role: 'csm', text: '我认为效率提升' }] } as any;
   const claims = [
-    { section: 'background', claim: content.background, source_refs: [profile.id], excerpt: profile.excerpt },
-    { section: 'challenges', claim: content.challenges[0], source_refs: [done.id], excerpt: done.excerpt },
-    { section: 'requirements', claim: content.requirements[0], source_refs: [done.id], excerpt: done.excerpt },
-    { section: 'solution', claim: content.solution, source_refs: [done.id], excerpt: done.excerpt },
-    { section: 'value', claim: content.value[0], source_refs: [csm.id], excerpt: '我认为效率提升', speaker_role: 'customer' },
+    { section: 'intro', claim: content.company_info, source_refs: [profile.id], excerpt: profile.excerpt },
+    { section: 'intro', claim: content.project_background, source_refs: [profile.id], excerpt: profile.excerpt },
+    { section: 'status', claim: content.business_status[0], source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'demands', claim: content.demands[0], source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'solution', claim: content.solution_sections[0].text, source_refs: [done.id], excerpt: done.excerpt },
+    { section: 'value', claim: content.value_items[0], source_refs: [csm.id], excerpt: '我认为效率提升', speaker_role: 'customer' },
+    { section: 'summary', claim: content.summary, source_refs: [done.id], excerpt: done.excerpt },
   ];
   const sources = [profile, done, csm];
   assert.throws(() => parseCaseContent({ ...content, claim_evidence: claims.map(({ excerpt, ...claim }) => claim) },
@@ -4976,7 +5130,7 @@ test('workbench: public case parsing requires traceable excerpts and derives Hem
   // 生成期只阻断「摘录无法定位」（防编造），角色问题由 caseQualityReview 告警 CSM 复核。
   const parsed = parseCaseContent({ ...content, claim_evidence: claims },
     { requirePublic: true, allowedRefs: new Set(sources.map((source) => source.id)), sources });
-  assert.equal(parsed.value[0], content.value[0], 'CSM 说话人摘录不再阻断生成');
+  assert.equal(parsed.value_items[0], content.value_items[0], 'CSM 说话人摘录不再阻断生成');
 });
 
 test('workbench: quality review marks stale web, pre-solution value, other customer and sensitive title', () => {
@@ -4986,15 +5140,19 @@ test('workbench: quality review marks stale web, pre-solution value, other custo
     { id: 'solution-late', source_system: 'ones', source_type: 'support_ticket', external_id: 's1', occurred_at: '2026-03-01', synced_at: '2026-03-01', title: '已完成上线', excerpt: '已完成上线', url: '', payload_hash: 's', status_category: 'done' },
     { id: 'followup-csm', source_system: 'crm', source_type: 'crm_followup', external_id: 'f1', occurred_at: '2026-01-15', synced_at: '2026-01-15', title: '客户需要统一管理', excerpt: '客户需要统一管理', url: '', payload_hash: 'f' },
   ] as any[];
-  const fields = { background: '制造行业', challenges: ['流程不透明'], requirements: ['统一管理'], solution: '已完成上线', value: ['效率提升'],
+  const fields = { company_info: '制造行业客户', business_scope: '', competitive_strategy: '', project_background: '合作背景',
+    business_status: ['流程不透明'], demands: ['统一管理'],
+    solution_sections: [{ title: '上线举措', text: '已完成上线' }], value_items: ['效率提升'], lessons: [], summary: '总结',
     context_snapshot: { generated_at: '2026-03-01', internal_digest: 'same', digest: 'snapshot', sources },
     web_search: { searched: 1, searchedAt: '2026-01-01T00:00:00Z', results: [{ id: 'web-1', angle: '项目管理', title: '报道', snippet: '目标客户公开报道', domain: 'media.example', sourceTier: 'media', url: 'https://media.example/1', date: '2026-01-01' }], errors: [] },
     claim_evidence: [
-      { section: 'background', claim: '制造行业', source_refs: ['customer:c1'], excerpt: '制造行业' },
-      { section: 'challenges', claim: '流程不透明', source_refs: ['solution-late'], excerpt: '已完成上线' },
-      { section: 'requirements', claim: '统一管理', source_refs: ['followup-csm'], excerpt: '客户需要统一管理', speaker_role: 'unknown' },
+      { section: 'intro', claim: '制造行业客户', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'intro', claim: '合作背景', source_refs: ['customer:c1'], excerpt: '制造行业' },
+      { section: 'status', claim: '流程不透明', source_refs: ['solution-late'], excerpt: '已完成上线' },
+      { section: 'demands', claim: '统一管理', source_refs: ['followup-csm'], excerpt: '客户需要统一管理', speaker_role: 'unknown' },
       { section: 'solution', claim: '已完成上线', source_refs: ['solution-late'], excerpt: '已完成上线' },
       { section: 'value', claim: '效率提升', source_refs: ['value-early'], excerpt: '效率提升', speaker_role: 'customer' },
+      { section: 'summary', claim: '总结', source_refs: ['solution-late'], excerpt: '已完成上线' },
     ] };
   const draft = { id: 'case-q', customerId: 'c1', version: 1, status: 'draft', title: '泄漏客户 13800138000', fields,
     evidenceRefs: [], createdAt: '2026-03-01', updatedAt: '2026-03-01' } as any;
@@ -5018,15 +5176,26 @@ test('workbench: case update preserves internal evidence and quality review stay
     const draft = db.listCaseDrafts('crm-c1')[0];
     const snapshot = (draft.fields as any).context_snapshot;
     const claims = (draft.fields as any).claim_evidence;
-    const updated = service.update(draft.id, draft.version, '', { background: '', unknowns: [], context_snapshot: {} })!;
+    const usage = (draft.fields as any).system_usage;
+    const milestones = (draft.fields as any).milestones;
+    const updated = service.update(draft.id, draft.version, '', { company_info: '', unknowns: [], context_snapshot: {} })!;
     assert.deepEqual((updated.fields as any).context_snapshot, snapshot);
     assert.deepEqual((updated.fields as any).claim_evidence, claims);
-    assert.deepEqual((updated.fields as any).unknowns, CASE_CONTENT.unknowns);
+    assert.deepEqual((updated.fields as any).system_usage, usage, '未提交的派生表原样保留');
+    assert.deepEqual((updated.fields as any).milestones, milestones, '未提交的里程碑原样保留');
+    assert.ok((updated.fields as any).unknowns.some((item: string) => item === CASE_CONTENT.unknowns[0]));
     const review = caseQualityReview(updated);
     assert.ok(review.warnings.some((warning) => /标题为空/.test(warning)));
-    assert.ok(review.warnings.some((warning) => /客户背景.*为空/.test(warning)));
+    assert.ok(review.warnings.some((warning) => /公司信息.*为空/.test(warning)));
     assert.ok(review.warnings.some((warning) => /线下确认/.test(warning)));
     assert.ok(service.publishPreview(updated.id, 'parent-warning').approvalHash, '警告不阻断预览');
+    // v8 派生字段可编辑：PATCH system_usage/milestones 合并生效。
+    const edited = service.update(updated.id, updated.version, undefined as any, {
+      system_usage: [{ item: '购买账号数', content: '1500 个' }],
+      milestones: [{ date: '2026-03', label: '合作启动' }],
+    })!;
+    assert.deepEqual((edited.fields as any).system_usage, [{ item: '购买账号数', content: '1500 个' }]);
+    assert.deepEqual((edited.fields as any).milestones, [{ date: '2026-03', label: '合作启动' }]);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

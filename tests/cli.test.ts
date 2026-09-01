@@ -42,9 +42,10 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'action-items' && item.api.includes('/api/action-items/bulk-complete')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/regenerate')));
+  assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/export')));
   const caseCapability = capabilities.find((item) => item.workflow === 'case-drafts');
-  assert.deepEqual(caseCapability.editableFields, ['title', 'background', 'challenges', 'requirements', 'solution', 'value']);
-  assert.ok(caseCapability.readOnlyFields.includes('claim_evidence') && caseCapability.readOnlyFields.includes('context_snapshot'));
+  assert.deepEqual(caseCapability.editableFields, ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones']);
+  assert.ok(caseCapability.readOnlyFields.includes('claim_evidence') && caseCapability.readOnlyFields.includes('context_snapshot') && caseCapability.readOnlyFields.includes('figures'));
   // 生成进度可见契约：case/weekly-report 能力含 draft-jobs 轮询端点与 --wait 进度说明。
   assert.ok(caseCapability.api.includes('/api/draft-jobs'));
   assert.match(caseCapability.notes ?? '', /实时打印生成进度/);
@@ -94,13 +95,15 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /--wait 轮询任务到终态并实时打印生成进度/);
   assert.match(help.stdout, /csm-agent case show <草稿ID> \[--json\]/);
   assert.match(help.stdout, /csm-agent case regenerate <草稿ID> \[--wait\]/);
-  assert.match(help.stdout, /项目管理\/需求管理\/知识管理\/招投标\/中标采购/);
+  assert.match(help.stdout, /公司概况\/项目管理\/需求管理\/知识管理\/行业动态\/招投标\/中标采购/);
   assert.match(help.stdout, /默认输出可直接对外的案例 Markdown（与复制\/Wiki 发布同源）/);
   // v7：case show 帮助须声明配图图注输出与 --json 的 figures 审核对象。
   assert.match(help.stdout, /有配图时列出图注一行/);
   assert.match(help.stdout, /claim_evidence\/figures\/context_snapshot\/unknowns/);
   assert.doesNotMatch(help.stdout, /evidence_map\/unknowns/);
-  assert.match(help.stdout, /只更新 title 与 fields 中的五段公开正文/);
+  assert.match(help.stdout, /只更新 title 与 fields 中的公开正文/);
+  assert.match(help.stdout, /csm-agent case export <草稿ID> \[--out <文件路径>\]/);
+  assert.match(help.stdout, /导出 Word 文档/);
   assert.match(help.stdout, /csm-agent case publish/);
   assert.match(help.stdout, /csm-agent weekly-report generate <客户ID或名称> \[YYYY-MM-DD\] \[--force\] \[--wait\]/);
   assert.match(help.stdout, /默认输出客户版周报 Markdown（与复制\/Wiki 发布同源）/);

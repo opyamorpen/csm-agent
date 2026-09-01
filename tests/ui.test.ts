@@ -1268,23 +1268,33 @@ test('agent replies stream as deltas and thinking collapses into a fold', () => 
   assert.match(css, /\.think-block\.open \.think-head::before \{ content: '▾ '; \}/);
 });
 
-test('case narrative generation contract: five-section editor, refine entry, single generation path', () => {
+test('case narrative generation contract: v8 chapter editor, refine entry, single generation path', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
-  // 五段叙事编辑弹窗：五章节标签 + 每行一项列表段；读取旧键回退（pain_points/results）。
+  // v8 四章深结构编辑弹窗：公司简介三小节/项目背景/系统使用情况表/业务现状/业务诉求/方案小节/里程碑/价值与复盘/总结；
+  // 存量旧稿（无 company_info 键）仍走五段表单（读取旧键回退 pain_points/results）。
   const editCase = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
   assert.ok(editCase, 'editCase source was not found');
+  assert.match(editCase, /typeof fields\.company_info === 'string'/);
+  assert.match(editCase, /一（一）客户简介 · 公司信息/);
+  assert.match(editCase, /一（二）项目背景/);
+  assert.match(editCase, /一（三）系统使用情况（每行「项目：内容」/);
+  assert.match(editCase, /二（一）业务现状（每行一段/);
+  assert.match(editCase, /二（二）业务诉求（每行一项）/);
+  assert.match(editCase, /二（三）业务解决方案（每节以「## 小节标题」行开头/);
+  assert.match(editCase, /三 · 服务里程碑（每行「YYYY-MM 事件」/);
+  assert.match(editCase, /三 · 价值成效（每行一项/);
+  assert.match(editCase, /三 · 经验复盘与沉淀/);
+  assert.match(editCase, /四、项目总结/);
+  assert.match(editCase, /solution_sections: \(\(\) => \{/);
+  assert.match(editCase, /company_info: companyInfo\.value\.trim\(\)/);
+  // 存量旧稿五段分支保留：旧键回退 + 五段提交结构。
   assert.match(editCase, /一、客户背景/);
-  assert.match(editCase, /二、痛点、现状与挑战（每行一项）/);
-  assert.match(editCase, /三、需求与要求（每行一项）/);
-  assert.match(editCase, /四、解决方案/);
-  assert.match(editCase, /五、价值与成效（每行一项/);
-  assert.match(editCase, /仅写已完成或有明确完成确认的落地举措/);
   assert.match(editCase, /fields\.pain_points/);
   assert.match(editCase, /fields\.results/);
+  assert.match(editCase, /background: background\.value\.trim\(\)/);
   assert.doesNotMatch(editCase, /fields: \{ \.\.\.fields,/);
-  assert.match(editCase, /fields: \{\s*background:/);
   // 旧字段编辑入口不再出现（客户原话/可复用经验/脱敏检查/实施过程）。
   assert.doesNotMatch(editCase, /客户原话/);
   assert.doesNotMatch(editCase, /可复用经验/);
@@ -1333,6 +1343,9 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   assert.match(refine, /record_type=case/);
   assert.match(refine, /不得调用任何 CRM\/ONES 外部写工具/);
   assert.match(refine, /未要求修改的章节必须原文保留/);
+  // v8 精修契约：会话按草稿结构注入 v8 章节字段（旧稿仍五段）。
+  assert.match(refine, /company_info: fields\.company_info/);
+  assert.match(refine, /solution_sections/);
   const caseCard = source.match(/async function caseCard[\s\S]*?\n  \}\n\n  async function loadCases/)?.[0];
   assert.ok(caseCard, 'caseCard source was not found');
   assert.match(caseCard, /'对话精修'/);
@@ -1344,6 +1357,10 @@ test('case narrative generation contract: five-section editor, refine entry, sin
   // 复制 Markdown：与周报卡同款（服务端权威渲染，带 WKWebView execCommand 兜底）。
   assert.match(caseCard, /'复制 Markdown'/);
   assert.match(caseCard, /copyText\(current\.markdown/);
+  // v8 导出 Word：案例卡经 /export 二进制流下载（与复制/Wiki 发布同一内容口径）。
+  assert.match(caseCard, /'导出 Word'/);
+  assert.match(caseCard, /\/api\/case-drafts\/\$\{encodeURIComponent\(draft\.id\)\}\/export/);
+  assert.match(caseCard, /createObjectURL\(blob\)/);
   // 编辑写回护栏：保存/PATCH 响应的 warnings 以弹窗提示（非阻断）。
   const editCaseSource = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
   assert.ok(editCaseSource, 'editCase source was not found');

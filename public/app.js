@@ -2384,20 +2384,36 @@
    */
   async function startCaseRefine(customer, draft) {
     const fields = draft.fields || {};
-    const narrative = JSON.stringify({
-      case_draft_id: draft.id, case_version: draft.version,
-      customer_id: fields.customer_id, customer_name: fields.customer_name,
-      background: fields.background ?? '', challenges: fields.challenges ?? fields.pain_points ?? [],
-      requirements: fields.requirements ?? [], solution: fields.solution ?? '',
-      value: fields.value ?? fields.results ?? [], unknowns: fields.unknowns ?? [],
-    }, null, 2);
+    const isV8 = typeof fields.company_info === 'string';
+    const narrative = isV8
+      ? JSON.stringify({
+        case_draft_id: draft.id, case_version: draft.version,
+        customer_id: fields.customer_id, customer_name: fields.customer_name,
+        company_info: fields.company_info ?? '', business_scope: fields.business_scope ?? '',
+        competitive_strategy: fields.competitive_strategy ?? '', project_background: fields.project_background ?? '',
+        business_status: fields.business_status ?? [], demands: fields.demands ?? [],
+        solution_sections: fields.solution_sections ?? [], value_items: fields.value_items ?? [],
+        lessons: fields.lessons ?? [], summary: fields.summary ?? '',
+        system_usage: fields.system_usage ?? [], milestones: fields.milestones ?? [],
+        unknowns: fields.unknowns ?? [],
+      }, null, 2)
+      : JSON.stringify({
+        case_draft_id: draft.id, case_version: draft.version,
+        customer_id: fields.customer_id, customer_name: fields.customer_name,
+        background: fields.background ?? '', challenges: fields.challenges ?? fields.pain_points ?? [],
+        requirements: fields.requirements ?? [], solution: fields.solution ?? '',
+        value: fields.value ?? fields.results ?? [], unknowns: fields.unknowns ?? [],
+      }, null, 2);
+    const sectionContract = isV8
+      ? `company_info/business_scope/competitive_strategy/project_background/business_status/demands/solution_sections（{title,text} 数组）/value_items/lessons/summary/system_usage/milestones`
+      : `background/challenges/requirements/solution/value`;
     const prompt = `请对以下客户案例草稿进行对话精修。我会逐轮给出修改要求（支持整稿重写或只改某一章节）；未要求修改的章节必须原文保留。\n\n`
       + `客户名称：${customer.name}\nCRM CSM售后客户ID：${customer.id}\n\n`
       + `当前草稿（v${draft.version}）：\n${narrative}\n\n`
       + `要求：\n`
-      + `- 先通读草稿并概述五段现状与你发现的待改进点（如证据不足、叙事断裂、内部信息残留），等待我的修改意见。\n`
-      + `- 修改时输出完整五段并调用 confirm_write（target_system=ones, record_type=case）：fields 必须原样保留 case_draft_id="${draft.id}" 和 case_version=${draft.version}，并包含 customer_id="${customer.id}"、customer_name="${customer.name}" 与完整五段字段。\n`
-      + `- 保持客户叙事视角与证据纪律：只写有证据的事实，价值段不虚构数字，正文不出现内部系统名、风险评分、工时统计、联系人信息与合同金额。\n`
+      + `- 先通读草稿并概述各章节现状与你发现的待改进点（如证据不足、叙事断裂、内部信息残留），等待我的修改意见。\n`
+      + `- 修改时输出完整章节字段并调用 confirm_write（target_system=ones, record_type=case）：fields 必须原样保留 case_draft_id="${draft.id}" 和 case_version=${draft.version}，并包含 customer_id="${customer.id}"、customer_name="${customer.name}" 与完整章节字段（${sectionContract}）。\n`
+      + `- 保持客户叙事视角与证据纪律：只写有证据的事实，价值与复盘不虚构数字，正文不出现内部系统名、风险评分、工时统计、联系人信息与合同金额。\n`
       + `- 本次会话只修改本地草稿，不得调用任何 CRM/ONES 外部写工具；发布到 ONES Wiki 由我在工作台完成。`;
     const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
     await switchSession(created.id);
@@ -3190,6 +3206,31 @@
       } catch (error) { await alertDialog(`复制失败：${error.message}`); }
     };
     buttons.append(copy);
+    // 导出 Word：与服务端 Markdown 同一内容口径的 docx 版式（目录/客户信息表/里程碑/配图）。
+    const exportDocx = el('button', 'quiet-command small', '导出 Word');
+    exportDocx.onclick = async () => {
+      try {
+        exportDocx.disabled = true;
+        exportDocx.textContent = '导出中…';
+        const response = await fetch(`/api/case-drafts/${encodeURIComponent(draft.id)}/export`);
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || `HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('content-disposition') || '';
+        const name = decodeURIComponent((disposition.match(/filename\*=UTF-8''([^;]+)/) || [])[1] || '客户成功案例.docx');
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        exportDocx.textContent = '已导出'; setTimeout(() => { exportDocx.textContent = '导出 Word'; }, 1500);
+      } catch (error) { await alertDialog(`导出失败：${error.message}`); }
+      finally { exportDocx.disabled = false; exportDocx.textContent = '导出 Word'; }
+    };
+    buttons.append(exportDocx);
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
     card.append(buttons);
     // 配图：服务端消毒产物 + 前端防御检查后才注入（innerHTML 前必须过 sanitizeCaseSvgForRender）。
@@ -3213,29 +3254,89 @@
     for (const draft of data.drafts || []) caseList.append(await caseCard(draft));
   }
 
-  /** 五段叙事编辑弹窗：列表章节每行一项；存量草稿旧键（pain_points/results）读取时回退映射。 */
+  /**
+   * 案例编辑弹窗。v8 四章深结构（公司简介三小节/项目背景/系统使用情况表/业务现状/业务诉求/
+   * 方案小节/价值与复盘/服务里程碑/项目总结）；存量旧稿（无 company_info 键）仍走五段表单。
+   * 解决方案小节的文本格式：每节以「## 小节标题」行开头、后续行为该节正文。
+   */
   function editCase(draft) {
     openWorkbenchModal('编辑客户案例');
-    const title = inputField('案例标题', draft.title);
     const fields = draft.fields || {};
-    const asList = (value, legacy) => {
-      const source = Array.isArray(value) ? value : (Array.isArray(legacy) ? legacy : []);
-      return source.map((item) => typeof item === 'string' ? item : `${item.metric || ''}: ${item.value || ''}`.trim()).filter(Boolean).join('\n');
-    };
-    const background = inputField('一、客户背景（行业、业务概况与合作起点的连贯叙述）', fields.background, 'textarea');
-    const challenges = inputField('二、痛点、现状与挑战（每行一项）', asList(fields.challenges, fields.pain_points), 'textarea');
-    const requirements = inputField('三、需求与要求（每行一项）', asList(fields.requirements), 'textarea');
-    const solution = inputField('四、解决方案（仅写已完成或有明确完成确认的落地举措）', fields.solution, 'textarea');
-    const value = inputField('五、价值与成效（每行一项；量化优先，无量化写有据定性价值）', asList(fields.value, fields.results), 'textarea');
+    const isV8 = typeof fields.company_info === 'string';
+    const title = inputField('案例标题', draft.title);
     const actions = el('div', 'row-actions');
     const save = el('button', 'primary-command', '保存草稿');
     const publish = el('button', 'quiet-command', '预览并发布');
     const lines = (input) => input.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    let buildFields;
+    const inputs = [];
+    const addField = (label, value, type = 'textarea') => {
+      const field = inputField(label, value, type);
+      inputs.push(field);
+      return field.input;
+    };
+
+    if (isV8) {
+      const companyInfo = addField('一（一）客户简介 · 公司信息（100~250 字，仅档案与可信公开信息）', fields.company_info || '');
+      const businessScope = addField('一（一）客户简介 · 核心业务范围', fields.business_scope || '');
+      const strategy = addField('一（一）客户简介 · 竞争优势与发展战略', fields.competitive_strategy || '');
+      const projectBackground = addField('一（二）项目背景（200~500 字，合作动因与目标）', fields.project_background || '');
+      const usage = addField('一（三）系统使用情况（每行「项目：内容」，派生表可补充账号数/有效期/使用部门）',
+        (fields.system_usage || []).map((row) => `${row.item}：${row.content}`).join('\n'));
+      const status = addField('二（一）业务现状（每行一段，2~4 段）', (fields.business_status || []).join('\n'));
+      const demands = addField('二（二）业务诉求（每行一项）', (fields.demands || []).join('\n'));
+      const solution = addField('二（三）业务解决方案（每节以「## 小节标题」行开头，随后为该节正文 250~600 字）',
+        (fields.solution_sections || []).map((section) => `## ${section.title || ''}\n${section.text}`).join('\n\n'));
+      const milestones = addField('三 · 服务里程碑（每行「YYYY-MM 事件」，服务端派生、可增删改）',
+        (fields.milestones || []).map((milestone) => `${milestone.date} ${milestone.label}`).join('\n'));
+      const valueItems = addField('三 · 价值成效（每行一项；量化优先，无量化写有据定性价值）', (fields.value_items || []).join('\n'));
+      const lessons = addField('三 · 经验复盘与沉淀（每行一项，可空；只写有出处的复盘结论）', (fields.lessons || []).join('\n'));
+      const summary = addField('四、项目总结（150~400 字收束）', fields.summary || '');
+      buildFields = () => ({
+        company_info: companyInfo.value.trim(),
+        business_scope: businessScope.value.trim(),
+        competitive_strategy: strategy.value.trim(),
+        project_background: projectBackground.value.trim(),
+        system_usage: lines(usage).map((line) => {
+          const split = line.match(/^([^：:]+)[：:]\s*(.*)$/);
+          return split ? { item: split[1].trim(), content: split[2].trim() } : null;
+        }).filter(Boolean),
+        business_status: lines(status),
+        demands: lines(demands),
+        solution_sections: (() => {
+          const sections = [];
+          for (const line of solution.value.split('\n')) {
+            if (line.startsWith('## ')) sections.push({ title: line.slice(3).trim(), text: '' });
+            else if (sections.length) sections[sections.length - 1].text += (sections[sections.length - 1].text ? '\n' : '') + line;
+          }
+          return sections.map((section) => ({ title: section.title.slice(0, 40), text: section.text.trim() })).filter((section) => section.text);
+        })(),
+        milestones: lines(milestones).map((line) => {
+          const split = line.match(/^(\d{4}-\d{2}(?:-\d{2})?)\s+(.*)$/);
+          return split ? { date: split[1], label: split[2].trim().slice(0, 80) } : null;
+        }).filter(Boolean),
+        value_items: lines(valueItems),
+        lessons: lines(lessons),
+        summary: summary.value.trim(),
+      });
+    } else {
+      const asList = (value, legacy) => {
+        const source = Array.isArray(value) ? value : (Array.isArray(legacy) ? legacy : []);
+        return source.map((item) => typeof item === 'string' ? item : `${item.metric || ''}: ${item.value || ''}`.trim()).filter(Boolean).join('\n');
+      };
+      const background = addField('一、客户背景（行业、业务概况与合作起点的连贯叙述）', fields.background, );
+      const challenges = addField('二、痛点、现状与挑战（每行一项）', asList(fields.challenges, fields.pain_points));
+      const requirements = addField('三、需求与要求（每行一项）', asList(fields.requirements));
+      const solution = addField('四、解决方案（仅写已完成或有明确完成确认的落地举措）', fields.solution);
+      const value = addField('五、价值与成效（每行一项；量化优先，无量化写有据定性价值）', asList(fields.value, fields.results));
+      buildFields = () => ({
+        background: background.value.trim(), challenges: lines(challenges),
+        requirements: lines(requirements), solution: solution.value.trim(), value: lines(value),
+      });
+    }
     async function saveDraft() {
       return api(`/api/case-drafts/${draft.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        version: draft.version, title: title.input.value.trim(), fields: {
-          background: background.input.value.trim(), challenges: lines(challenges.input),
-          requirements: lines(requirements.input), solution: solution.input.value.trim(), value: lines(value.input) },
+        version: draft.version, title: title.input.value.trim(), fields: buildFields(),
       }) });
     }
     // 写回护栏（非阻断）：服务端对编辑结果做条目数/长度/内部残留检查，命中时弹窗提示复核。
@@ -3262,7 +3363,7 @@
       } catch (error) { await alertDialog(error.message); }
     };
     actions.append(save, publish);
-    workbenchModalBody.append(title.field, background.field, challenges.field, requirements.field, solution.field, value.field, actions);
+    workbenchModalBody.append(title.field, ...inputs.map((field) => field.field), actions);
   }
 
   async function pollSync(id) {

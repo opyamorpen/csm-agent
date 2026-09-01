@@ -57,10 +57,10 @@ const CLI_CAPABILITIES = [
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
-  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/draft-jobs'],
-    editableFields: ['title', 'background', 'challenges', 'requirements', 'solution', 'value'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage'],
-    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）' },
+  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs'],
+    editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures'],
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -134,13 +134,17 @@ function help(): void {
   csm-agent action update <行动ID> <JSON>
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
-    （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标/中标采购；
+    （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
      --wait 轮询任务到终态并实时打印生成进度）
   csm-agent case show <草稿ID> [--json]
     （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
-    （只更新 title 与 fields 中的五段公开正文；客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
+    （只更新 title 与 fields 中的公开正文：v8 为公司简介三小节/项目背景/业务现状/业务诉求/方案小节/价值与复盘/项目总结及派生表 system_usage、milestones；
+     客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
+  csm-agent case export <草稿ID> [--out <文件路径>]
+    （导出 Word 文档：四章深结构版式（目录/客户信息表/服务里程碑/配图），默认保存到当前目录；
+     与复制/Wiki 发布同一内容口径）
   csm-agent case preview <草稿ID> [ONES父页面ID]
   csm-agent case publish <草稿ID> <版本> <ONES父页面ID> <批准哈希>
   csm-agent weekly-report list <客户ID或名称> [--json]
@@ -512,6 +516,27 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, version }),
     }));
   }
+  if (subcommand === 'export') {
+    // Word 导出：GET 二进制流写盘（--out 支持空格或 = 传值；缺省存当前目录，文件名取服务端下发的附件名）。
+    const out = inlineOptionOf(values, '--out');
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/api/case-drafts/${encodeURIComponent(draftId)}/export`);
+    } catch (error) {
+      throw new Error(`无法连接 ${baseUrl}；请先运行 npm run dev。${(error as Error).message}`);
+    }
+    if (!response.ok) {
+      const body: any = await response.json().catch(() => ({}));
+      throw new Error(body.error ?? `HTTP ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const suggested = decodeURIComponent(disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1] ?? '客户成功案例.docx');
+    const target = out !== undefined && out.trim() ? out.trim() : join(process.cwd(), suggested);
+    writeFileSync(target, buffer);
+    if (!jsonOutput) console.log(`已导出 Word 文档：${target}（${(buffer.length / 1024).toFixed(1)} KB）`);
+    return print({ id: draftId, file: target, bytes: buffer.length });
+  }
   if (subcommand === 'preview') {
     return print(await request(`/api/case-drafts/${encodeURIComponent(draftId)}/publish-preview`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPageID: values.join(' ') }),
@@ -527,7 +552,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, parentPageID, approvalHash }),
     }));
   }
-  throw new Error('case 子命令只允许 list/generate/show/regenerate/update/preview/publish');
+  throw new Error('case 子命令只允许 list/generate/show/regenerate/update/export/preview/publish');
 }
 
 function printWeeklyReport(report: any, markdown = '', customerName = ''): void {

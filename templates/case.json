@@ -1,31 +1,75 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "客户案例 Customer Case Study",
-  "description": "每个成功案例一篇，可直接对外的五段客户叙事（背景→痛点→需求→解决方案→价值）。内部证据仅供审核，不进入公开正文。",
+  "title": "客户案例 Customer Case Study（v8 四章深结构）",
+  "description": "每个成功案例一篇，可直接对外的四章深结构客户叙事（客户及背景介绍 → 场景及解决方案 → 方案价值概述 → 项目总结）。内部证据仅供审核，不进入公开正文。",
   "type": "object",
-  "required": ["customer_id", "customer_name", "background", "challenges", "requirements", "solution", "value"],
+  "required": ["customer_id", "customer_name", "company_info", "project_background", "business_status", "demands", "solution_sections", "value_items", "summary"],
   "properties": {
     "case_draft_id": { "type": "string", "description": "精修时原样带回的案例草稿 ID" },
     "case_version": { "type": "integer", "minimum": 1, "description": "精修时原样带回的乐观锁版本" },
     "customer_id": { "type": "string", "description": "CRM 中客户唯一 ID" },
     "customer_name": { "type": "string", "description": "客户名称" },
-    "background": { "type": "string", "description": "客户背景：行业、业务概况与合作起点的一段连贯叙述，可含可信的公开信息" },
-    "challenges": {
+    "company_info": { "type": "string", "description": "一、客户及背景介绍 ·（一）客户简介 · 公司信息：只写客户档案与可信公开信息，禁止虚构排名/规模/上市数据" },
+    "business_scope": { "type": "string", "description": "客户简介 · 核心业务范围（素材不足允许为空）" },
+    "competitive_strategy": { "type": "string", "description": "客户简介 · 竞争优势与发展战略（素材不足允许为空）" },
+    "project_background": { "type": "string", "description": "一 ·（二）项目背景：合作动因与目标的连贯叙述" },
+    "system_usage": {
+      "type": "array",
+      "description": "一 ·（三）系统使用情况表：服务端派生（客户名称/购买版本/购买产品/合作时间），CSM 可补充账号数、有效期、使用部门；LLM 不写这张表",
+      "items": {
+        "type": "object",
+        "required": ["item", "content"],
+        "properties": {
+          "item": { "type": "string" },
+          "content": { "type": "string" }
+        }
+      }
+    },
+    "business_status": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "痛点、现状与挑战（优先从客户原话痛点线索归纳）"
+      "description": "二、场景及解决方案 ·（一）业务现状：2~4 段合作前或当前的现状与痛点（每段一元素）"
     },
-    "requirements": {
+    "demands": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "需求与要求"
+      "description": "二 ·（二）业务诉求：客户明确提出的功能诉求、交付要求与服务标准"
     },
-    "solution": { "type": "string", "description": "解决方案：只写已完成或有明确完成确认的落地举措，计划、讨论和待办不得写成已交付" },
-    "value": {
+    "solution_sections": {
+      "type": "array",
+      "description": "二 ·（三）业务解决方案：每个方案级举措一个小节，只写已完成或有明确完成确认的落地举措",
+      "items": {
+        "type": "object",
+        "required": ["title", "text"],
+        "properties": {
+          "title": { "type": "string", "description": "20 字以内小节标题" },
+          "text": { "type": "string", "description": "250~600 字小节正文" }
+        }
+      }
+    },
+    "milestones": {
+      "type": "array",
+      "description": "三 · 服务里程碑：服务端从已交付事件确定性派生的 {date, label} 时间线，CSM 可增删改；LLM 不写",
+      "items": {
+        "type": "object",
+        "required": ["date", "label"],
+        "properties": {
+          "date": { "type": "string", "description": "YYYY-MM（或 YYYY-MM-DD）" },
+          "label": { "type": "string" }
+        }
+      }
+    },
+    "value_items": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "价值与成效（量化优先，无量化写有据定性价值，客户正面反馈可转述）"
+      "description": "三、方案价值概述 · 价值成效（量化优先，无量化写有据定性价值，客户正面反馈可转述）"
     },
+    "lessons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "三 · 经验复盘与沉淀（0~3 条，可空）：只写沟通记录中有出处的复盘结论，措辞正面建设性"
+    },
+    "summary": { "type": "string", "description": "四、项目总结：150~400 字收束，不引入前文未出现的新事实" },
     "claim_evidence": {
       "type": "array",
       "readOnly": true,
@@ -34,7 +78,7 @@
         "type": "object",
         "required": ["section", "claim", "source_refs"],
         "properties": {
-          "section": { "enum": ["background", "challenges", "requirements", "solution", "value"] },
+          "section": { "enum": ["intro", "status", "demands", "solution", "value", "summary"] },
           "claim": { "type": "string" },
           "source_refs": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
           "excerpt": { "type": "string" },
@@ -52,15 +96,15 @@
     "figures": {
       "type": "array",
       "readOnly": true,
-      "description": "内部只读字段：章节配图（流程现状/目标流程/方案架构），生成管线绘制并经服务端消毒后落库，编辑与精修不可覆写",
+      "description": "内部只读字段：章节配图（流程现状/目标流程/方案架构/服务里程碑时间轴），生成管线绘制并经服务端消毒后落库，编辑与精修不可覆写",
       "items": {
         "type": "object",
         "required": ["section", "kind", "svg", "caption", "source_refs"],
         "properties": {
-          "section": { "enum": ["challenges", "requirements", "solution"] },
-          "kind": { "enum": ["flow_current", "flow_target", "architecture"] },
+          "section": { "enum": ["status", "demands", "solution", "value"] },
+          "kind": { "enum": ["flow_current", "flow_target", "architecture", "milestone"] },
           "svg": { "type": "string", "description": "消毒后的自包含 SVG（白名单标签/属性，无脚本与外链）" },
-          "caption": { "type": "string", "description": "30 字以内图注，Markdown 端以引用块占位" },
+          "caption": { "type": "string", "description": "30 字以内图注，Markdown 端以引用块占位；docx 导出栅格化为 PNG 嵌入" },
           "source_refs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "图级证据：整图挂来源，不逐节点定位" }
         }
       }
@@ -69,7 +113,7 @@
       "type": "array",
       "readOnly": true,
       "items": { "type": "string" },
-      "description": "内部只读字段：CSM 需线下补充确认的关键信息，不进入公开正文"
+      "description": "内部只读字段：CSM 需线下补充确认的关键信息（含系统使用情况表缺失行提示），不进入公开正文"
     }
   }
 }

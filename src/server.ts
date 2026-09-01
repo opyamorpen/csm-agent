@@ -141,7 +141,11 @@ function editedDraft(original: ConfirmDraft, value: unknown): ConfirmDraft | nul
 /** 案例精修只允许修改五段公开正文；证据、客户绑定与上下文快照由生成服务维护。 */
 function pickNarrativeFields(fields: Record<string, unknown>): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
-  for (const key of ['background', 'challenges', 'requirements', 'solution', 'value']) {
+  // v8 章节字段（含派生表/里程碑）+ 存量旧稿五段键：只透传公开正文，内部字段由 update 原样保留。
+  const keys = ['company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status',
+    'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones',
+    'background', 'challenges', 'requirements', 'solution', 'value'];
+  for (const key of keys) {
     if (fields[key] !== undefined) picked[key] = fields[key];
   }
   return picked;
@@ -832,6 +836,21 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         if (req.method === 'GET' && sub === '') {
           const detail = workbench.cases.detail(draftId);
           return detail ? json(res, 200, detail) : json(res, 404, { error: '案例草稿不存在' });
+        }
+        // 导出 Word（v8：与复制/Wiki 发布同源内容口径的 docx 版式，附件下载；读操作走审计记录）。
+        if (req.method === 'GET' && sub === '/export') {
+          try {
+            const exported = await workbench.cases.exportDocx(draftId);
+            if (!exported) return json(res, 404, { error: '案例草稿不存在' });
+            res.writeHead(200, {
+              'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+              'Content-Length': exported.buffer.length,
+            });
+            return void res.end(exported.buffer);
+          } catch (error) {
+            return json(res, 500, { error: `导出 Word 失败: ${(error as Error).message}` });
+          }
         }
         if (req.method === 'POST' && sub === '/regenerate') {
           const draft = workbench.db.getCaseDraft(draftId);
