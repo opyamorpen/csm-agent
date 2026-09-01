@@ -1056,7 +1056,7 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .draft-edit-row { color: var(--text); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .draft-edit-locked-reason { color: var(--draft-locked-text); font-size: 12px; line-height: 1.5; }
 
-.agent-mode-tabs { position: sticky; top: -14px; z-index: 8; display: flex; gap: 2px; margin: 0 0 16px; padding: 8px 18px 0; border-bottom: 1px solid var(--border); background: var(--bar-bg); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.agent-mode-tabs { position: sticky; top: -14px; z-index: 8; display: flex; gap: 2px; margin: 0; padding: 8px 18px 0; border-bottom: 1px solid var(--border); background: var(--bar-bg); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 .agent-mode-tab { min-height: 40px; padding: 0 13px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--text-3); cursor: pointer; font: inherit; transition: color 0.16s ease, border-color 0.16s ease; }
 .agent-mode-tab:hover { color: var(--text); }
 .agent-mode-tab.active { border-bottom-color: var(--accent); color: var(--accent-deep); font-weight: 650; }
@@ -1068,8 +1068,9 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .agent-work-head input:focus { outline: 2px solid var(--focus-ring); border-color: var(--focus-border); }
 /* 「已归属」一键切换：激活（处于已归属视图）时高亮提示当前态，再点切回待归属。 */
 .agent-work-head .quiet-command.active { border-color: var(--accent); color: var(--accent-deep); background: var(--accent-soft); font-weight: 650; }
-/* 归属栏：单行操作条，全部控件垂直居中、统一 34px 高度；sticky 冻结在 tab 条下（z-index 低于 tab 条）。 */
-.hemory-assign-bar { position: sticky; top: 35px; z-index: 7; display: flex; align-items: center; gap: 8px; margin: 0 -18px 12px; padding: 10px 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bar-bg); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+/* 归属栏：单行操作条，全部控件垂直居中、统一 34px 高度；sticky 钉在面板滚动口顶（top: 0，贴死 tab 栏下沿；z-index 低于 tab 条）。
+   滚动口即 tab 栏下方的 .agent-mode-panel——任何更大的 top 偏移都会留出滚动内容可见的空隙。 */
+.hemory-assign-bar { position: sticky; top: 0; z-index: 7; display: flex; align-items: center; gap: 8px; margin: 0 -18px 12px; padding: 10px 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bar-bg); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 /* 已选客户一键清除：容器承载 flex 尺寸，✕ 浮在输入框右侧（有值才显示）。 */
 .hemory-customer-box { position: relative; flex: 1 1 220px; min-width: 160px; }
 .hemory-assign-bar input[list] { width: 100%; min-height: 34px; padding: 6px 30px 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
@@ -1245,11 +1246,11 @@ header, #sidebar, #records { -webkit-backdrop-filter: blur(14px) saturate(1.25);
   #records { display: none !important; }
   /* 移动端侧栏 sticky 通栏、记录面板隐藏：footer 不再让位，恢复常规内边距。 */
   footer { position: sticky; bottom: 0; }
-  .agent-mode-tabs { margin: 0 0 12px; padding-left: 10px; padding-right: 10px; overflow-x: auto; }
+  .agent-mode-tabs { padding-left: 10px; padding-right: 10px; overflow-x: auto; }
   .agent-mode-tab { flex: 0 0 auto; }
   .agent-work-head { align-items: flex-start; flex-direction: column; }
   .agent-work-head .row-actions { flex-wrap: wrap; }
-  .hemory-assign-bar { top: 49px; flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
+  .hemory-assign-bar { flex-wrap: wrap; margin: 0 -10px 12px; padding: 10px; }
   .hemory-customer-box { flex: 1 1 100%; }
   .draft-batch-head { align-items: flex-start; flex-direction: column; }
   /* 页脚在移动端 sticky 钉底，浮动条上移避让，不遮住页脚内容。 */

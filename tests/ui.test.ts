@@ -495,8 +495,13 @@ test('hemory assign bar aligns controls on one centered row with select-all and 
   assert.match(styles, /\.hemory-assign-bar \{[^}]*display: flex/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*align-items: center/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*position: sticky/);
+  assert.match(styles, /\.hemory-assign-bar \{[^}]*top: 0;/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*z-index: 7/);
   assert.match(styles, /\.hemory-assign-bar \{[^}]*background: var\(--bar-bg\)/);
+  // 钉住位置必须贴死 tab 栏：面板滚动口顶部即 tab 栏下沿，归属栏 top 必须为 0、tab 栏不得有下边距；
+  // 更大的偏移（旧 main 滚动几何的 35px/49px）会在归属栏上方留出滚动内容可见的空隙。
+  assert.match(styles, /\.agent-mode-tabs \{[^}]*margin: 0;/);
+  assert.doesNotMatch(styles, /\.hemory-assign-bar \{[^}]*top: (35|49)px/);
   // 全选 checkbox 保持 16px、不再被输入框规则拉伸；输入框选择器收窄为 input[list]。
   assert.match(styles, /\.hemory-assign-bar input\[list\] \{[^}]*min-height: 34px/);
   assert.match(styles, /\.hemory-select-all input \{[^}]*width: 16px/);
