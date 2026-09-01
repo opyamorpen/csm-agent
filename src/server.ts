@@ -24,7 +24,7 @@ import { RISK_RULE_VERSION } from './workbench/risk.js';
 import { CaseService, caseNarrativeWarnings } from './workbench/cases.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate, draftEditContract, applyDraftEdits, confirmDraftEditContract, applyConfirmDraftEdits } from './workbench/drafts.js';
 import type { DraftBatch, DraftItem, DraftGenerationJob, DraftItemType, SourceEvent } from './workbench/types.js';
-import { HemorySegmentationService } from './workbench/hemory.js';
+import { HemorySegmentationService, hemorySegmentationFingerprint } from './workbench/hemory.js';
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
 import { WikiService } from './workbench/wiki.js';
 import { readBuildInfo, serviceVersionInfo, startStalenessWatch, type BuildInfo } from './version.js';
@@ -243,14 +243,15 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     return job;
   }
 
-  // 片段消费台账可见性：每片段标注被哪些类型的已写入草稿消费（written 草稿 evidence_refs 反查，按客户一次构建）。
+  // 片段消费台账可见性：每片段标注被哪些类型的已写入草稿消费（written 草稿 evidence_refs 反查，
+  // 跨代际扩展到重切孪生，按客户一次构建）。
   function decorateHemoryFragments(fragments: SourceEvent[]): Array<SourceEvent & { consumedBy?: DraftItemType[] }> {
     const byCustomer = new Map<string, Map<string, DraftItemType[]>>();
     const consumedOf = (customerId: string): Map<string, DraftItemType[]> => {
       let map = byCustomer.get(customerId);
       if (!map) {
         map = new Map();
-        for (const [type, ids] of workbench.db.writtenEvidenceByType(customerId)) {
+        for (const [type, ids] of workbench.db.expandedWrittenEvidenceByType(customerId)) {
           for (const id of ids) {
             const list = map.get(id) ?? [];
             list.push(type);
@@ -266,6 +267,45 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       const consumedBy = consumedOf(fragment.customerId).get(fragment.id);
       return consumedBy?.length ? { ...fragment, consumedBy } : fragment;
     });
+  }
+
+  /**
+   * 存量孪生一次性修复：遍历全部录音，把停用世代的 confirmed/ignored 归属按时间覆盖率继承到
+   * 活跃世代待处理片段（复用 inheritHemoryAttributions）；同时对最近一次 succeeded job 回填
+   * 转写基准 inputMeta（仅当按当前录音 payload 重算的指纹与该 job 指纹一致，证明 job 跑在
+   * 当前转写上）——回填后重切闸门对已处理完的录音立即生效。apply=false 为 dry-run 只报告。
+   */
+  function repairHemoryInheritance(apply: boolean): Array<{
+    recordingId: string; recordingEventId: string; title: string; inherited: Array<{ eventId: string; predecessorId: string; status: string; customerId: string | null; overlapRatio: number }>; metaBackfilled: boolean;
+  }> {
+    const report: Array<{ recordingId: string; recordingEventId: string; title: string; inherited: Array<{ eventId: string; predecessorId: string; status: string; customerId: string | null; overlapRatio: number }>; metaBackfilled: boolean }> = [];
+    for (const recording of workbench.db.listHemoryRawTranscriptRecordings()) {
+      const recordingEventId = recording.id;
+      const pending = workbench.db.listActiveHemoryFragmentsForRecording(recordingEventId)
+        .some((event) => event.attributionStatus === 'unattributed');
+      let metaBackfilled = false;
+      if (apply) {
+        const job = workbench.db.latestEffectiveHemorySegmentationJob(recordingEventId);
+        if (job && job.status === 'succeeded' && !job.inputMeta && job.fingerprint === hemorySegmentationFingerprint(recording)) {
+          const lines = Array.isArray(recording.payload?.lines) ? recording.payload.lines : [];
+          const endedAt = lines.length && typeof (lines.at(-1) as { spokenAt?: unknown })?.spokenAt === 'string'
+            ? String((lines.at(-1) as { spokenAt: string }).spokenAt) : '';
+          workbench.db.updateHemorySegmentationJob(job.id, job.status, { inputMeta: { lines: lines.length, endedAt, version: job.generator ?? '' } });
+          metaBackfilled = true;
+        }
+      }
+      if (!pending) { if (metaBackfilled) report.push({ recordingId: String(recording.payload?.recordingId ?? recording.externalId), recordingEventId, title: recording.title, inherited: [], metaBackfilled }); continue; }
+      const result = workbench.db.inheritHemoryAttributions(recordingEventId, { dryRun: !apply });
+      const inherited = result.applied.map((item) => ({ eventId: item.eventId, predecessorId: item.predecessorId, status: item.status, customerId: item.customerId, overlapRatio: item.overlapRatio }));
+      if (inherited.length || metaBackfilled) {
+        report.push({ recordingId: String(recording.payload?.recordingId ?? recording.externalId), recordingEventId, title: recording.title, inherited, metaBackfilled });
+      }
+    }
+    if (apply && report.length) {
+      workbench.db.audit('csm', 'repair_hemory_inheritance', 'hemory', 'inheritance',
+        { recordings: report.length, inherited: report.reduce((sum, item) => sum + item.inherited.length, 0), metaBackfilled: report.filter((item) => item.metaBackfilled).length });
+    }
+    return report;
   }
 
   function makeAgent(session: Session): AgentSession {
@@ -569,6 +609,15 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         } catch (error) {
           return json(res, 400, { error: (error as Error).message });
         }
+      }
+      // 存量孪生一次性修复：把停用世代的 confirmed/ignored 归属按时间覆盖率继承到活跃世代待处理片段，
+      // 并回填分段 job 的转写基准（inputMeta）。默认 dry-run 只返回逐录音修复计划。
+      if (req.method === 'POST' && path === '/api/hemory/fragments/inherit') {
+        const body = await readBody(req);
+        const apply = body.apply === true;
+        const plan = repairHemoryInheritance(apply);
+        return json(res, 200, { apply, recordings: plan.length, inherited: plan.reduce((sum: number, item) => sum + item.inherited.length, 0),
+          metaBackfilled: plan.reduce((sum: number, item) => sum + (item.metaBackfilled ? 1 : 0), 0), details: plan });
       }
       const syncMatch = path.match(/^\/api\/sync-runs\/([0-9a-f-]+)$/);
       if (req.method === 'GET' && syncMatch) {

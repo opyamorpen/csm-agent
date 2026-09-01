@@ -1115,7 +1115,9 @@ export class HemoryDraftService {
         : events;
       // 消费台账：客户各类型已写入草稿引用过的片段不再被同类型消费（如已写入工单的片段不再重新
       // 提案工单）。计算式推导自 written 草稿，假 written 被修复翻转后消费自动解除。
-      const writtenEvidence = this.db.writtenEvidenceByType(customer.id);
+      // 跨代际扩展：重切孪生（旧片段停用后的同录音时间重叠活跃片段）一并计入已消费，
+      // 否则重切会让同一内容换个片段 ID 被重复提案。
+      const writtenEvidence = this.db.expandedWrittenEvidenceByType(customer.id);
       const consumedTypesByEvent = new Map<string, DraftItemType[]>();
       for (const [type, ids] of writtenEvidence) {
         for (const id of ids) {

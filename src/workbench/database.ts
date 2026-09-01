@@ -18,6 +18,8 @@ import type {
   DraftItemType,
   DraftItemStatus,
   HemoryAttributionOverride,
+  HemoryInheritanceDetail,
+  HemorySegmentationInputMeta,
   HemorySegmentationJob,
   CompletionRate,
   EvidenceInput,
@@ -37,6 +39,38 @@ type Row = Record<string, unknown>;
 
 /** 待归属列表默认保留的上海自然日数量（含今天），超出仅在指定日期或全部状态下可见。 */
 export const HEMORY_PENDING_WINDOW_DAYS = 7;
+
+/**
+ * 重切孪生的时间覆盖率阈值：候选片段覆盖「已处理片段」时长的比例达到该值即视为
+ * 同一内容的重切副本（归属继承与消费台账扩展共用同一口径）。
+ */
+export const HEMORY_INHERIT_OVERLAP_RATIO = 0.6;
+
+/** 片段时间轴（payload.startAt/endAt，ISO 时刻）；缺失或不可解析返回 null。 */
+function hemorySegmentRange(event: SourceEvent): { start: number; end: number } | null {
+  const startAt = event.payload?.startAt;
+  const endAt = event.payload?.endAt;
+  if (typeof startAt !== 'string' || typeof endAt !== 'string') return null;
+  const start = Date.parse(startAt);
+  const end = Date.parse(endAt);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+/**
+ * 候选片段对「已处理片段」的时间覆盖率（重叠毫秒 / 已处理片段时长）：
+ * ≥ HEMORY_INHERIT_OVERLAP_RATIO 视为同一内容的重切孪生。不可计算返回 null；
+ * 已处理片段零时长（单行片段）时退化为起点相同判定。
+ */
+export function hemoryOverlapRatio(candidate: SourceEvent, processed: SourceEvent): number | null {
+  const a = hemorySegmentRange(candidate);
+  const b = hemorySegmentRange(processed);
+  if (!a || !b) return null;
+  const overlap = Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
+  const duration = b.end - b.start;
+  if (duration <= 0) return a.start === b.start ? 1 : 0;
+  return overlap / duration;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -410,6 +444,7 @@ export class WorkbenchDatabase {
         segment_count INTEGER NOT NULL DEFAULT 0,
         generator TEXT,
         error TEXT,
+        input_meta_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -520,6 +555,10 @@ export class WorkbenchDatabase {
     }
     if (!draftJobColumns.some((column) => String(column.name) === 'progress')) {
       this.db.exec('ALTER TABLE draft_generation_jobs ADD COLUMN progress TEXT;');
+    }
+    const segmentationJobColumns = this.db.prepare('PRAGMA table_info(hemory_segmentation_jobs)').all() as Row[];
+    if (!segmentationJobColumns.some((column) => String(column.name) === 'input_meta_json')) {
+      this.db.exec('ALTER TABLE hemory_segmentation_jobs ADD COLUMN input_meta_json TEXT;');
     }
     const caseDraftColumns = this.db.prepare('PRAGMA table_info(case_drafts)').all() as Row[];
     if (!caseDraftColumns.some((column) => String(column.name) === 'fingerprint')) {
@@ -958,11 +997,13 @@ export class WorkbenchDatabase {
   }
 
   private hemorySegmentationJobFromRow(row: Row): HemorySegmentationJob {
+    const inputMeta = parseJson<HemorySegmentationInputMeta | null>(row.input_meta_json, null);
     return {
       id: String(row.id), recordingEventId: String(row.recording_event_id), fingerprint: String(row.fingerprint),
       status: String(row.status) as HemorySegmentationJob['status'], attempts: Number(row.attempts),
       segmentCount: Number(row.segment_count ?? 0), generator: row.generator as string | null,
-      error: row.error as string | null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+      error: row.error as string | null, inputMeta,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     };
   }
 
@@ -981,10 +1022,18 @@ export class WorkbenchDatabase {
       .map((row) => this.hemorySegmentationJobFromRow(row));
   }
 
-  updateHemorySegmentationJob(id: string, status: HemorySegmentationJob['status'], input: { segmentCount?: number; generator?: string; error?: string | null } = {}): HemorySegmentationJob | undefined {
+  /** 该录音最近一次非 skipped 分段 job（succeeded 优先；重切闸门用它取转写基准与现状）。 */
+  latestEffectiveHemorySegmentationJob(recordingEventId: string): HemorySegmentationJob | undefined {
+    const row = this.db.prepare(`SELECT * FROM hemory_segmentation_jobs WHERE recording_event_id=? AND status!='skipped'
+      ORDER BY CASE WHEN status='succeeded' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`).get(recordingEventId) as Row | undefined;
+    return row ? this.hemorySegmentationJobFromRow(row) : undefined;
+  }
+
+  updateHemorySegmentationJob(id: string, status: HemorySegmentationJob['status'], input: { segmentCount?: number; generator?: string; error?: string | null; inputMeta?: HemorySegmentationInputMeta } = {}): HemorySegmentationJob | undefined {
     this.db.prepare(`UPDATE hemory_segmentation_jobs SET status=?,attempts=CASE WHEN ?='running' THEN attempts+1 ELSE attempts END,
-      segment_count=COALESCE(?,segment_count),generator=COALESCE(?,generator),error=?,updated_at=? WHERE id=?`)
-      .run(status, status, input.segmentCount ?? null, input.generator ?? null, input.error ?? null, nowIso(), id);
+      segment_count=COALESCE(?,segment_count),generator=COALESCE(?,generator),error=?,input_meta_json=COALESCE(?,input_meta_json),updated_at=? WHERE id=?`)
+      .run(status, status, input.segmentCount ?? null, input.generator ?? null, input.error ?? null,
+        input.inputMeta ? json(input.inputMeta) : null, nowIso(), id);
     return this.getHemorySegmentationJob(id);
   }
 
@@ -1045,6 +1094,63 @@ export class WorkbenchDatabase {
   listActiveHemoryFragmentsForRecording(recordingEventId: string): SourceEvent[] {
     return (this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id
       WHERE g.recording_event_id=? AND g.active=1 ORDER BY e.occurred_at`).all(recordingEventId) as Row[]).map(sourceEventFromRow);
+  }
+
+  /**
+   * 重切换代后把被取代片段的人工归属按时间覆盖率继承到新片段：每个 unattributed 新片段取
+   * 重叠绝对时长最长的已处理前驱（confirmed/ignored，含归属 override），覆盖率 ≥
+   * HEMORY_INHERIT_OVERLAP_RATIO（以「已处理片段」时长为基准）才继承——低于阈值视为真新内容
+   * 保持待处理。dryRun 只返回计划不落库；继承写 hemory_attributions override（与人工归属
+   * 同路径，actor=agent），confirmed 且客户仍存在时连客户归属一起继承。
+   */
+  inheritHemoryAttributions(recordingEventId: string, options: { dryRun?: boolean; actor?: string } = {}):
+      { applied: HemoryInheritanceDetail[]; } {
+    const actor = options.actor ?? 'agent';
+    const pending = this.listActiveHemoryFragmentsForRecording(recordingEventId)
+      .filter((event) => event.attributionStatus === 'unattributed');
+    if (!pending.length) return { applied: [] };
+    const predecessors = (this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id
+      WHERE g.recording_event_id=? AND g.active=0 AND e.attribution_status IN ('confirmed','ignored')`).all(recordingEventId) as Row[])
+      .map(sourceEventFromRow);
+    if (!predecessors.length) return { applied: [] };
+    const plan: HemoryInheritanceDetail[] = [];
+    for (const candidate of pending) {
+      let best: { predecessor: SourceEvent; ratio: number } | undefined;
+      for (const predecessor of predecessors) {
+        const ratio = hemoryOverlapRatio(candidate, predecessor);
+        if (ratio == null || ratio < HEMORY_INHERIT_OVERLAP_RATIO) continue;
+        if (!best || ratio > best.ratio) best = { predecessor, ratio };
+      }
+      if (!best) continue;
+      const status = best.predecessor.attributionStatus as 'confirmed' | 'ignored';
+      const customerId = status === 'confirmed' ? best.predecessor.customerId ?? null : null;
+      if (customerId && !this.getCustomer(customerId)) continue;
+      plan.push({ eventId: candidate.id, predecessorId: best.predecessor.id, status,
+        customerId, overlapRatio: best.ratio });
+    }
+    if (!plan.length || options.dryRun) return { applied: plan };
+    const now = nowIso();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const item of plan) {
+        const event = this.getSourceEvent(item.eventId)!;
+        const status = item.status;
+        this.db.prepare(`INSERT INTO hemory_attributions(event_id,customer_id,status,actor,payload_hash,attributed_at) VALUES(?,?,?,?,?,?)
+          ON CONFLICT(event_id) DO UPDATE SET customer_id=excluded.customer_id,status=excluded.status,actor=excluded.actor,payload_hash=excluded.payload_hash,attributed_at=excluded.attributed_at`)
+          .run(item.eventId, item.customerId, status, actor, event.payloadHash, now);
+        this.db.prepare('UPDATE source_events SET customer_id=?,attribution_status=?,confidence=? WHERE id=?')
+          .run(item.customerId, status, item.customerId ? 1 : 0, item.eventId);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    for (const item of plan) {
+      this.audit(actor, 'inherit_hemory_attribution', 'source_event', item.eventId,
+        { predecessorId: item.predecessorId, status: item.status, customerId: item.customerId, overlapRatio: Number(item.overlapRatio.toFixed(3)) });
+    }
+    return { applied: plan };
   }
 
   /** 与 listConfirmedHemorySegments 回退语义一致：已登记代际的片段看 active，未登记的历史行视为活跃。 */
@@ -1429,6 +1535,42 @@ export class WorkbenchDatabase {
       let set = consumed.get(type);
       if (!set) { set = new Set<string>(); consumed.set(type, set); }
       for (const eventId of parseJson<string[]>(row.evidence_refs_json, [])) set.add(eventId);
+    }
+    return consumed;
+  }
+
+  /**
+   * 跨代际消费台账：在 writtenEvidenceByType 之上，把被 written 草稿引用的停用（active=0）
+   * 片段的「活跃孪生」并入同类型已消费集合——孪生 = 同录音、时间覆盖率（以旧片段时长为基准）
+   * ≥ HEMORY_INHERIT_OVERLAP_RATIO。重切后新片段 ID 不同，原始台账天然看不见它们；不扩展会
+   * 对同一内容重复提案。纯计算式推导（不改 written 草稿的 evidence_refs，审计完整性），
+   * 假 written 被修复翻转后扩展消费自动解除。
+   */
+  expandedWrittenEvidenceByType(customerId: string): Map<DraftItemType, Set<string>> {
+    const consumed = this.writtenEvidenceByType(customerId);
+    const referenced = [...new Set([...consumed.values()].flatMap((ids) => [...ids]))]
+      .map((id) => this.getSourceEvent(id))
+      .filter((event): event is SourceEvent => !!event && event.sourceSystem === 'hemory' && event.sourceType === 'ai_topic_segment'
+        && !this.isHemoryFragmentActive(event.id));
+    if (!referenced.length) return consumed;
+    const twinsByRecording = new Map<string, SourceEvent[]>();
+    for (const old of referenced) {
+      const rows = this.db.prepare(`SELECT e.* FROM source_events e JOIN hemory_fragment_generations g ON g.event_id=e.id
+        WHERE g.recording_event_id=(SELECT recording_event_id FROM hemory_fragment_generations WHERE event_id=?)
+        AND g.active=1`).all(old.id) as Row[];
+      const active = rows.map(sourceEventFromRow).filter((event) => event.attributionStatus !== 'ignored');
+      if (active.length) twinsByRecording.set(old.id, active);
+    }
+    if (!twinsByRecording.size) return consumed;
+    for (const [type, ids] of consumed) {
+      for (const id of ids) {
+        const twins = twinsByRecording.get(id);
+        if (!twins) continue;
+        for (const twin of twins) {
+          const ratio = hemoryOverlapRatio(twin, this.getSourceEvent(id)!);
+          if (ratio != null && ratio >= HEMORY_INHERIT_OVERLAP_RATIO) ids.add(twin.id);
+        }
+      }
     }
     return consumed;
   }

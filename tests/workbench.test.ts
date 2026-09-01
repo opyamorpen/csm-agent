@@ -520,7 +520,7 @@ test('workbench: Hemory AI segmentation persists topics and suppresses one or tw
     assert.equal(fragments[0].payload?.topicPartIndex, 1);
     assert.equal(fragments[0].payload?.topicPartCount, 1);
     assert.ok(fragments[0].externalId.startsWith('v3.2:'));
-    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    assert.equal(db.listHemoryFragments({ status: 'pending', days: 0 }).length, 1);
     assert.equal((await service.segmentRecording(recording)).length, 1);
     assert.equal(fake.calls(), 2);
     assert.equal(isMeaningfulHemoryFragment(lines.slice(0, 2)), false);
@@ -726,7 +726,7 @@ test('workbench: startup recovery resets interrupted jobs and fails orphaned run
     segments.resumePending();
     for (let i = 0; i < 100 && db.getHemorySegmentationJob(stuck.id)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(db.getHemorySegmentationJob(stuck.id)?.status, 'succeeded');
-    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    assert.equal(db.listHemoryFragments({ status: 'pending', days: 0 }).length, 1);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -751,7 +751,7 @@ test('workbench: targeted resegment resets the poison job and re-segments the re
     const fingerprint = hemorySegmentationFingerprintOf(recording);
     const job = db.listRecentHemorySegmentationJobs().find((item) => item.fingerprint === fingerprint)!;
     assert.equal(job.status, 'succeeded');
-    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    assert.equal(db.listHemoryFragments({ status: 'pending', days: 0 }).length, 1);
     // 手工把成功的 job 打回 attempts=3 + failed（真实毒丸形态），验证定向重切的 reset 生效。
     db.updateHemorySegmentationJob(job.id, 'running');
     db.updateHemorySegmentationJob(job.id, 'running');
@@ -765,7 +765,7 @@ test('workbench: targeted resegment resets the poison job and re-segments the re
     for (let i = 0; i < 100 && db.getSyncRun(run.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(db.getSyncRun(run.id)?.status, 'succeeded');
     assert.equal(db.getHemorySegmentationJob(job.id)?.status, 'succeeded');
-    assert.equal(db.listHemoryFragments({ status: 'pending' }).length, 1);
+    assert.equal(db.listHemoryFragments({ status: 'pending', days: 0 }).length, 1);
     // 库里不存在的录音：run 直接 failed 并给出可读错误。
     const missing = service.resegmentHemoryRecording('recording-not-in-db');
     for (let i = 0; i < 100 && db.getSyncRun(missing.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -2545,7 +2545,7 @@ test('workbench: validation failures retry the stage with the error appended and
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: adjacent same-topic_key segments are defensively merged; v2 ids never inherit v1 attribution', async () => {
+test('workbench: adjacent same-topic_key segments are defensively merged; v2 ids stay independent of v1 rows until a real generation switch', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-v2-version-'));
   const db = new WorkbenchDatabase(dir);
   try {
@@ -2565,16 +2565,246 @@ test('workbench: adjacent same-topic_key segments are defensively merged; v2 ids
     assert.equal(fragments[0].payload?.startIndex, 0);
     assert.equal(fragments[0].payload?.endIndex, 2);
 
-    // 模拟 v1 遗留片段：同边界（不同 ID）携带 confirmed 归属；v2 重切后新片段不继承。
+    // 同边界、不同 ID、未参与当前代际的 v1 遗留行不改变 v2 片段的归属状态：
+    // 继承只发生在真实代际切换（activateHemoryFragments 停用旧行）时，upsert 侧不受影响。
     db.upsertCustomer({ id: 'crm-x', name: '客户X' });
     db.upsertSourceEvent({ customerId: 'crm-x', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
       externalId: `rec-ver:${lines[0].spokenAt}:0:${lines[2].spokenAt}:2`, title: 'v1 片段', occurredAt: lines[0].spokenAt,
       attributionStatus: 'confirmed', payload: { recordingId: 'rec-ver' } });
     db.attributeHemoryFragments([db.findSourceEvent('hemory', 'ai_topic_segment', `rec-ver:${lines[0].spokenAt}:0:${lines[2].spokenAt}:2`)!.id],
       'crm-x', {}, 'csm');
-    // v2 片段的外部 ID 带版本前缀，归属状态不受 v1 override 影响。
     assert.ok(fragments[0].externalId.startsWith('v3.2:rec-ver:'));
     assert.notEqual(fragments[0].attributionStatus, 'confirmed');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 重切换代：归属继承 + 跳过闸门 + 孪生消费台账 ──
+
+// 两轮分段：第一轮 1 段（用户确认归属客户），转写漂移（speaker 名修正）后重切成两段——
+// 第一段与旧段时间重叠、第二段是真新内容；继承只作用于时间重叠片段。
+function inheritanceLines(): Array<{ spokenAt: string; speaker: string; text: string }> {
+  return [
+    { spokenAt: '2026-08-25T05:00:00Z', speaker: '客户', text: '人为效能项目二期功能上不了线，需要给个说法。' },
+    { spokenAt: '2026-08-25T05:00:20Z', speaker: 'CSM', text: '延期原因是接口联调卡住了，本周内给出新的排期。' },
+    { spokenAt: '2026-08-25T05:00:40Z', speaker: '客户', text: '延期结论请同步给张总并更新项目计划。' },
+    { spokenAt: '2026-08-25T05:01:00Z', speaker: '客户', text: '另外 BI 报表的配色方案需要调整，太刺眼了。' },
+    { spokenAt: '2026-08-25T05:01:20Z', speaker: 'CSM', text: '配色我们换成柔和的默认主题，下周发一版预览。' },
+    { spokenAt: '2026-08-25T05:01:40Z', speaker: '客户', text: '预览确认后再全量切换，顺便看下加载速度。' },
+  ];
+}
+
+test('workbench: re-segmentation inherits confirmed and ignored attribution onto overlapping twins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-inherit-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-inh', name: '继承客户' });
+    const lines = [
+      { spokenAt: '2026-08-25T05:00:00Z', speaker: '客户', text: '人为效能项目二期功能上不了线，需要给个说法。' },
+      { spokenAt: '2026-08-25T05:00:20Z', speaker: 'CSM', text: '延期原因是接口联调卡住了，本周内给出新的排期。' },
+      { spokenAt: '2026-08-25T05:00:40Z', speaker: '客户', text: '延期结论请同步给张总并更新项目计划。' },
+      { spokenAt: '2026-08-25T05:01:00Z', speaker: '客户', text: '另外 BI 报表的配色方案需要调整，太刺眼了。' },
+      { spokenAt: '2026-08-25T05:01:20Z', speaker: 'CSM', text: '配色我们换成柔和的默认主题，下周发一版预览。' },
+      { spokenAt: '2026-08-25T05:01:40Z', speaker: '客户', text: '预览确认后再全量切换，顺便看下加载速度。' },
+      { spokenAt: '2026-08-25T05:02:00Z', speaker: '客户', text: '私有云实例的扩容需求这个季度也要落地。' },
+      { spokenAt: '2026-08-25T05:02:20Z', speaker: 'CSM', text: '我先确认当前资源水位和扩容窗口。' },
+      { spokenAt: '2026-08-25T05:02:40Z', speaker: '客户', text: '确认后把扩容计划发给运维负责人。' },
+    ];
+    // 第一轮：全量一段（0-8，05:00:00–05:02:40 共 160s），用户确认归属客户。
+    const firstOutput = { segments: [{ start_index: 0, end_index: 8, topic: '综合沟通', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-inh',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt, payload: { recordingId: 'rec-inh', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([firstOutput, firstOutput]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const old = await service.segmentRecording(recording);
+    assert.equal(old.length, 1);
+    db.attributeHemoryFragments([old[0]!.id], 'crm-inh', {}, 'csm');
+
+    // 转写漂移 + 后补三行（新增行数超容差 2 → 实质增长，闸门放行重切）；新一轮切成两段：
+    // [0] 0-5（05:00:00–05:01:40，100s/160s = 0.625 ≥ 0.6 达标）；
+    // [1] 6-11 尾部新内容对旧片段覆盖率不足：真新内容保持待归属。
+    const drifted = [...lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '张炎' : line.speaker })),
+      { spokenAt: '2026-08-25T05:03:00Z', speaker: '客户', text: '扩容预算走今年的框架合同，不再额外审批。' },
+      { spokenAt: '2026-08-25T05:03:20Z', speaker: 'CSM', text: '预算内我们先出扩容方案初稿。' },
+      { spokenAt: '2026-08-25T05:03:40Z', speaker: '客户', text: '方案初稿下周内部评审后推进。' }];
+    const driftedRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-inh',
+      title: '原始转写', occurredAt: drifted[0]!.spokenAt, payload: { recordingId: 'rec-inh', lines: drifted }, attributionStatus: 'unattributed' });
+    const secondOutput = { segments: [
+      { start_index: 0, end_index: 5, topic: '人为效能项目延期与配色', summary: '延期处理与配色。', subject: '人为效能项目', focus: '二期延期与配色', topic_key: 'delay', include: true },
+      { start_index: 6, end_index: 11, topic: '私有云扩容', summary: '扩容计划与预算。', subject: '私有云实例', focus: '扩容落地', topic_key: 'scale', include: true },
+    ] };
+    const fake2 = fakeSegmentationRuntime([secondOutput, secondOutput]);
+    const service2 = new HemorySegmentationService(db, fake2.runtime);
+    const current = await service2.segmentRecording(driftedRecording);
+    assert.equal(current.length, 2);
+    // 重叠覆盖率达标（0.625 ≥ 0.6）：confirmed 连客户一起继承，不回待归属。
+    assert.equal(current[0]!.attributionStatus, 'confirmed');
+    assert.equal(current[0]!.customerId, 'crm-inh');
+    // 尾部新内容覆盖率 0.25 < 0.6：保持待归属。
+    assert.equal(current[1]!.attributionStatus, 'unattributed');
+    // 待归属列表只剩真新内容；继承不产生收件箱打扰。
+    const pending = db.listHemoryFragments({ status: 'pending', days: 0 });
+    assert.deepEqual(pending.map((item) => item.id), [current[1]!.id]);
+    // 继承走 hemory_attributions override：与人工归属同路径，后续重同步回放保持。
+    const override = db.getHemoryAttribution(current[0]!.id);
+    assert.equal(override?.status, 'confirmed');
+    assert.equal(override?.actor, 'agent');
+    // 继承写入审计。
+    const audits = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='inherit_hemory_attribution'").get() as { n: number };
+    assert.equal(audits.n, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: fully processed recording with cosmetic transcript drift skips re-segmentation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-skip-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-skip', name: '跳过客户' });
+    const lines = inheritanceLines();
+    const single = { segments: [{ start_index: 0, end_index: 5, topic: '综合沟通', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-skip',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt, payload: { recordingId: 'rec-skip', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([single, single]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const first = await service.segmentRecording(recording);
+    assert.equal(first.length, 1);
+    db.attributeHemoryFragments([first[0]!.id], 'crm-skip', {}, 'csm');
+    // 转写仅发生 speaker 名漂移（行数与结束时刻不变）→ 已处理完的录音必须跳过重切。
+    const drifted = lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '张炎' : line.speaker }));
+    const driftedRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-skip',
+      title: '原始转写', occurredAt: drifted[0]!.spokenAt, payload: { recordingId: 'rec-skip', lines: drifted }, attributionStatus: 'unattributed' });
+    // 模型一旦被调用立即失败，证明跳过路径没有打模型。
+    const strict = { models: { complete: async () => { throw new Error('闸门失效：跳过路径不得调用模型'); } },
+      model: {}, llm: { provider: 'strict', model: 'none' } } as any;
+    const strictService = new HemorySegmentationService(db, strict);
+    const result = await strictService.segmentRecordingDetailed(driftedRecording);
+    assert.equal(result.skipped, true);
+    assert.equal(result.events.length, 1);
+    assert.equal(result.events[0]!.attributionStatus, 'confirmed');
+    // job 落 skipped 终态：后续同步按指纹命中即短路。
+    const jobs = db.listRecentHemorySegmentationJobs();
+    assert.ok(jobs.some((job) => job.status === 'skipped' && job.generator === 'skip:fully-processed'));
+    const again = await strictService.segmentRecordingDetailed(driftedRecording);
+    assert.equal(again.skipped, undefined);
+    assert.equal(again.events.length, 1);
+    // 跳过审计存在。
+    const audits = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='skip_hemory_resegment'").get() as { n: number };
+    assert.equal(audits.n, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: pending fragments or transcript growth defeat the skip gate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-skip-gate-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-gate', name: '闸门客户' });
+    const lines = inheritanceLines();
+    const single = { segments: [{ start_index: 0, end_index: 5, topic: '综合沟通', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const grown = [...lines,
+      { spokenAt: '2026-08-25T05:02:00Z', speaker: '客户', text: '回到刚才的延期问题，新的排期确定后要同步项目群。' },
+      { spokenAt: '2026-08-25T05:02:20Z', speaker: 'CSM', text: '排期确定当天我会把更新计划发到群里。' },
+      { spokenAt: '2026-08-25T05:02:40Z', speaker: '客户', text: '好的，延期这块就按这个方式跟进。' }];
+    const grownSingle = { segments: [{ start_index: 0, end_index: 8, topic: '综合沟通（含回访）', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const fake = fakeSegmentationRuntime([single, single, single, single, grownSingle, grownSingle]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-gate',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt, payload: { recordingId: 'rec-gate', lines }, attributionStatus: 'unattributed' });
+    const first = await service.segmentRecording(recording);
+    assert.equal(first.length, 1);
+    db.attributeHemoryFragments([first[0]!.id], 'crm-gate', {}, 'csm');
+
+    // ① 有待处理片段（清除归属）+ 转写漂移（指纹变化但未增长）：闸门因有待处理片段放行重切。
+    db.attributeHemoryFragments([first[0]!.id], null, {}, 'csm');
+    const driftedPending = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-gate',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt,
+      payload: { recordingId: 'rec-gate', lines: lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '张炎' : line.speaker })) }, attributionStatus: 'unattributed' });
+    const stillPending = await service.segmentRecordingDetailed(driftedPending);
+    assert.equal(stillPending.skipped, undefined);
+    assert.equal(stillPending.events[0]!.attributionStatus, 'unattributed');
+
+    // ② 重新确认后再发生实质增长（+3 行、结束时刻后移）：必须重切并继承归属。
+    db.attributeHemoryFragments([stillPending.events[0]!.id], 'crm-gate', {}, 'csm');
+    const grownRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-gate',
+      title: '原始转写', occurredAt: grown[0]!.spokenAt, payload: { recordingId: 'rec-gate', lines: grown }, attributionStatus: 'unattributed' });
+    const regrown = await service.segmentRecordingDetailed(grownRecording);
+    assert.equal(regrown.skipped, undefined);
+    assert.equal(regrown.events.length, 1);
+    assert.equal(regrown.events[0]!.attributionStatus, 'confirmed');
+    assert.equal(regrown.events[0]!.customerId, 'crm-gate');
+    // ③ 已处理完 + 再次漂移（第三种 speaker 名 → 新指纹、未增长）→ 闸门跳过。
+    const driftedAgain = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-gate',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt,
+      payload: { recordingId: 'rec-gate', lines: lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '李炎' : line.speaker })) }, attributionStatus: 'unattributed' });
+    const skipped = await service.segmentRecordingDetailed(driftedAgain);
+    assert.equal(skipped.skipped, true);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: re-segmentation inherits ignored status onto overlapping twins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-inherit-ignored-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    const lines = inheritanceLines();
+    const single = { segments: [{ start_index: 0, end_index: 5, topic: '综合沟通', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-ign',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt, payload: { recordingId: 'rec-ign', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([single, single]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const old = await service.segmentRecording(recording);
+    db.ignoreHemoryFragments([old[0]!.id], {}, 'csm');
+
+    // 转写漂移 + 重切边界一致：ignored 同样按时间重叠继承，不再回待归属骚扰。
+    const drifted = lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '张炎' : line.speaker }));
+    const driftedRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-ign',
+      title: '原始转写', occurredAt: drifted[0]!.spokenAt, payload: { recordingId: 'rec-ign', lines: drifted }, attributionStatus: 'unattributed' });
+    const fake2 = fakeSegmentationRuntime([single, single]);
+    const current = await new HemorySegmentationService(db, fake2.runtime).segmentRecording(driftedRecording);
+    assert.equal(current.length, 1);
+    assert.equal(current[0]!.attributionStatus, 'ignored');
+    assert.equal(current[0]!.customerId, null);
+    assert.equal(db.listHemoryFragments({ status: 'pending', days: 0 }).length, 0);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: expanded consumption ledger blocks duplicate proposals for re-segmented twins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-hemory-twin-consumed-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-twin', name: '孪生客户' });
+    const lines = inheritanceLines();
+    // 第一轮：两段（0-2 / 3-5），用户确认归属客户；写入 followup 草稿消费第一段。
+    const twoParts = { segments: [
+      { start_index: 0, end_index: 2, topic: '人为效能项目延期', summary: '延期处理。', subject: '人为效能项目', focus: '二期延期', topic_key: 'delay', include: true },
+      { start_index: 3, end_index: 5, topic: 'BI 报表配色调整', summary: '配色调整。', subject: 'BI 报表', focus: '配色', topic_key: 'bi-color', include: true },
+    ] };
+    const recording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-twin',
+      title: '原始转写', occurredAt: lines[0]!.spokenAt, payload: { recordingId: 'rec-twin', lines }, attributionStatus: 'unattributed' });
+    const fake = fakeSegmentationRuntime([twoParts, twoParts]);
+    const service = new HemorySegmentationService(db, fake.runtime);
+    const old = await service.segmentRecording(recording);
+    assert.equal(old.length, 2);
+    db.attributeHemoryFragments([old[0]!.id, old[1]!.id], 'crm-twin', {}, 'csm');
+    const batch = db.createDraftBatch({ customerId: 'crm-twin', fingerprint: 'fp-twin-1', sourceEventIds: [old[0]!.id],
+      generationVersion: 'v', generator: 'fake' });
+    db.createDraftItem({ batchId: batch.id, customerId: 'crm-twin', type: 'followup', title: '沟通记录', summary: 's',
+      fields: {}, targetSystem: 'crm', targetObject: '跟进记录', targetTool: 'crm__create', targetArguments: {},
+      evidenceRefs: [old[0]!.id], unknowns: [], validationErrors: [], status: 'written' });
+
+    // 转写漂移 + 后补三行（新增超容差 → 实质增长放行闸门）+ 重切成整段（0-8，边界不同 → 全新孪生行）。
+    const drifted = [...lines.map((line, index) => ({ ...line, speaker: index % 2 === 0 ? '张炎' : line.speaker })),
+      { spokenAt: '2026-08-25T05:02:00Z', speaker: '客户', text: '扩容预算走今年的框架合同，不再额外审批。' },
+      { spokenAt: '2026-08-25T05:02:20Z', speaker: 'CSM', text: '预算内我们先出扩容方案初稿。' },
+      { spokenAt: '2026-08-25T05:02:40Z', speaker: '客户', text: '方案初稿下周内部评审后推进。' }];
+    const driftedRecording = db.upsertSourceEvent({ sourceSystem: 'hemory', sourceType: 'raw_transcript', externalId: 'rec-twin',
+      title: '原始转写', occurredAt: drifted[0]!.spokenAt, payload: { recordingId: 'rec-twin', lines: drifted }, attributionStatus: 'unattributed' });
+    const whole = { segments: [{ start_index: 0, end_index: 8, topic: '综合沟通', summary: '全量一段。', subject: '综合', focus: '综合沟通', topic_key: 'all', include: true }] };
+    const fake2 = fakeSegmentationRuntime([whole, whole]);
+    const current = await new HemorySegmentationService(db, fake2.runtime).segmentRecording(driftedRecording);
+    assert.equal(current.length, 1);
+    assert.notEqual(current[0]!.id, old[0]!.id);
+    // 新孪生完整覆盖被消费旧片段（05:00:00–05:00:40 ⊂ 05:00:00–05:02:00）：归属继承 + 台账扩展双双生效。
+    assert.equal(current[0]!.attributionStatus, 'confirmed');
+    assert.equal(db.writtenEvidenceByType('crm-twin').get('followup')?.has(current[0]!.id), false);
+    assert.equal(db.expandedWrittenEvidenceByType('crm-twin').get('followup')?.has(current[0]!.id), true);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -13,6 +13,10 @@ export const HEMORY_SEGMENTATION_VERSION_PREFIX = 'v3.2';
 export const HEMORY_MIN_FRAGMENT_LINES = 3;
 export const HEMORY_MIN_FRAGMENT_CHARS = 40;
 export const HEMORY_SEGMENTATION_MAX_STAGE_ATTEMPTS = 3;
+/** 重切闸门的转写增长容差：新增行数超过该值视为实质增长（如录音未结束时先同步了前半段）。 */
+export const HEMORY_RESEGMENT_GROWTH_LINE_TOLERANCE = 2;
+/** 重切闸门的结束时刻容差（毫秒）：最后发言时间后移超过该值视为实质增长。 */
+export const HEMORY_RESEGMENT_GROWTH_END_TOLERANCE_MS = 60_000;
 
 interface TranscriptLine {
   spokenAt: string;
@@ -172,6 +176,29 @@ export interface HemorySegmentationResult {
   events: SourceEvent[];
   proposedCount: number;
   includedCount: number;
+  /** 重切被闸门跳过（已处理完且转写未增长）时为 true：events 是现有活跃片段，未调模型。 */
+  skipped?: boolean;
+}
+
+/**
+ * 重切闸门：录音全部片段已处理完（无 unattributed/ambiguous）且转写相对上次成功分段
+ * 未实质增长（新增行数 ≤ 容差 且 结束时刻未后移超容差）时返回 true——此类重切只会产出
+ * 已处理内容的孪生片段，跳过以省模型调用并避免打扰收件箱。转写基准（inputMeta）缺失的
+ * 存量 job 保守视为增长：先带继承重切一次并记录基准，此后闸门才生效。
+ */
+function shouldSkipResegmentation(db: WorkbenchDatabase, recording: SourceEvent, fingerprint: string): boolean {
+  const active = db.listActiveHemoryFragmentsForRecording(recording.id);
+  if (!active.length) return false;
+  if (active.some((event) => event.attributionStatus !== 'confirmed' && event.attributionStatus !== 'ignored')) return false;
+  const baseline = db.latestEffectiveHemorySegmentationJob(recording.id);
+  if (!baseline || baseline.fingerprint === fingerprint || baseline.status !== 'succeeded' || !baseline.inputMeta) return false;
+  const lines = transcriptLines(recording);
+  if (!lines.length) return false;
+  if (lines.length > baseline.inputMeta.lines + HEMORY_RESEGMENT_GROWTH_LINE_TOLERANCE) return false;
+  const endedAt = Date.parse(lines.at(-1)!.spokenAt);
+  const baselineEnd = Date.parse(baseline.inputMeta.endedAt);
+  if (Number.isNaN(endedAt) || Number.isNaN(baselineEnd)) return false;
+  return endedAt <= baselineEnd + HEMORY_RESEGMENT_GROWTH_END_TOLERANCE_MS;
 }
 
 // 相邻且同 topic_key 的片段属于模型未合并的同一事件，代码层防御合并；被其他片段隔开的同 key 片段保留多段。
@@ -203,7 +230,7 @@ export class HemorySegmentationService {
     if (recording.sourceSystem !== 'hemory' || recording.sourceType !== 'raw_transcript') throw new Error('只允许分段 Hemory 原始转写');
     const fingerprint = hemorySegmentationFingerprint(recording);
     const job = this.db.createHemorySegmentationJob(recording.id, fingerprint);
-    if (job.status === 'succeeded') {
+    if (job.status === 'succeeded' || job.status === 'skipped') {
       const events = this.db.listActiveHemoryFragmentsForRecording(recording.id);
       return { events, proposedCount: events.length, includedCount: events.length };
     }
@@ -226,9 +253,20 @@ export class HemorySegmentationService {
   }
 
   private async process(job: HemorySegmentationJob, recording: SourceEvent): Promise<HemorySegmentationResult> {
+    const fingerprint = job.fingerprint;
+    const lines = transcriptLines(recording);
+    const inputMeta = { lines: lines.length, endedAt: lines.at(-1)?.spokenAt ?? '', version: HEMORY_SEGMENTATION_VERSION };
+    // 重切闸门：已处理完且转写未增长的录音跳过重切——新指纹 job 落 skipped 终态，
+    // 后续同步按指纹命中即短路；现有世代与收件箱保持不变。
+    if (lines.length && shouldSkipResegmentation(this.db, recording, fingerprint)) {
+      const events = this.db.listActiveHemoryFragmentsForRecording(recording.id);
+      this.db.updateHemorySegmentationJob(job.id, 'skipped', { generator: 'skip:fully-processed', inputMeta });
+      this.db.audit('agent', 'skip_hemory_resegment', 'source_event', recording.id,
+        { fingerprint, baselineLines: inputMeta.lines, activeFragments: events.length });
+      return { events, proposedCount: events.length, includedCount: events.length, skipped: true };
+    }
     this.db.updateHemorySegmentationJob(job.id, 'running');
     try {
-      const lines = transcriptLines(recording);
       if (!lines.length) throw new Error('Hemory 录音没有可分段的转写行');
       const recordingId = String(recording.payload?.recordingId ?? recording.externalId);
       const proposed = mergeAdjacentSameTopicSegments(await proposeSegments(this.runtime, recordingId, lines));
@@ -266,10 +304,20 @@ export class HemorySegmentationService {
         events.push(event);
       }
       this.db.activateHemoryFragments(recording.id, job.fingerprint, events.map((event) => event.id));
+      // 代际切换后继承被取代片段的人工归属（confirmed 连客户 / ignored）：时间覆盖率匹配，
+      // 低于阈值的新片段保持待处理。继承结果直接进入下方 events/onSegmented 后续链路。
+      const inherited = this.db.inheritHemoryAttributions(recording.id).applied.length;
+      if (inherited) {
+        const confirmed = this.db.listActiveHemoryFragmentsForRecording(recording.id);
+        for (let index = 0; index < events.length; index++) {
+          const refreshed = confirmed.find((event) => event.id === events[index]!.id);
+          if (refreshed) events[index] = refreshed;
+        }
+      }
       const generator = `${this.runtime.llm.provider}/${this.runtime.llm.model}`;
-      this.db.updateHemorySegmentationJob(job.id, 'succeeded', { segmentCount: events.length, generator });
+      this.db.updateHemorySegmentationJob(job.id, 'succeeded', { segmentCount: events.length, generator, inputMeta });
       this.db.audit('agent', 'segment_hemory_recording', 'source_event', recording.id,
-        { fingerprint: job.fingerprint, generator, inputLines: lines.length, includedSegments: events.length, proposedSegments: proposed.length });
+        { fingerprint: job.fingerprint, generator, inputLines: lines.length, includedSegments: events.length, proposedSegments: proposed.length, inheritedAttributions: inherited });
       try { this.onSegmented?.(events); }
       catch (error) { this.db.audit('agent', 'process_hemory_segment_callback_failed', 'source_event', recording.id, { error: (error as Error).message }); }
       return { events, proposedCount: proposed.length, includedCount: events.length };

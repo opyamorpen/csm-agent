@@ -64,7 +64,7 @@ const CLI_CAPABILITIES = [
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
-  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/resegment?recordingId=', '/api/hemory/segmentation-jobs', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate'], notes: 'assign/regenerate --wait 实时打印生成进度（阶段/模型输出字数/重试提示）' },
+  { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/resegment?recordingId=', '/api/hemory/segmentation-jobs', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate', '/api/hemory/fragments/inherit'], notes: 'assign/regenerate --wait 实时打印生成进度（阶段/模型输出字数/重试提示）；repair 修复重切孪生的归属继承（重切后已处理内容不再重回收件箱）' },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory', '/api/draft-jobs?status=active&kind=hemory'], notes: 'draft jobs --active 列出进行中任务（含进度与中断标注）' },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-items/:id (PATCH edits 结构化编辑)', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
@@ -174,6 +174,9 @@ function help(): void {
     （按天强制重生成：片段决定要重建的「客户+上海日」，各天全部已确认片段参与，
      当天旧草稿作废；--wait 轮询生成任务到终态。已写入草稿消费过的片段不再被
      同类型重复提案——全部消费时任务以备注收尾，不产出新草稿）
+  csm-agent hemory repair [--apply]
+    （存量孪生一次性修复：把重切前旧片段的人工归属/忽略按时间覆盖继承到当前待处理
+     孪生片段，并回填转写基准让已处理完的录音跳过后续重切；默认 dry-run 只报告）
   csm-agent drafts [客户ID或名称] [--archived|--all] [--json]
     （默认只列待处理批次；--archived 只看纯已忽略/已作废批次，
      与 Web 草稿箱双 tab 一致；--all 含已写入的全量诊断视图；
@@ -839,11 +842,13 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     return;
   }
   if (subcommand === 'jobs') {
-    // 分段任务只读视图：排查「录音卡在最大重试」时看 attempts/status/error。
+    // 分段任务只读视图：排查「录音卡在最大重试」时看 attempts/status/error；skipped=已处理完且转写未增长被闸门跳过。
     const body = await request<any>('/api/hemory/segmentation-jobs');
     if (jsonOutput) return print(body.jobs);
+    const statusLabel: Record<string, string> = { pending: '待处理', running: '进行中', succeeded: '成功', failed: '失败', skipped: '已跳过' };
     console.table((body.jobs ?? []).map((job: any) => ({ id: job.id.slice(0, 8), recordingEvent: job.recordingEventId.slice(0, 8),
-      status: job.status, attempts: job.attempts, segments: job.segmentCount, error: String(job.error ?? '').slice(0, 60), updatedAt: job.updatedAt })));
+      status: statusLabel[job.status] ?? job.status, attempts: job.attempts, segments: job.segmentCount,
+      generator: job.generator ?? '', error: String(job.error ?? '').slice(0, 60), updatedAt: job.updatedAt })));
     return;
   }
   if (subcommand === 'inbox') {
@@ -902,6 +907,23 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     }
     return print(result);
   }
+  if (subcommand === 'repair') {
+    // 存量孪生一次性修复：默认 dry-run 报告将继承的归属清单；--apply 执行继承并回填转写基准。
+    const apply = values.includes('--apply');
+    const result = await request<any>('/api/hemory/fragments/inherit', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apply }) });
+    if (jsonOutput) return print(result);
+    console.log(apply ? `已修复 ${result.recordings} 个录音，继承归属 ${result.inherited} 条，回填转写基准 ${result.metaBackfilled} 个。`
+      : `dry-run：${result.recordings} 个录音待修复（--apply 执行）。`);
+    for (const item of result.details ?? []) {
+      console.log(`\n录音 ${item.recordingId}（${item.title}）${item.metaBackfilled ? ' ＋回填转写基准' : ''}`);
+      for (const entry of item.inherited ?? []) {
+        const customer = entry.customerId ? ` → 客户 ${entry.customerId}` : '';
+        console.log(`  ${entry.eventId} 继承 ${entry.status}${customer}（前驱 ${entry.predecessorId}，覆盖率 ${(Number(entry.overlapRatio) * 100).toFixed(0)}%）`);
+      }
+    }
+    return;
+  }
   if (subcommand === 'assign' || subcommand === 'clear' || subcommand === 'ignore') {
     const wait = values.includes('--wait');
     // 第一个非选项参数是客户 ID/名称（assign），其余非选项参数是片段 ID；--wait/--json 不参与。
@@ -927,7 +949,7 @@ async function hemoryCommand(subcommand: string, values: string[]): Promise<void
     }
     return print(result);
   }
-  throw new Error('hemory 子命令只允许 sync/resegment/jobs/inbox/assign/clear/ignore/regenerate');
+  throw new Error('hemory 子命令只允许 sync/resegment/jobs/inbox/assign/clear/ignore/regenerate/repair');
 }
 
 // 草稿确认视图：与 Web 卡片共用服务端 displayFields，按最小必填项逐行结构化输出。

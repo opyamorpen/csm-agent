@@ -4,7 +4,7 @@ export type AttributionStatus = 'confirmed' | 'ambiguous' | 'unattributed' | 'ig
 export type DraftItemType = 'internal_todo' | 'workhour' | 'followup' | 'suggestion' | 'ticket' | 'operations';
 export type DraftItemStatus = 'draft' | 'ready' | 'writing' | 'written' | 'failed' | 'dismissed' | 'stale';
 export type DraftGenerationStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'superseded';
-export type HemorySegmentationStatus = 'pending' | 'running' | 'succeeded' | 'failed';
+export type HemorySegmentationStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
 
 export interface CustomerInput {
   id: string;
@@ -360,6 +360,13 @@ export interface WeeklyReport {
   updatedAt: string;
 }
 
+/** 分段任务成功/跳过时记录的转写输入基准：重切闸门用它判定转写是否实质增长。 */
+export interface HemorySegmentationInputMeta {
+  lines: number;
+  endedAt: string;
+  version: string;
+}
+
 export interface HemorySegmentationJob {
   id: string;
   recordingEventId: string;
@@ -369,8 +376,18 @@ export interface HemorySegmentationJob {
   segmentCount: number;
   generator?: string | null;
   error?: string | null;
+  inputMeta?: HemorySegmentationInputMeta | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 重切换代的归属继承计划条目：新片段按时间覆盖率匹配到有人工决定的前驱片段。 */
+export interface HemoryInheritanceDetail {
+  eventId: string;
+  predecessorId: string;
+  status: 'confirmed' | 'ignored';
+  customerId: string | null;
+  overlapRatio: number;
 }
 
 export interface SyncRun {

@@ -342,9 +342,9 @@ test('fragment consumption ledger is visible across CLI and API contracts', () =
   // 生成任务备注：regenerate --wait / draft jobs 展示「未生成新草稿」结论，与失败错误、中断标注并列输出。
   assert.match(cli, /job\.status !== 'failed' && !job\.stalled && job\.note/);
   assert.match(cli, /备注：\$\{job\.note\}/);
-  // 服务端同一契约：fragments 响应附 consumedBy（written 草稿 evidence_refs 反查）。
+  // 服务端同一契约：fragments 响应附 consumedBy（written 草稿 evidence_refs 反查 + 重切孪生扩展）。
   assert.match(server, /decorateHemoryFragments\(fragments\)/);
-  assert.match(server, /writtenEvidenceByType\(customerId\)/);
+  assert.match(server, /expandedWrittenEvidenceByType\(customerId\)/);
   // usage 说明消费语义。
   assert.match(cli, /已写入草稿消费过的片段不再被[\s\S]*?同类型重复提案/);
 });
