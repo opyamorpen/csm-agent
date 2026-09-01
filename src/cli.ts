@@ -137,7 +137,7 @@ function help(): void {
     （生成时自动联网检索客户公开信息：项目管理/需求管理/知识管理/招投标/中标采购；
      --wait 轮询任务到终态并实时打印生成进度）
   csm-agent case show <草稿ID> [--json]
-    （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源）；--json 输出含 claim_evidence/context_snapshot/unknowns 的完整审核对象）
+    （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
     （只更新 title 与 fields 中的五段公开正文；客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
@@ -443,10 +443,14 @@ function printCaseDraft(draft: any, markdown = '', coverage?: any): void {
   // claim_evidence/context_snapshot/unknowns 等内部字段不进默认输出，--json 保留完整结构化数据供审核与审计。
   if (coverage) {
     // v6：ONES 明细剔除后覆盖度只衡量价值/痛点信号与权威公开资料（存量草稿仍带 delivered 字段时兼容展示）。
-    const { valueSignals, painSignals, enriched, delivered } = coverage;
+    const { valueSignals, painSignals, enriched, delivered, fallbackCited } = coverage;
     const deliveredPart = delivered ? ` · 交付记录 ${delivered.cited}/${delivered.total}` : '';
-    console.log(`素材覆盖率：价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${deliveredPart}${enriched ? ' · 已自动补充完善' : ''}`);
+    const fallbackPart = fallbackCited ? ` · 兜底引用片段 ${fallbackCited}` : '';
+    console.log(`素材覆盖率：价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${deliveredPart}${fallbackPart}${enriched ? ' · 已自动补充完善' : ''}`);
   }
+  // v7 配图：Markdown 以图注占位（图形本体在工作台详情渲染），CLI 列出图注供审核。
+  const figures = Array.isArray(draft?.fields?.figures) ? draft.fields.figures : [];
+  if (figures.length) console.log(`配图 ${figures.length} 张：${figures.map((figure: any) => figure.caption || figure.kind).join('；')}`);
   if (markdown) console.log(`\n${markdown}`);
   console.log(`\n（完整内部证据：csm-agent case show ${draft.id} --json）`);
 }

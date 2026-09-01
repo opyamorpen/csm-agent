@@ -11,7 +11,7 @@ import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 
-export const CASE_GENERATION_VERSION = 'case-v6-no-ones-records';
+export const CASE_GENERATION_VERSION = 'case-v7-figures';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /** 案例五段叙事的字段契约（templates/case.json 同源描述，供前端/CLI 展示）。 */
@@ -35,6 +35,28 @@ export interface CaseClaimEvidence {
   speaker_role?: CaseSpeakerRole;
   status_category?: string;
   confidence?: number;
+}
+
+/** 配图类型：痛点/需求章的流程现状与目标流程、方案章的方案架构（客户一段话描述流程的场景成图）。 */
+export type CaseFigureKind = 'flow_current' | 'flow_target' | 'architecture';
+
+/** 落库配图（图级证据：整图挂 source_refs，不逐节点定位；svg 为服务端消毒后的产物）。 */
+export interface CaseFigure {
+  id: string;
+  section: CaseSectionKey;
+  kind: CaseFigureKind;
+  svg: string;
+  caption: string;
+  source_refs: string[];
+  note?: string;
+}
+
+/** 规划阶段的配图骨架（idea 描述画什么，svg 由后续逐图生成调用产出）。 */
+interface PlanFigure {
+  section: CaseSectionKey;
+  kind: CaseFigureKind;
+  idea: string;
+  source_refs: string[];
 }
 
 export interface CaseEvidenceSnapshotItem {
@@ -99,8 +121,15 @@ const CASE_ITEM_MAX_CHARS = 500;
  * （真实验收教训：deepseek 对大素材客户在思考中做全文分析，8k/16k 均被思考吃掉后 plan JSON
  * 截断成 stopReason=length——3 连败实测思考可达 12k+，须给足思考余量）。 */
 export const PLAN_MAX_TOKENS = 32_768;
+/** 案例生成各阶段模型调用重试退避（默认 5s/15s/45s；测试可调 baseMs 加速，与 drafts 同款）。 */
+export const caseModelRetryDelays = { baseMs: 5_000 };
 /** 单个章节生成时 completion 上限：章节正文 400~800 字中文 + 推理思考余量。 */
 const CHAPTER_MAX_TOKENS = 8_192;
+/** 单张配图生成时 completion 上限：SVG 标记 + 中文标签 + 推理模型思考余量
+ * （真实验收教训：敏锐达素材下图生成 3 连败 stopReason=length——8k 被思考吃光，思考+SVG 须 16k）。 */
+const FIGURE_MAX_TOKENS = 16_384;
+/** 配图 SVG 尺寸上限（字符）：模型偶发整段正文塞进图注/图形文本时的硬闸。 */
+const FIGURE_SVG_MAX_CHARS = 65_536;
 /** 输入上下文 token 预算：按「中文 1 字符 ≈ 0.6 token、ASCII 4 字符 ≈ 1 token」估算。 */
 const INPUT_BUDGET_TOKENS = 96_000;
 /** 摘要降级单次调用输出上限。 */
@@ -123,10 +152,11 @@ interface PlanItem {
   status_category?: string;
   confidence?: number;
 }
-/** 规划阶段的完整产物：五个章节各自的要点与证据骨架。 */
+/** 规划阶段的完整产物：五个章节各自的要点与证据骨架，以及可选的配图骨架。 */
 interface CasePlan {
   title?: string;
   plan: Array<{ section: CaseSectionKey; items: PlanItem[] }>;
+  figures?: PlanFigure[];
   unknowns?: string[];
 }
 
@@ -464,6 +494,7 @@ export function caseSectionTexts(fields: Record<string, unknown>): CaseNarrative
  */
 export function renderCaseMarkdown(draft: CaseDraft): string {
   const texts = caseSectionTexts(draft.fields);
+  const figures = caseFiguresOf(draft.fields);
   const bodies: Record<keyof CaseNarrativeFields, string> = {
     background: texts.background,
     challenges: texts.challenges.map((item, index) => `${index + 1}. ${item}`).join('\n'),
@@ -473,7 +504,12 @@ export function renderCaseMarkdown(draft: CaseDraft): string {
   };
   return [
     `# ${draft.title}\n`,
-    ...CASE_SECTIONS.map((section, index) => `## ${CASE_SECTION_NUMBERS[index]}、${section.label}\n\n${bodies[section.key]}\n`),
+    // 配图以引用块占位（Markdown 消费方大多不渲染内联 SVG），图形本体在工作台详情展示。
+    ...CASE_SECTIONS.map((section, index) => {
+      const figureNotes = figures.filter((figure) => figure.section === section.key)
+        .map((figure) => `> 图：${figure.caption.replace(/\s+/g, ' ').trim()}（图示详见工作台）`);
+      return `## ${CASE_SECTION_NUMBERS[index]}、${section.label}\n\n${bodies[section.key]}${figureNotes.length ? `\n${figureNotes.join('\n')}` : ''}\n`;
+    }),
   ].join('\n');
 }
 
@@ -1084,10 +1120,98 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
   }
   const unknowns = Array.isArray(raw.unknowns) ? raw.unknowns.map(String).map((item) => item.trim()).filter(Boolean) : [];
   const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : undefined;
-  return { title, plan, unknowns };
+  // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 3 张。
+  const figures: PlanFigure[] = [];
+  if (Array.isArray(raw.figures)) {
+    for (const entry of raw.figures) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || figures.length >= 3) continue;
+      const row = entry as Record<string, unknown>;
+      const section = String(row.section ?? '') as CaseSectionKey;
+      const kind = String(row.kind ?? '') as CaseFigureKind;
+      const idea = typeof row.idea === 'string' ? row.idea.trim() : '';
+      const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).map((ref) => ref.trim()).filter(Boolean) : [];
+      const sectionAllowed = section === 'challenges' || section === 'requirements' || section === 'solution';
+      if (!sectionAllowed || !['flow_current', 'flow_target', 'architecture'].includes(kind) || !idea || !refs.length) continue;
+      if (refs.some((ref) => !allowedRefs.has(ref))) continue;
+      if (figures.some((figure) => figure.kind === kind)) continue;
+      figures.push({ section, kind, idea, source_refs: refs });
+    }
+  }
+  return { title, plan, figures: figures.length ? figures : undefined, unknowns };
 }
 
-/** 章节产物校验：单段章节要求非空 text；列表章节要求非空 texts 且无占位词。 */
+/** SVG 标签白名单：只保留静态绘制元素——script/foreignObject/动画/引用外部资源的元素一律不在名单内。 */
+const FIGURE_SVG_TAG_ALLOWLIST = new Set(['svg', 'g', 'defs', 'marker', 'linearGradient', 'radialGradient', 'stop',
+  'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'path', 'text', 'tspan']);
+/** SVG 属性白名单：布局/绘制/文本属性。style（可藏 url()/expression）、href/xlink:href、on* 事件等一律剥离。 */
+const FIGURE_SVG_ATTR_ALLOWLIST = new Set(['xmlns', 'id', 'class', 'viewBox', 'preserveAspectRatio',
+  'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height',
+  'transform', 'd', 'points', 'opacity', 'fill', 'fill-opacity', 'fill-rule',
+  'stroke', 'stroke-width', 'stroke-opacity', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset',
+  'font-size', 'font-weight', 'font-family', 'font-style', 'text-anchor', 'dominant-baseline',
+  'markerWidth', 'markerHeight', 'markerEnd', 'markerStart', 'refX', 'refY', 'orient', 'markerUnits',
+  'gradientUnits', 'offset', 'stop-color', 'stop-opacity']);
+
+/**
+ * 配图 SVG 消毒与校验（服务端权威；落库前执行，编辑/精修路径无法覆写 figures）。
+ * 返回消毒后的 SVG 字符串；任何结构问题返回 null（调用方丢弃该图，不阻断五段正文）。
+ * 无 XML parser 可用，采用「白名单标签 + 白名单属性 + 危险结构拒绝」的正则消毒：
+ * 名单外标签/DOCTYPE/ENTITY/非 svg 根直接拒绝，名单外属性逐个剥离。
+ */
+export function sanitizeCaseSvg(raw: string): string | null {
+  const svg = raw.trim();
+  if (!svg.startsWith('<svg') || !svg.endsWith('</svg>')) return null;
+  if (svg.length > FIGURE_SVG_MAX_CHARS) return null;
+  if (/<!DOCTYPE|<!ENTITY|<!\[CDATA\[|<\?xml-stylesheet/i.test(svg)) return null;
+  // 根元素须声明 viewBox（前端按 viewBox 自适应缩放，缺失视为结构不合格）。
+  const opening = svg.slice(0, svg.indexOf('>') + 1);
+  if (!/\sviewBox\s*=\s*["'][^"']*["']/.test(opening)) return null;
+  // 标签白名单：开/闭标签一并检查（闭标签无属性）。
+  const tags = [...svg.matchAll(/<\/?([a-zA-Z][\w:-]*)/g)].map((match) => match[1].toLowerCase());
+  if (!tags.length || tags.some((tag) => !FIGURE_SVG_TAG_ALLOWLIST.has(tag))) return null;
+  // 文本内容过正文禁区词（联系人/金额/内部系统名等不得出现在图内）。
+  const textContent = [...svg.matchAll(/>([^<>]+)</g)].map((match) => match[1]).join(' ');
+  if (CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(decodeXmlEntities(textContent)))) return null;
+  // 属性白名单：名单外属性逐个剥离（含 on* 事件、style、href/xlink:href、data: URI）。
+  // SVG 实际属性用 kebab-case（marker-end/stroke-width），白名单按 camelCase 维护，比较前先归一化。
+  const camelAttr = (name: string) => name.replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+  return svg.replace(/<([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g, (whole, tag: string, attrs: string) => {
+    if (!FIGURE_SVG_TAG_ALLOWLIST.has(tag.toLowerCase())) return whole; // 白名单已在上一步整图拒绝，这里保持原样
+    const kept = attrs.replace(/([a-zA-Z_][\w:.-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/g, (attrWhole, name: string) =>
+      FIGURE_SVG_ATTR_ALLOWLIST.has(name) || FIGURE_SVG_ATTR_ALLOWLIST.has(camelAttr(name))
+        ? attrWhole : '');
+    return `<${tag}${kept.replace(/\s+/g, ' ').replace(/\s+>/g, '>')}>`;
+  });
+}
+
+/** SVG 文本实体解码（禁区词检查用，防实体编码绕过）。 */
+function decodeXmlEntities(text: string): string {
+  return text.replace(/&(?:amp|lt|gt|quot|apos|#\d+|#x[\da-fA-F]+);/g, (entity) => {
+    const named: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" };
+    if (named[entity]) return named[entity];
+    const code = entity.startsWith('&#x') ? parseInt(entity.slice(3, -1), 16) : parseInt(entity.slice(2, -1), 10);
+    return Number.isFinite(code) && code > 0 && code < 0x110000 ? String.fromCodePoint(code) : '';
+  });
+}
+
+/** 配图（图级证据）读取：存量草稿无 figures 字段按空数组兼容；元素结构非法的逐项剔除。 */
+export function caseFiguresOf(fields: Record<string, unknown> | undefined): CaseFigure[] {
+  if (!Array.isArray(fields?.figures)) return [];
+  return fields!.figures.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const section = String(row.section ?? '') as CaseSectionKey;
+    const kind = String(row.kind ?? '') as CaseFigureKind;
+    const svg = typeof row.svg === 'string' ? row.svg : '';
+    const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).filter(Boolean) : [];
+    if (!CASE_SECTIONS.some((entry) => entry.key === section) || !['flow_current', 'flow_target', 'architecture'].includes(kind)
+      || !svg || !refs.length) return [];
+    return [{ id: String(row.id ?? ''), section, kind, svg, caption: String(row.caption ?? '').trim(), source_refs: refs,
+      note: typeof row.note === 'string' ? row.note : undefined }];
+  });
+}
+
+
 function parseChapterContent(section: CaseSectionKey, value: unknown): string[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`模型未返回「${CASE_SECTIONS.find((item) => item.key === section)!.label}」章节 JSON`);
   const raw = value as Record<string, unknown>;
@@ -1108,20 +1232,22 @@ function parseChapterContent(section: CaseSectionKey, value: unknown): string[] 
 async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, contextText: string,
   communications: CaseCommunicationSource[], onProgress?: (text: string) => void): Promise<CasePlan> {
   const prompt = `为客户「${input.customer.name}」规划客户成功案例草稿的章节结构。这份案例经 CSM 审核后用于对外展示。你只做规划不写正文，只输出 JSON：\n`
-    + `{"title":"...","plan":[{"section":"background|challenges|requirements|solution|value","items":[{"idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"unknowns":["..."]}\n`
+    + `{"title":"...","plan":[{"section":"background|challenges|requirements|solution|value","items":[{"idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"figures":[{"section":"challenges|requirements|solution","kind":"flow_current|flow_target|architecture","idea":"这张图画什么","source_refs":["..."]}],"unknowns":["..."]}\n`
     + `规划规则：\n`
     + `- 先在思考中通读素材再输出：思考从简（只做章节路由与证据挑选判断），plan JSON 是唯一交付物。\n`
     + `- 五个章节都必须有条目：background 1 条、solution 2~5 条（每条一个方案级举措）、challenges 3~6 条、requirements 2~6 条、value 2~6 条；素材不足时宁少勿注水，没有把握写入的素材收进 unknowns。\n`
     + `- 每个条目的 idea 是「这一条要写什么」的要点描述（40 字以内，如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
     + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
+    + `- 配图（figures，可选）：当沟通素材中有客户用一段话描述的流程（现状流程/期望流程）或可归纳的方案架构时规划配图——flow_current=现状流程（痛点/需求章）、flow_target=目标流程（痛点/需求章）、architecture=方案架构（方案章）；至多 3 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；无合适素材就返回空数组，宁缺毋滥。\n`
     + `- 章节路由：背景取档案/早期记录/权威公开信息；痛点必须是合作前或当前问题；需求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值必须来自客户说话人或可复核指标且发生在方案落地之后。\n`
+    + `- 信号表兜底：pain_point_signals/value_signals 是关键词预扫描的线索而非全集——若在 communications 片段原文中发现未被收录、但确属客户痛点或方案落地后价值反馈的表述，可直接引用该片段（source_ref 取片段 id）建条目，不受信号表限制，摘录从片段原文逐字截取。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
     + `- 交付统计（delivery_stats）可被 background/solution/value 条目引用（source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其 facts 原文）；只可作事实陈述，不得自行计算百分比。\n`
     + `- unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」。\n`
     + `${onesAsrAliasRule()}该订正适用于全部正文与摘录。\n`
     + `上下文：${contextText}`;
   const MAX_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
   let lastError = '模型未返回可解析的案例规划 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
@@ -1160,7 +1286,8 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
  * 每章 3 次指数退避重试；单章失败抛错由调用方判任务失败（已完成的章节不重复消耗）。
  */
 async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, plan: CasePlan,
-  section: CaseSectionKey, contextText: string, onProgress?: (text: string) => void): Promise<string[]> {
+  section: CaseSectionKey, contextText: string, priorChapters: Array<{ label: string; text: string }>,
+  onProgress?: (text: string) => void): Promise<string[]> {
   const definition = CASE_SECTIONS.find((item) => item.key === section)!;
   const sectionPlan = plan.plan.find((entry) => entry.section === section)!;
   const isSingle = section === 'background' || section === 'solution';
@@ -1168,6 +1295,9 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
   const prompt = `为客户「${input.customer.name}」的客户成功案例撰写「${definition.label}」章节正文（案例叙事路径「背景 → 痛点/现状/挑战 → 需求/要求 → 解决方案 → 价值」中的${definition.description}）。只写这一个章节，只输出 JSON：\n`
     + (isSingle ? `{"text":"..."}（text 为本章正文，一段连贯叙述）\n` : `{"texts":["...","..."]}（texts 为本章条目数组，顺序与下面的写作要点一一对应）\n`)
     + `写作要点（来自已确认的章节规划，每条已有绑定证据，按顺序逐条撰写正文）：\n${chapterBriefs}\n`
+    + (priorChapters.length
+      ? `此前章节已定稿正文（新章节不得重复其已表述的具体内容——背景信息只在背景章展开、同一问题不在痛点与需求两章写两遍；专有名词、产品模块名、客户称谓必须与前章用词保持一致）：\n${priorChapters.map((chapter) => `【${chapter.label}】${chapter.text}`).join('\n\n')}\n`
+      : '')
     + `写作要求：\n`
     + `- 客户叙事视角：客户是主角；多个系统中同一件事合并为一条叙述，禁止流水账。\n`
     + `- 只写有证据的事实：正文内容须与写作要点及其证据一致，不得虚构数字/引语/ROI；没有量化证据时只写有证据支持的定性表述。\n`
@@ -1181,7 +1311,7 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
     + `${onesAsrAliasRule()}该订正适用于全部正文。\n`
     + `上下文：${contextText}`;
   const MAX_ATTEMPTS = 3;
-  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
   let lastError = `模型未返回「${definition.label}」章节 JSON`;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
@@ -1217,6 +1347,75 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
     }
   }
   throw new Error(lastError);
+}
+
+/**
+ * 配图类型说明（逐图生成 prompt 注入）：图内容的事实边界由素材原文约束，画法只约束形态不约束事实。
+ */
+const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
+  flow_current: '流程现状图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
+  flow_target: '目标流程图：客户期望达成的目标流程——方案落地后的目标流转，步骤框 + 箭头，体现统一平台/自动化环节替代人工与断点',
+  architecture: '方案架构图：交付方案的分层结构——接入层/平台模块/集成关系的框线图，模块名与连接关系须有素材依据，不虚构未交付组件',
+};
+
+/**
+ * 配图生成模型调用（五章完成后逐图执行）：输入 = 关联来源完整原文 + 该章定稿正文 + 画法规范，
+ * 输出 {"svg","caption"}。消毒失败重试，全部失败返回 null——配图是可选增强，绝不阻断五段正文。
+ */
+async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
+  figure: PlanFigure, communications: CaseCommunicationSource[], chapterText: string,
+  onProgress?: (text: string) => void): Promise<CaseFigure | null> {
+  const sectionLabel = CASE_SECTIONS.find((item) => item.key === figure.section)!.label;
+  // 关联来源的完整原文：hemory 片段取全量转写（流程描述常在片段中后段），其余来源取目录 title+excerpt。
+  const sourceMap = new Map(snapshot.sources.map((item) => [item.id, item]));
+  const materials = figure.source_refs.flatMap((ref) => {
+    const fragment = communications.find((item) => item.id === ref);
+    if (fragment) return [`[${ref}] ${fragment.summary}\n${fragment.transcript}`.trim()];
+    const source = sourceMap.get(ref);
+    return source ? [`[${ref}] ${source.title}\n${source.excerpt}`] : [];
+  });
+  if (!materials.length) return null; // 规划引用的来源已不可解析（如降级摘要后），直接放弃该图
+  const prompt = `为客户「${input.customer.name}」的客户成功案例绘制「${sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[figure.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。只输出 JSON：{"svg":"...","caption":"..."}\n`
+    + `绘图规范：\n`
+    + `- svg 是一个自包含的 <svg>…</svg> 字符串（不引用外部资源、不含脚本与交互属性），画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）。\n`
+    + `- 节点用 <rect> 圆角框 + <text> 中文标签（font-size 不小于 12；每行不超过 10 个汉字，长标签用 <tspan> 拆行且每个 tspan 必须带递增 dy（如 dy="18"，首个可不带），否则多行文字会叠在一起）；连线用 <line> 或 <path> 并以 marker 箭头指向流转方向；整体横向布局，节点不重叠、连线不穿越文字。\n`
+    + `- 配色克制：浅色填充 + 深色描边 + 深色文字；只使用纯 SVG 绘制元素，不使用 <image>、外链或 CSS 样式表。\n`
+    + `- 图内文字与正文禁区相同：不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）、其他客户信息；caption 是 30 字以内的图注（如「客户现状：三套系统并行、人工汇总对齐」）。\n`
+    + `- 本图要表达的内容（来自章节规划）：${figure.idea}\n`
+    + `- 该章节定稿正文（图内容须与正文口径一致）：${chapterText}\n`
+    + `- 支撑素材原文（图内容的事实依据，图中的环节/模块/角色/数字必须能在这里找到）：\n${materials.join('\n\n')}`;
+  const MAX_ATTEMPTS = 3;
+  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
+  let lastError = '配图生成未返回可解析 JSON';
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await completeModelWithProgress(runtime, {
+      systemPrompt: CASE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: FIGURE_MAX_TOKENS, timeoutMs: 180_000 });
+    if (response.stopReason === 'error') {
+      lastError = `配图模型调用失败（第 ${attempt}/${MAX_ATTEMPTS} 次）: ${response.errorMessage || '未知错误'}`;
+      if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      continue;
+    }
+    const value = cleanJson(extractText(response.content));
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
+      const caption = typeof record.caption === 'string' ? record.caption.trim().slice(0, 60) : '';
+      const svg = sanitizeCaseSvg(rawSvg);
+      if (svg && caption && !CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(caption))) {
+        return { id: `figure:${hash(`${figure.kind}:${figure.source_refs.join(',')}`).slice(0, 24)}`, section: figure.section,
+          kind: figure.kind, svg, caption, source_refs: figure.source_refs, note: figure.idea };
+      }
+      lastError = `配图 SVG 消毒或图注校验未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+    } else {
+      lastError = `配图未返回可解析 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
+    }
+    if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+  onProgress?.(`${lastError}，丢弃该配图（不影响正文）`);
+  return null;
 }
 
 /**
@@ -1263,15 +1462,27 @@ function assembleCase(plan: CasePlan, chapters: Map<CaseSectionKey, string[]>): 
  * 返回 inputSummary 供 process 落 fields.input_summary（降级/摘要轨迹）。
  */
 async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
-  onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; inputSummary: Record<string, unknown> | null }> {
+  onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; figures: CaseFigure[]; inputSummary: Record<string, unknown> | null }> {
   const communications = caseCommunicationSources(input);
   const { contextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, onProgress);
   onProgress?.('规划章节结构…');
   const plan = await planCaseWithModel(runtime, input, snapshot, contextText, communications, onProgress);
   const chapters = new Map<CaseSectionKey, string[]>();
+  const priorChapters: Array<{ label: string; text: string }> = [];
   for (const [index, section] of CASE_SECTIONS.entries()) {
     onProgress?.(`第 ${index + 1}/${CASE_SECTIONS.length} 章「${section.label}」撰写中…`);
-    chapters.set(section.key, await generateChapterWithModel(runtime, input, snapshot, plan, section.key, contextText, onProgress));
+    const texts = await generateChapterWithModel(runtime, input, snapshot, plan, section.key, contextText, priorChapters, onProgress);
+    chapters.set(section.key, texts);
+    // 单段章取全文、列表章逐条拼接，作为后续章节的一致性锚点（不重复、口径一致）。
+    priorChapters.push({ label: section.label, text: texts.join('\n') });
+  }
+  // 配图（可选增强）：规划了 figures 且素材可解析才逐图生成；任一失败只丢弃该图，不影响五段正文。
+  const figures: CaseFigure[] = [];
+  for (const [index, figure] of (plan.figures ?? []).entries()) {
+    onProgress?.(`配图 ${index + 1}/${(plan.figures ?? []).length}（${CASE_FIGURE_KIND_BRIEFS[figure.kind].split('：')[0]}）绘制中…`);
+    const generated = await generateFigureWithModel(runtime, input, snapshot, figure, communications,
+      (chapters.get(figure.section) ?? []).join('\n'), onProgress);
+    if (generated) figures.push(generated);
   }
   const content = assembleCase(plan, chapters);
   parseCaseContent(content as unknown as Record<string, unknown>, {
@@ -1280,7 +1491,7 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     sources: snapshot.sources,
     communications,
   });
-  return { content, inputSummary };
+  return { content, figures, inputSummary };
 }
 
 /** 素材覆盖度：关键素材被 claim_evidence 实际引用的比例（诊断生成是否浪费素材，非正确性判定）。
@@ -1289,6 +1500,8 @@ export interface CaseCoverage {
   valueSignals: { total: number; cited: number };
   painSignals: { total: number; cited: number };
   authoritativeWeb: { total: number; cited: number };
+  /** 规划兜底召回规模（审核参考，不参与补写触发）：被正文引用、但不在预扫描价值/痛点信号集内的片段数。 */
+  fallbackCited: number;
 }
 
 /** 补写触发阈值（从严）：单一素材池引用率过低且样本足够多才补写；单边聚焦是正常写作不算浪费。 */
@@ -1300,8 +1513,12 @@ export function caseCoverage(content: { claim_evidence: Array<{ source_refs: str
   const signals = caseFragmentSignals(input.hemory, input.customer.csmName);
   const authoritativeWeb = (input.webContext?.results ?? []).filter((item) => item.sourceTier === 'customer_official' || item.sourceTier === 'government_procurement' || item.sourceTier === 'official').map((item) => item.id);
   const count = (ids: string[]) => ({ total: ids.length, cited: ids.filter((id) => cited.has(id)).length });
+  // 兜底召回计数：分母/触发逻辑不动（并入分母只会抬高引用率、反而抑制补写），只给 CSM 一眼可见的审核数字。
+  const fragmentIds = new Set(input.hemory.map((event) => event.id));
+  const signalIds = new Set([...signals.values, ...signals.painPoints].map((item) => item.fragment_id));
+  const fallbackCited = [...cited].filter((id) => fragmentIds.has(id) && !signalIds.has(id)).length;
   return { valueSignals: count(signals.values.map((item) => item.fragment_id)),
-    painSignals: count(signals.painPoints.map((item) => item.fragment_id)), authoritativeWeb: count(authoritativeWeb) };
+    painSignals: count(signals.painPoints.map((item) => item.fragment_id)), authoritativeWeb: count(authoritativeWeb), fallbackCited };
 }
 
 /** 覆盖率是否低到值得追加一次「补充完善」调用（从严阈值：只在主要素材池大量闲置时触发）。 */
@@ -1314,7 +1531,8 @@ export function coverageNeedsEnrichment(coverage: CaseCoverage): boolean {
 export function coverageSummary(coverage: CaseCoverage): string {
   return `素材覆盖率：价值信号 ${coverage.valueSignals.cited}/${coverage.valueSignals.total}`
     + `，痛点信号 ${coverage.painSignals.cited}/${coverage.painSignals.total}`
-    + `，权威公开资料 ${coverage.authoritativeWeb.cited}/${coverage.authoritativeWeb.total}`;
+    + `，权威公开资料 ${coverage.authoritativeWeb.cited}/${coverage.authoritativeWeb.total}`
+    + (coverage.fallbackCited ? `，兜底引用片段 ${coverage.fallbackCited}` : '');
 }
 
 /** 未被引用的关键素材清单（补写 prompt 注入；只列主要池，避免清单本身过长）。 */
@@ -1350,7 +1568,7 @@ async function enrichCaseWithModel(runtime: Runtime, input: CasePromptInput, sna
     + `- 第一稿正文：\n${JSON.stringify({ title: first.title, background: first.background, challenges: first.challenges, requirements: first.requirements, solution: first.solution, value: first.value })}\n`
     + `上下文：${contextText}`;
   const MAX_ATTEMPTS = 2;
-  const retryDelayMs = (attempt: number) => 5_000 * 3 ** (attempt - 1);
+  const retryDelayMs = (attempt: number) => caseModelRetryDelays.baseMs * 3 ** (attempt - 1);
   let lastError = '补充完善未返回可解析的案例 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await completeModelWithProgress(runtime, {
@@ -1557,6 +1775,25 @@ export function caseQualityReview(draft: CaseDraft, options: { currentInternalDi
   if (claims.some((claim) => claim.source_refs.includes(CASE_STATS_SOURCE_ID))) {
     warnings.push('正文引用了服务端预计算的交付统计数字，请确认客户允许对外披露该口径');
   }
+  // 配图复核（非阻断）：图注、来源存在性、图文一致性（图来源被正文引用过）、图内数字有据。
+  const figures = caseFiguresOf(draft.fields);
+  if (figures.length) {
+    const citedRefs = new Set(claims.flatMap((claim) => claim.source_refs));
+    for (const figure of figures) {
+      if (!figure.caption) warnings.push(`配图（${figure.kind}）缺少图注，请补充后再发布`);
+      const missingFigureRefs = figure.source_refs.filter((ref) => !sourceMap.has(ref));
+      if (missingFigureRefs.length) warnings.push(`配图「${figure.caption.slice(0, 20) || figure.kind}」引用了不存在的证据: ${missingFigureRefs.join('、')}`);
+      else if (!figure.source_refs.some((ref) => citedRefs.has(ref))) {
+        warnings.push(`配图「${figure.caption.slice(0, 20)}」的来源未被任何正文主张引用，请确认图文一致`);
+      }
+      const evidenceTexts = figure.source_refs.map((ref) => sourceMap.get(ref)).filter((source): source is CaseEvidenceSnapshotItem => !!source)
+        .map((source) => `${source.title} ${source.excerpt}`).join(' ');
+      const figureText = [...figure.svg.matchAll(/>([^<>]+)</g)].map((match) => decodeXmlEntities(match[1])).join(' ');
+      for (const number of figureText.match(/\d+(?:\.\d+)?%?/g) ?? []) {
+        if (!evidenceTexts.includes(number)) warnings.push(`配图「${figure.caption.slice(0, 20)}」中的数字「${number}」未在引用证据原文中找到`);
+      }
+    }
+  }
   warnings.push('公开发布前请由 CSM 线下确认客户名称、事实数据和客户反馈引用已获授权');
   const unique = [...new Set(warnings)];
   return { warnings: unique, digest: hash(JSON.stringify({ warnings: unique, context: snapshot?.digest ?? null })), contextStale };
@@ -1657,10 +1894,12 @@ export class CaseService {
       report_(`上下文与信号就绪（${timeline.length} 条事件 / ${hemory.length} 个片段${webContext ? ` / ${webContext.results.length} 条公开信息` : ''}），规划章节…`);
       const snapshot = buildContextSnapshot(promptInput);
       let content: ParsedCaseContent;
+      let figures: CaseFigure[] = [];
       let inputSummary: Record<string, unknown> | null = null;
       try {
         const proposed = await proposeCaseWithModel(this.runtime, promptInput, snapshot, report_);
         content = proposed.content;
+        figures = proposed.figures;
         inputSummary = proposed.inputSummary;
       } catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
       // 素材覆盖度诊断 + 从严阈值自动补写：主要素材池（已交付记录/客户正面反馈）大量闲置时
@@ -1689,6 +1928,8 @@ export class CaseService {
       };
       if (inputSummary) fields.input_summary = inputSummary;
       if (content.unknowns?.length) fields.unknowns = content.unknowns;
+      // 配图：消毒产物落库；补写（enrichment）只重写五段正文，figures 保持第一稿。
+      if (figures.length) fields.figures = figures;
       // 检索审计快照：不渲染进正文，case show --json 可见生成时用了哪些公开信息。
       if (webContext) fields.web_search = webContext;
       const draft = this.db.createCaseDraft(customer.id, content.title ?? `${customer.name}客户成功案例`, fields, evidenceRefs,

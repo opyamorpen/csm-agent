@@ -24,7 +24,7 @@ description: 客户案例的对话精修：基于工作台证据化生成的五�
 3. 完成后调用 `confirm_write`：
    - `target_system=ones`，`record_type=case`
    - `fields` 必须包含 `case_draft_id`（原样带回）、`case_version`（原样带回）、`customer_id`、`customer_name` 与完整五段字段（含未修改章节的原文）
-   - 不提交或改写 `claim_evidence`、`context_snapshot`、`web_search`、`unknowns`、客户绑定等内部字段；服务端会原样保留
+   - 不提交或改写 `claim_evidence`、`figures`（配图）、`context_snapshot`、`web_search`、`unknowns`、客户绑定等内部字段；服务端会原样保留
 4. CSM 批准后，服务端只把标题与五段公开正文写回 `case_drafts`（本地草稿更新，版本+1）；这不是外部系统写入。正文改写后如不再与原逐条证据完全对应，公开检查会给出警告，CSM 应逐条复核或重新生成。
 
 ## 写作纪律

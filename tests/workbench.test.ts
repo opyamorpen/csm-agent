@@ -3856,7 +3856,7 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFragmentSignals, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
 /** 从任一阶段 prompt 尾部的上下文 JSON 中解析 allowed_source_refs/source_catalog（规划/章节/补写共用同一份注入）。 */
@@ -4001,6 +4001,16 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal(prompts.length, 6, '规划 + 5 章节共 6 次模型调用');
     assert.match(prompts[0], /规划客户成功案例草稿的章节结构/, '首调用必须是规划阶段');
     assert.match(prompts[1], /只写这一个章节/);
+    // v7 前序章节注入：首章（背景）无锚点块；第 2 章起注入已定稿前章正文与一致性要求。
+    assert.ok(!prompts[1].includes('此前章节已定稿正文'), '首章（背景）不得注入前序章节块');
+    assert.match(prompts[2], /此前章节已定稿正文/, '第 2 章须注入前序章节锚点');
+    assert.match(prompts[2], /【客户背景】/, '锚点带章节标签');
+    assert.ok(prompts[2].includes(CASE_CONTENT.background), '锚点含背景章定稿正文');
+    assert.match(prompts[2], /专有名词、产品模块名、客户称谓必须与前章用词保持一致/);
+    assert.ok(prompts[5].includes(CASE_CONTENT.solution) && prompts[5].includes(CASE_CONTENT.background), '末章锚点含全部前序四章');
+    // v7 信号表兜底召回：规划 prompt 须声明信号表只是线索而非全集。
+    assert.match(prompts[0], /信号表兜底/, '规划 prompt 含兜底召回规则');
+    assert.match(prompts[0], /不受信号表限制/);
     const capturedPrompt = prompts.join('\n');
     const draft = db.listCaseDrafts('crm-c1')[0];
     assert.ok(draft, '案例草稿必须落库');
@@ -4058,7 +4068,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v6-no-ones-records');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v7-figures');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4641,7 +4651,7 @@ test('workbench: case coverage thresholds gate enrichment and uncovered material
   // 覆盖度阈值（v6：只有价值信号池）——value 信号 >4 且引用 <1/4 才补写。
   const cited = (values: number) => ({
     valueSignals: { total: values, cited: 0 },
-    painSignals: { total: 0, cited: 0 }, authoritativeWeb: { total: 0, cited: 0 },
+    painSignals: { total: 0, cited: 0 }, authoritativeWeb: { total: 0, cited: 0 }, fallbackCited: 0,
   });
   assert.equal(coverageNeedsEnrichment({ ...cited(0), valueSignals: { total: 5, cited: 0 } }), true, '价值信号 5 条零引用须触发');
   assert.equal(coverageNeedsEnrichment({ ...cited(0), valueSignals: { total: 5, cited: 2 } }), false, '价值信号引用 2/5 不触发');
@@ -4724,6 +4734,152 @@ test('workbench: failed enrichment keeps first draft and job still succeeds', as
     assert.equal((draft.fields as any).coverage.enriched, false);
     assert.equal((draft.fields as any).background, CASE_CONTENT.background, '保留第一稿正文');
     assert.equal(calls, 8, '补写尝试 2 次（第 7 次失败后退避、第 8 次仍失败即止）');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case coverage counts fallback cited fragments outside keyword signal sets', () => {
+  const fragment = (id: string, text: string) => ({ id, customerId: 'crm-fb', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: id,
+    title: id, occurredAt: '2026-08-01T00:00:00Z', syncedAt: '2026-08-10T00:00:00Z', payloadHash: id,
+    attributionStatus: 'confirmed', payload: { evidence: [{ speaker: '客户', text }] } }) as any;
+  // fb-signal 命中价值关键词；fb-quiet 是行业化表述（兜底召回场景）——正文引用了它。
+  const input = { customer: { csmName: '小王' }, hemory: [fragment('fb-signal', '客户说系统很好用，效率提升明显。'),
+    fragment('fb-quiet', '客户说现在线上线下一套账，不用再靠人盯了。')], webContext: null } as any;
+  const coverage = caseCoverage({ claim_evidence: [
+    { source_refs: ['fb-signal'] }, { source_refs: ['fb-quiet'] }, { source_refs: ['customer:crm-fb'] },
+  ] }, input);
+  assert.ok(coverage.valueSignals.total >= 1, '关键词信号进入分母');
+  assert.equal(coverage.valueSignals.cited, 1);
+  // 兜底计数：被引用、不在价值/痛点信号集内的片段 = fb-quiet（customer 档案引用不计入）。
+  assert.equal(coverage.fallbackCited, 1, '信号表外被引用片段计入 fallbackCited');
+  // 触发逻辑与兜底无关：fallbackCited 不改变补写判定（只统计、不进分母）。
+  assert.equal(coverageNeedsEnrichment(coverage), false);
+  assert.match(coverageSummary({ ...coverage, fallbackCited: 2 }), /兜底引用片段 2/);
+  assert.ok(!coverageSummary({ ...coverage, fallbackCited: 0 }).includes('兜底引用'), '零兜底不显示该段文案');
+});
+
+/** 干净可放行的示例 SVG（含节点框/文本/连线/kebab-case 属性）。 */
+const CLEAN_CASE_FIGURE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">'
+  + '<rect x="20" y="20" width="160" height="48" rx="8" fill="#eef3fb" stroke="#3a6ea5" stroke-width="2"/>'
+  + '<text x="100" y="48" font-size="14" text-anchor="middle" fill="#1c2b3a">需求提出</text>'
+  + '<path d="M180 44 H 240" stroke="#3a6ea5" stroke-width="2" marker-end="url(#arrow)"/></svg>';
+
+test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowlisted attributes', () => {
+  // 干净 SVG 原样放行（kebab-case 绘制属性不被误剥）。
+  assert.equal(sanitizeCaseSvg(CLEAN_CASE_FIGURE_SVG), CLEAN_CASE_FIGURE_SVG);
+  // 非白名单属性剥离：on* 事件、style、href/xlink:href、data-* 移除，白名单属性保留。
+  const dirty = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" onload="alert(1)" style="fill:red">'
+    + '<rect x="0" y="0" width="4" height="4" fill="#fff" href="https://evil.example/x" xlink:href="https://evil.example/y" data-track="1"/>'
+    + '<text x="1" y="2" font-size="12">节点</text></svg>';
+  const cleaned = sanitizeCaseSvg(dirty)!;
+  assert.ok(cleaned, '含危险属性的 SVG 剥离后仍可放行');
+  assert.ok(!/onload|style=|href|data-track/.test(cleaned), 'on*/style/href/data-* 全部剥离');
+  assert.match(cleaned, /font-size="12"/);
+  assert.match(cleaned, /<rect [^>]*fill="#fff"/);
+  // 危险结构整图拒绝：script / foreignObject / DOCTYPE / 实体 / 非 svg 根 / 缺 viewBox / 超尺寸 / 白名单外标签。
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><script>alert(1)</script></svg>'), null);
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><foreignObject><body>x</body></foreignObject></svg>'), null);
+  assert.equal(sanitizeCaseSvg('<!DOCTYPE svg><svg viewBox="0 0 10 10"><rect width="1" height="1"/></svg>'), null);
+  assert.equal(sanitizeCaseSvg('<!ENTITY x "y"><svg viewBox="0 0 10 10"></svg>'), null);
+  assert.equal(sanitizeCaseSvg('<div><svg viewBox="0 0 10 10"></svg></div>'), null, '非 svg 根拒绝');
+  assert.equal(sanitizeCaseSvg('<svg><rect width="1" height="1"/></svg>'), null, '缺 viewBox 拒绝');
+  assert.equal(sanitizeCaseSvg(`<svg viewBox="0 0 10 10">${'x'.repeat(65_600)}</svg>`), null, '超尺寸拒绝');
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><image href="https://evil.example/x.png" x="0" y="0" width="4" height="4"/></svg>'), null, 'image 标签不在白名单');
+  // 图内文本禁区词：明文与实体编码（&#72;emory → Hemory）都拒绝。
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">来自 Hemory 的记录</text></svg>'), null);
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">来自 &#72;emory 的记录</text></svg>'), null, '实体编码不得绕过禁区词');
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">合同金额 100 万</text></svg>'), null, '金额禁区词拒绝');
+});
+
+/** 规划产物附带 figures 骨架（含一条非法 kind 与一条合法条目——非法条目须被丢弃）。 */
+function casePlanContentWithFigures(content: any, prompt: string): any {
+  const plan = casePlanContent(content, prompt);
+  const context = casePromptContext(prompt);
+  const refs = context.allowed_source_refs as string[];
+  const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+  return { ...plan, figures: [
+    { section: 'challenges', kind: 'flow_current', idea: '客户现状：三套系统并行、人工汇总对齐', source_refs: [factRef] },
+    { section: 'value', kind: 'flow_current', idea: '非法章节（value 不允许配图）', source_refs: [factRef] },
+    { section: 'challenges', kind: 'photo', idea: '非法 kind', source_refs: [factRef] },
+  ] };
+}
+
+test('workbench: case figures generated, sanitized, persisted and rendered as markdown placeholder', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-fig-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const prompts: string[] = [];
+    const figureSvg = CLEAN_CASE_FIGURE_SVG.replace('需求提出', '客户提出需求');
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        if (prompt.includes('章节配图')) {
+          // 模型返回带危险属性的 SVG：服务端消毒后落库（剥离 onload/href，保留绘制属性）。
+          const svg = figureSvg.replace('<rect x="20"', '<rect onload="alert(1)" href="https://evil.example/x" x="20"');
+          return { content: [{ type: 'text', text: JSON.stringify({ svg, caption: '客户现状：三套系统并行、人工汇总对齐' }) }], stopReason: 'stop' };
+        }
+        const plan = prompt.includes('规划客户成功案例草稿的章节结构') ? casePlanContentWithFigures(CASE_CONTENT, prompt) : casePhaseRespond(CASE_CONTENT, prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    // 规划 + 5 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
+    assert.equal(prompts.length, 7, '规划+5章+1图共 7 次模型调用');
+    assert.match(prompts[6], /章节配图/, '第 7 次调用是逐图生成');
+    assert.match(prompts[6], /绘图规范/, '图 prompt 含画法规范');
+    assert.match(prompts[6], /不得虚构环节、模块或数字/, '图内容事实边界');
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '带图生成必须产出草稿');
+    const figures = (draft.fields as any).figures;
+    assert.equal(figures.length, 1, '非法 figures 条目被丢弃、只保留 1 张');
+    assert.equal(figures[0].kind, 'flow_current');
+    assert.equal(figures[0].section, 'challenges');
+    assert.equal(figures[0].caption, '客户现状：三套系统并行、人工汇总对齐');
+    assert.ok(figures[0].svg.startsWith('<svg') && figures[0].svg.includes('viewBox'), '落库的是消毒后 SVG');
+    assert.ok(!/onload|href=/.test(figures[0].svg), '落库 SVG 已剥离危险属性');
+    assert.ok(figures[0].id.startsWith('figure:'), '图 id 为确定性指纹');
+    // Markdown 以图注占位（与复制/Wiki 发布同源），位置在痛点章末尾。
+    const markdown = renderCaseMarkdown(draft);
+    assert.match(markdown, /> 图：客户现状：三套系统并行、人工汇总对齐（图示详见工作台）/, '图注占位');
+    assert.ok(markdown.indexOf('痛点、现状与挑战') < markdown.indexOf('> 图：'), '占位位于对应章节内');
+    // 图级证据：来源被正文引用 → 不触发图文不一致警告。
+    const detail = service.detail(draft.id)!;
+    assert.ok(!detail.qualityReview.warnings.some((warning) => /配图/.test(warning)), `图相关警告不应出现: ${detail.qualityReview.warnings.join('；')}`);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: figure generation failure discards figure without failing the job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-figfail-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    // 1ms 退避加速图生成重试（默认 5s/15s/45s）。
+    const previousBaseMs = caseModelRetryDelays.baseMs;
+    caseModelRetryDelays.baseMs = 1;
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('章节配图')) return { content: [{ type: 'text', text: '不是 JSON' }], stopReason: 'stop' };
+        const plan = prompt.includes('规划客户成功案例草稿的章节结构') ? casePlanContentWithFigures(CASE_CONTENT, prompt) : casePhaseRespond(CASE_CONTENT, prompt);
+        return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    for (let i = 0; i < 6000 && db.getDraftJob(result.jobId!)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    const job = db.getDraftJob(result.jobId!)!;
+    assert.equal(job.status, 'succeeded', '图生成失败不判任务失败');
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '五段正文照常成稿');
+    assert.equal((draft.fields as any).figures, undefined, '失败的图不落库');
+    assert.equal((draft.fields as any).background, CASE_CONTENT.background, '正文不受影响');
+    assert.ok(!renderCaseMarkdown(draft).includes('> 图：'), 'Markdown 无图注占位');
+    caseModelRetryDelays.baseMs = previousBaseMs;
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

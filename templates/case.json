@@ -49,6 +49,22 @@
       "readOnly": true,
       "description": "内部只读字段：生成时不可变来源快照及摘要，精修时由服务端保留"
     },
+    "figures": {
+      "type": "array",
+      "readOnly": true,
+      "description": "内部只读字段：章节配图（流程现状/目标流程/方案架构），生成管线绘制并经服务端消毒后落库，编辑与精修不可覆写",
+      "items": {
+        "type": "object",
+        "required": ["section", "kind", "svg", "caption", "source_refs"],
+        "properties": {
+          "section": { "enum": ["challenges", "requirements", "solution"] },
+          "kind": { "enum": ["flow_current", "flow_target", "architecture"] },
+          "svg": { "type": "string", "description": "消毒后的自包含 SVG（白名单标签/属性，无脚本与外链）" },
+          "caption": { "type": "string", "description": "30 字以内图注，Markdown 端以引用块占位" },
+          "source_refs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "图级证据：整图挂来源，不逐节点定位" }
+        }
+      }
+    },
     "unknowns": {
       "type": "array",
       "readOnly": true,

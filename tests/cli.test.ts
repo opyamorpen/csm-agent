@@ -96,7 +96,9 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent case regenerate <草稿ID> \[--wait\]/);
   assert.match(help.stdout, /项目管理\/需求管理\/知识管理\/招投标\/中标采购/);
   assert.match(help.stdout, /默认输出可直接对外的案例 Markdown（与复制\/Wiki 发布同源）/);
-  assert.match(help.stdout, /claim_evidence\/context_snapshot\/unknowns/);
+  // v7：case show 帮助须声明配图图注输出与 --json 的 figures 审核对象。
+  assert.match(help.stdout, /有配图时列出图注一行/);
+  assert.match(help.stdout, /claim_evidence\/figures\/context_snapshot\/unknowns/);
   assert.doesNotMatch(help.stdout, /evidence_map\/unknowns/);
   assert.match(help.stdout, /只更新 title 与 fields 中的五段公开正文/);
   assert.match(help.stdout, /csm-agent case publish/);

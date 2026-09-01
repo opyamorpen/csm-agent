@@ -1532,3 +1532,21 @@ test('customersCache stays a full customer list: search-filtered portfolio views
   // 全文兜底：除声明与 ensureCustomersCache 外不允许任何其它 customersCache 赋值。
   assert.doesNotMatch(source.replace(/let customersCache = \[\];/, '').replace(helper, ''), /customersCache\s*=[^=]/);
 });
+
+test('case figures render only after frontend defense check with responsive container', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 显示契约：配图 SVG 落库前已由服务端白名单消毒（权威），前端 innerHTML 注入前必须再过
+  // sanitizeCaseSvgForRender 纵深防御（script/on*/foreignObject/DOCTYPE 检出即整图不渲染）。
+  assert.match(source, /function sanitizeCaseSvgForRender\(svg\)/);
+  assert.match(source, /\/<script\|<foreignObject\|<image\|<!DOCTYPE\|<!ENTITY\/i/);
+  assert.match(source, /\\son\[a-zA-Z\]\+\\s\*=|javascript:/);
+  // 注入路径：先取消毒结果，判空跳过，innerHTML 只接收消毒返回值（不得直接 innerHTML = figure.svg）。
+  assert.match(source, /const safe = sanitizeCaseSvgForRender\(figure\.svg\);\s*\n\s*if \(!safe\) continue;/);
+  assert.match(source, /holder\.innerHTML = safe;/);
+  assert.doesNotMatch(source, /innerHTML = figure\.svg/, '不得绕过防御检查直接注入原始 SVG');
+  // 容器自适应：SVG 按 viewBox 限宽缩放，不撑破卡片；图注样式存在。
+  assert.match(styles, /\.case-figure svg \{ display: block; max-width: 100%; height: auto; \}/);
+  assert.match(styles, /\.case-figure-caption \{/);
+});

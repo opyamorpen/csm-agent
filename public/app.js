@@ -3124,6 +3124,14 @@
    * 案例草稿卡。customerMode（客户详情）：草稿态附 编辑/对话精修/重新生成 三操作与
    * 数据更新徽章；全局案例库只读展示。contextStale 由详情接口实时比对指纹得出。
    */
+  /** 配图渲染防御（纵深防御，非权威消毒——SVG 落库前已由服务端白名单消毒）：检出危险结构即整图不渲染。 */
+  function sanitizeCaseSvgForRender(svg) {
+    if (typeof svg !== 'string' || !svg.startsWith('<svg') || !svg.endsWith('</svg>')) return null;
+    if (/<script|<foreignObject|<image|<!DOCTYPE|<!ENTITY/i.test(svg)) return null;
+    if (/\son[a-zA-Z]+\s*=|javascript:|<\?xml-stylesheet/i.test(svg)) return null;
+    return svg;
+  }
+
   async function caseCard(draft, customerMode = false, customerId = null) {
     const card = el('article', 'case-card-item');
     card.append(el('strong', null, draft.title), el('div', 'cell-sub', `${draft.status === 'published' ? '已发布' : `草稿 v${draft.version}`} · ${formatDateTime(draft.updatedAt)}`));
@@ -3184,6 +3192,17 @@
     buttons.append(copy);
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
     card.append(buttons);
+    // 配图：服务端消毒产物 + 前端防御检查后才注入（innerHTML 前必须过 sanitizeCaseSvgForRender）。
+    const figures = (detail?.draft?.fields?.figures) || (draft.fields && draft.fields.figures) || [];
+    for (const figure of figures || []) {
+      const safe = sanitizeCaseSvgForRender(figure.svg);
+      if (!safe) continue;
+      const wrap = el('div', 'case-figure');
+      const holder = el('div');
+      holder.innerHTML = safe;
+      wrap.append(holder, el('div', 'case-figure-caption', figure.caption || ''));
+      card.append(wrap);
+    }
     return card;
   }
 
