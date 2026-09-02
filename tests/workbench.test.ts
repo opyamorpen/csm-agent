@@ -4156,7 +4156,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v9-standard');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v10-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5089,7 +5089,7 @@ test('workbench: milestone figure kind planned for value chapter and validated',
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: figure prompts carry kind-specific rules and ONES capability map (v9)', () => {
+test('workbench: figure prompts carry kind-specific rules and ONES capability map (v10)', () => {
   const base = { customerName: '示例客户', idea: '方案总览', chapterAnchor: '定稿正文', materials: ['[f1] 素材原文'] };
   const architecture = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'architecture' });
   assert.match(architecture, /绘图规范/, '通用画法规范存在');
@@ -5100,10 +5100,17 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.match(architecture, /端点精度/, '连线端点须落到模块块');
   assert.match(architecture, /【ONES 产品能力图谱/, '架构图注入能力图谱');
   assert.match(architecture, /不构成交付证据/, '图谱护栏');
+  const capabilityMap = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'capability_map' });
+  assert.match(capabilityMap, /需求场景-产品能力映射图/, '映射图 brief');
+  assert.match(capabilityMap, /自上而下编号/, '场景按先后顺序编号');
+  assert.match(capabilityMap, /viewBox="0 0 800 460"/, '映射图画布（嵌入一指禅近无损）');
+  assert.match(capabilityMap, /场景→能力/, '映射连线方向');
+  assert.match(capabilityMap, /【ONES 产品能力图谱/, '映射图注入能力图谱');
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
-  assert.match(valueMap, /三区「挂牌式」布局/, '全景图三区布局规则');
-  assert.match(valueMap, /按顺序一一对位/, '痛点价值编号对位规则');
-  assert.match(valueMap, /viewBox="0 0 960 480"/, '2:1 横版画布');
+  assert.match(valueMap, /你只画两个区/, '全景图只画痛点带与价值栏两区');
+  assert.match(valueMap, /按序一一对位/, '痛点价值编号对位规则');
+  assert.match(valueMap, /viewBox="0 0 1440 720"/, '2:1 横版画布');
+  assert.match(valueMap, /完全留空/, '方案区必须留空（服务端拼装）');
   assert.match(valueMap, /【ONES 产品能力图谱/, '全景图注入能力图谱');
   const flow = buildCaseFigurePrompt({ ...base, sectionLabel: '业务现状', kind: 'flow_current' });
   assert.match(flow, /节点总数不超过 10 个/, '流程图维持 v7 规模口径');
@@ -5112,27 +5119,28 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.ok(!flow.includes('【ONES 产品能力图谱'), '流程图不注入图谱（省 token）');
 });
 
-test('workbench: value_map figure merges pain/solution/value anchors and lands at chapter end', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'csm-case-valuemap-'));
+test('workbench: solution chapter carries capability_map plus architecture when integration materials exist (v10)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-twofig-'));
   const db = new WorkbenchDatabase(dir);
   try {
     seedCaseCustomer(db);
-    const prompts: string[] = [];
     const runtime = {
       llm: { provider: 'fake', model: 'fake-model' },
       models: { complete: async (_model: unknown, input: any) => {
         const prompt = input.messages[0].content;
-        prompts.push(prompt);
         if (prompt.includes('章节配图')) {
-          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '痛点到价值'), caption: '全景：三痛点对三价值收束' }) }], stopReason: 'stop' };
+          const isCapability = prompt.includes('需求场景-产品能力映射图');
+          const label = isCapability ? '场景能力映射' : '集成架构';
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', label), caption: isCapability ? '映射：需求场景对应产品能力' : '集成：多系统对接 ONES' }) }], stopReason: 'stop' };
         }
         if (prompt.includes('规划客户成功案例草稿的章节结构')) {
           const base = casePlanContent(CASE_CONTENT, prompt);
           const refs = casePromptContext(prompt).allowed_source_refs as string[];
           const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          // 两图制：capability_map 标配 + 素材含集成表述时 architecture 加画，均挂解决方案章。
           base.figures = [
-            { section: 'value', kind: 'value_map', idea: '痛点-方案-价值全景图', source_refs: [factRef] },
-            { section: 'solution', kind: 'value_map', idea: '非法组合（value_map 只挂价值章）', source_refs: [factRef] },
+            { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
+            { section: 'solution', kind: 'architecture', idea: '多系统集成架构：SSO 与数据对接', source_refs: [factRef] },
           ];
           return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
         }
@@ -5144,31 +5152,99 @@ test('workbench: value_map figure merges pain/solution/value anchors and lands a
     await waitForJob(db, result.jobId!);
     const draft = db.listCaseDrafts('crm-c1')[0];
     const figures = (draft.fields as any).figures ?? [];
-    assert.equal(figures.length, 1, '非法 value_map（挂 solution 章）被丢弃');
-    assert.equal(figures[0].kind, 'value_map');
-    assert.equal(figures[0].section, 'value');
+    assert.equal(figures.length, 2, '解决方案章两图共存（映射+架构）');
+    assert.ok(figures.every((figure: any) => figure.section === 'solution' && figure.svg.includes('viewBox')), '两图均挂解决方案章且为消毒后 SVG');
+    const markdown = renderCaseMarkdown(draft);
+    const solutionStart = markdown.indexOf('（三）业务解决方案');
+    const valueStart = markdown.indexOf('## 三、方案价值概述');
+    for (const caption of ['映射：需求场景对应产品能力', '集成：多系统对接 ONES']) {
+      const noteIndex = markdown.indexOf(`> 图：${caption}`);
+      assert.ok(noteIndex > -1, `图注存在: ${caption}`);
+      assert.ok(solutionStart < noteIndex && noteIndex < valueStart, `图注在解决方案小节内: ${caption}`);
+    }
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: value_map merges pain/value anchors and embeds capability_map figure (v10)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-valuemap-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const prompts: string[] = [];
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        if (prompt.includes('章节配图')) {
+          // 分发须先判全景图：其 brief 也提到「需求场景-产品能力映射图」（方案区嵌入来源）。
+          if (prompt.includes('痛点-方案-价值全景图')) {
+            return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '痛点到价值'), caption: '全景：三痛点对三价值收束' }) }], stopReason: 'stop' };
+          }
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '场景能力映射'), caption: '映射：需求场景对应产品能力' }) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          const refs = casePromptContext(prompt).allowed_source_refs as string[];
+          const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.figures = [
+            { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
+            { section: 'value', kind: 'value_map', idea: '痛点-方案-价值全景图', source_refs: [factRef] },
+            { section: 'solution', kind: 'value_map', idea: '非法组合（value_map 只挂价值章）', source_refs: [factRef] },
+            { section: 'value', kind: 'capability_map', idea: '非法组合（capability_map 只挂解决方案章）', source_refs: [factRef] },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    // 规划 + 6 章节 + 2 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
+    assert.equal(prompts.length, 9, '规划+6章+2图共 9 次模型调用');
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const figures = (draft.fields as any).figures ?? [];
+    assert.equal(figures.length, 2, '非法条目（value_map 挂 solution、capability_map 挂 value）被丢弃');
+    const capabilityFigure = figures.find((figure: any) => figure.kind === 'capability_map');
+    const valueMapFigure = figures.find((figure: any) => figure.kind === 'value_map');
+    assert.ok(capabilityFigure && capabilityFigure.section === 'solution', '映射图挂解决方案章');
+    assert.ok(valueMapFigure && valueMapFigure.section === 'value', '全景图挂价值章');
+    const capabilityPrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('需求场景-产品能力映射图'))!;
+    assert.ok(capabilityPrompt, 'capability_map 逐图调用存在');
+    assert.match(capabilityPrompt, /viewBox="0 0 800 460"/, '映射图画布 800×460');
+    assert.match(capabilityPrompt, /【ONES 产品能力图谱/, '映射图注入能力图谱');
     const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('痛点-方案-价值全景图'))!;
     assert.ok(figurePrompt, 'value_map 逐图调用存在');
-    // 收束锚点：痛点（现状/诉求）+ 方案 + 价值三段合并注入，而非仅本章正文。
+    // 锚点：痛点（现状/诉求）+ 价值两段注入；方案正文不再注入（方案区由服务端拼装）。
     assert.match(figurePrompt, /【痛点素材·业务现状】/, '锚点含业务现状定稿');
     assert.match(figurePrompt, /【痛点素材·业务诉求】/, '锚点含业务诉求定稿');
-    assert.match(figurePrompt, /【方案正文·业务解决方案】/, '锚点含方案定稿');
     assert.match(figurePrompt, /【价值正文·方案价值概述】/, '锚点含价值定稿');
+    assert.ok(!figurePrompt.includes('【方案正文·业务解决方案】'), '方案正文不再注入锚点');
+    assert.match(figurePrompt, /完全留空/, '方案区留空规则');
     assert.match(figurePrompt, /【ONES 产品能力图谱/, '全景图注入能力图谱');
+    // 服务端拼装：value_map 落库 SVG 嵌入「方案」分区框+标题牌+映射图本体（含其标识内容）。
+    assert.ok(valueMapFigure.svg.includes('方案'), '方案区标题牌');
+    assert.ok(valueMapFigure.svg.includes('<svg x="64" y="240"'), '映射图以嵌套 svg 嵌入');
+    assert.ok(valueMapFigure.svg.includes('场景能力映射'), '嵌入的是解决方案章映射图本体');
+    assert.ok(valueMapFigure.svg.includes('preserveAspectRatio="xMidYMid meet"'), '等比嵌入');
     // Markdown 占位固定在价值章末尾（价值成效之后、项目总结之前）。
     const markdown = renderCaseMarkdown(draft);
     const noteIndex = markdown.indexOf('> 图：全景：三痛点对三价值收束（图示详见工作台）');
-    assert.ok(noteIndex > -1, '图注占位存在');
+    assert.ok(noteIndex > -1, '全景图注占位存在');
     assert.ok(markdown.indexOf('### 价值成效') < noteIndex, '占位在价值成效之后');
     assert.ok(noteIndex < markdown.indexOf('## 四、项目总结'), '占位在项目总结之前');
-    // docx 导出同位：图注在「四、项目总结」之前。
+    const capabilityNoteIndex = markdown.indexOf('> 图：映射：需求场景对应产品能力（图示详见工作台）');
+    assert.ok(capabilityNoteIndex > -1, '映射图注占位存在');
+    assert.ok(markdown.indexOf('（三）业务解决方案') < capabilityNoteIndex && capabilityNoteIndex < markdown.indexOf('## 三、方案价值概述'), '映射图占位在解决方案小节内');
+    // docx 导出同位：全景图图注在「四、项目总结」之前。
     const exported = await service.exportDocx(draft.id)!;
     assert.ok(exported, '导出必须成功');
     const Zip = (await import('jszip')).default;
     const zip = await Zip.loadAsync(exported.buffer);
     const documentXml = await zip.file('word/document.xml')!.async('string');
     const docxNoteIndex = documentXml.indexOf('全景：三痛点对三价值收束');
-    assert.ok(docxNoteIndex > -1, 'docx 含图注');
+    assert.ok(docxNoteIndex > -1, 'docx 含全景图注');
     assert.ok(docxNoteIndex < documentXml.indexOf('四、项目总结'), 'docx 图注在项目总结之前');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
