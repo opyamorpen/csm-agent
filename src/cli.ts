@@ -818,7 +818,7 @@ function printDraftJobSummary(jobs: any[]): void {
   const failed = jobs.filter((job) => job.status === 'failed');
   const stalled = jobs.filter((job) => job.stalled);
   for (const job of failed) console.log(`草稿生成任务 ${job.id} 失败：${job.error ?? '未知原因'}`);
-  for (const job of stalled) console.log(`草稿生成任务 ${job.id} 疑似中断（服务重启未恢复）：请在草稿箱点「重新生成」重试`);
+  for (const job of stalled) console.log(`生成任务 ${job.id} 疑似因服务重启中断且未恢复，请重新生成重试`);
   for (const job of jobs.filter((job) => job.status !== 'failed' && !job.stalled && job.note)) console.log(`草稿生成任务 ${job.id}：${job.note}`);
   if (!failed.length && !stalled.length) console.log(`草稿生成完成（${jobs.length} 个任务）。运行 csm-agent drafts 查看新草稿。`);
   if (failed.length || stalled.length) process.exitCode = 2;
@@ -1223,7 +1223,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
     for (const job of jobs) {
       console.log(`任务 ${job.id}`);
       console.log(`  客户：${nameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''} · 状态 ${job.status} · 尝试 ${job.attempts} 次`);
-      if (job.stalled) console.log('  中断：任务疑似因服务重启中断且未恢复，请在草稿箱点「重新生成」重试');
+      if (job.stalled) console.log('  中断：任务疑似因服务重启中断且未恢复，请重新生成重试');
       if (job.progress) console.log(`  进度：${job.progress}`);
       if (job.error) console.log(`  错误：${job.error}`);
       if (job.note) console.log(`  备注：${job.note}`);

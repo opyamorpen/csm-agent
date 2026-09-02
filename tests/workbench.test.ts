@@ -3376,6 +3376,41 @@ test('workbench: case generation writes web-search stage progress', async () => 
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('workbench: case and weekly services expose in-process processing for stalled decoration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-processing-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    // 闸门模型：首个 complete 调用挂起，保证观察窗口内任务必然处于 running 且在本进程处理集合中。
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const base = fakeCaseModel(CASE_CONTENT);
+    const service = new CaseService(db, caseMcp(), {
+      ...base,
+      models: { complete: async (model: unknown, input: any) => { await gate; return base.models.complete(model, input); } },
+    } as any);
+    const result = service.generate('crm-c1');
+    let sawProcessing = false;
+    for (let i = 0; i < 200 && !sawProcessing; i++) {
+      if (db.getDraftJob(result.jobId!)?.status === 'running' && service.isJobProcessing(result.jobId!)) sawProcessing = true;
+      else await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    release();
+    assert.ok(sawProcessing, '在途 running 任务必须命中 isJobProcessing（stalled 装饰数据源）');
+    await waitForJob(db, result.jobId!);
+    assert.equal(service.isJobProcessing(result.jobId!), false, '终态后应移出处理集合');
+    // 孤儿：库里 running 但不在本进程处理集合（服务重启遗留、attempts 耗尽不再认领）——stalled 依据。
+    const caseOrphan = db.createDraftJob('crm-c1', 'fp-case-orphan', [], 'case_report');
+    db.updateDraftJob(caseOrphan.id, 'running');
+    assert.equal(db.getDraftJob(caseOrphan.id)?.status, 'running');
+    assert.equal(service.isJobProcessing(caseOrphan.id), false);
+    const weekly = new WeeklyReportService(db, { listTools: () => [], call: async () => ({ text: '', isError: false }) } as any);
+    const weeklyOrphan = db.createDraftJob('crm-c1', 'fp-weekly-orphan', [], 'weekly_report');
+    db.updateDraftJob(weeklyOrphan.id, 'running');
+    assert.equal(weekly.isJobProcessing(weeklyOrphan.id), false);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: listActiveDraftJobsByCustomer returns only in-flight jobs of that customer', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-j1', name: '任务客户一' });
   db.upsertCustomer({ id: 'crm-j2', name: '任务客户二' });

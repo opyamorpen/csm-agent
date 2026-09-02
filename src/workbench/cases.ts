@@ -2645,6 +2645,11 @@ export class CaseService {
     for (const job of this.db.listPendingDraftJobs('case_report')) if (job.attempts < 3) void this.process(job.id);
   }
 
+  /** 任务是否在本进程处理中：running 状态跨进程不可信（服务重启遗留的孤儿永不终结），stalled 装饰与 heretry 同源。 */
+  isJobProcessing(jobId: string): boolean {
+    return this.processing.has(jobId);
+  }
+
   private async process(jobId: string): Promise<void> {
     if (this.processing.has(jobId)) return;
     const job = this.db.getDraftJob(jobId);

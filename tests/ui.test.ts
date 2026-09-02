@@ -859,11 +859,16 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   assert.match(poller, /delete panel\.dataset\.busyWeek/);
   assert.match(poller, /job\.status === 'failed'/);
   assert.match(poller, /周报生成失败/);
+  // 孤儿 running（服务重启遗留、永不终结）stalled 按终态处理：清进度行与 busyWeek，失败卡引导重新生成。
+  assert.match(poller, /if \(job\.stalled\) \{/);
+  assert.match(poller, /delete panel\.dataset\.busyWeek[\s\S]*?任务疑似因服务重启中断（未恢复）/);
   // 进度展示契约：消费服务端下发的 job.progress（阶段/模型输出字数）+ 已进行时长；轮询无 90 次上限（面板存活即跟踪）。
   assert.match(poller, /job\.progress \|\|/);
   assert.match(poller, /已进行/);
   assert.match(poller, /panel\.isConnected/);
   assert.match(poller, /attempt < 90 \? 2000 : 5000/);
+  // 孤儿 running（服务重启遗留）恢复轮询过滤 stalled：不收编进 busyWeek（会锁死生成按钮）。
+  assert.match(panel, /item\.weekStart === currentWeek\(\) && !item\.stalled/);
   // 「生成超时」放弃文案整体移除（含案例侧弹窗）：长任务由进度行持续跟踪，不再超时劝退。
   assert.doesNotMatch(source, /生成超时，任务仍在后台运行/);
   const failure = source.match(/function renderWeeklyFailure[\s\S]*?\n  \}\n\n  async function refreshWeeklyPanel/)?.[0];
@@ -1332,6 +1337,10 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   assert.match(pollCase, /status === 'succeeded'\) \{[\s\S]*?if \(notice\) notice\.remove\(\);/);
   assert.match(pollCase, /status === 'failed'\) \{ if \(notice\) notice\.remove\(\); return/);
   assert.match(pollCase, /job\.status === 'failed'[\s\S]*?notice\.textContent = `案例生成中…/);
+  // 孤儿 running（服务重启遗留、永不终结）stalled 按终态处理：移除进度行并引导重新生成。
+  assert.match(pollCase, /if \(job\.stalled\) \{ if \(notice\) notice\.remove\(\); return \{ error: '任务疑似因服务重启中断（未恢复），请重新生成' \}; \}/);
+  // 恢复轮询过滤 stalled：孤儿不收编（收编会永久显示「案例生成中」）。
+  assert.match(source, /kind === 'case_report' && !job\.stalled/);
   // 案例进度行组件：app.js 建行 + style.css 供样式（与周报 notice 同一视觉契约）。
   assert.match(source, /function ensureCaseNotice/);
   assert.match(source, /\.generation-notice/);

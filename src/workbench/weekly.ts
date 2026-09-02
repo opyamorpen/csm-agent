@@ -351,6 +351,11 @@ export class WeeklyReportService {
     private readonly workhours?: (customerId: string) => Promise<{ records: Array<{ startTime: string; hours: number; description: string; owner?: string }> }>,
   ) {}
 
+  /** 任务是否在本进程处理中：running 状态跨进程不可信（服务重启遗留的孤儿永不终结），stalled 装饰与 heretry 同源。 */
+  isJobProcessing(jobId: string): boolean {
+    return this.processing.has(jobId);
+  }
+
   list(customerId: string): WeeklyReport[] {
     return this.db.listWeeklyReports(customerId);
   }

@@ -2438,7 +2438,8 @@
 
   /**
    * 案例生成轮询：展示服务端进度文案（阶段/检索角度/模型输出字数），锚点 DOM 存活期间
-   * 一直跟踪（前 90 次 2s、之后降为 5s，无超时放弃）。终态移除进度行后按指纹定位新草稿并回调。
+   * 一直跟踪（前 90 次 2s、之后降为 5s，无超时放弃）。终态移除进度行后按指纹定位新草稿并回调；
+   * 孤儿 running（服务重启遗留、永不终结）由服务端装饰 stalled，按终态退出并引导重新生成。
    * 返回 { draft } 或 { error }；锚点被移除（切走客户/重开页面）返回 { detached: true }。
    */
   async function pollCaseJob(customerId, jobId, fingerprint, anchor) {
@@ -2455,6 +2456,7 @@
         return draft ? { draft } : { error: '任务成功但未找到新草稿' };
       }
       if (job.status === 'failed') { if (notice) notice.remove(); return { error: job.error || '未知原因' }; }
+      if (job.stalled) { if (notice) notice.remove(); return { error: '任务疑似因服务重启中断（未恢复），请重新生成' }; }
       if (notice) notice.textContent = `案例生成中…（${job.progress || (job.status === 'running' ? '正在处理' : '排队中')}）`;
       await new Promise((resolve) => setTimeout(resolve, attempt < 90 ? 2000 : 5000));
     }
@@ -2644,6 +2646,16 @@
         if (stillViewing) {
           renderWeeklyFailure(panel, customer, weekStart, job);
           await alertDialog(`周报生成失败：${job.error || '未知原因'}\n\n可点击「再次生成」重试。`);
+        }
+        return job;
+      }
+      // 孤儿 running（服务重启遗留、永不终结）由服务端装饰 stalled：按终态退出，失败卡引导重新生成。
+      if (job.stalled) {
+        notice.remove();
+        delete panel.dataset.busyWeek;
+        if (stillViewing) {
+          renderWeeklyFailure(panel, customer, weekStart, { ...job, error: '任务疑似因服务重启中断（未恢复）' });
+          await alertDialog('周报生成疑似中断（服务重启未恢复），可点击「再次生成」重试。');
         }
         return job;
       }
@@ -2876,11 +2888,11 @@
     });
     renderWeeklyBody(panel, customer, currentWeek());
     // 面板重建（重开客户详情/切回 tab）时恢复当前周在途任务的进度展示与轮询；
-    // 其他周的任务不打扰当前视图，仍由服务端继续执行。
+    // 其他周的任务不打扰当前视图，仍由服务端继续执行；stalled（孤儿 running）跳过，不收编进 busyWeek。
     void (async () => {
       try {
         const { jobs } = await api(`/api/draft-jobs?customer_id=${encodeURIComponent(customer.id)}&status=active&kind=weekly_report`);
-        const job = (jobs || []).find((item) => item.weekStart === currentWeek());
+        const job = (jobs || []).find((item) => item.weekStart === currentWeek() && !item.stalled);
         if (job) {
           panel.dataset.busyWeek = currentWeek();
           renderWeeklyBody(panel, customer, currentWeek());
@@ -3017,11 +3029,12 @@
     addTab('timeline', '统一时间线', renderTimeline(timeline));
     customerOverview.append(tabBar, tabBody);
     tabs[0].button.click();
-    // 重开客户详情时恢复在途生成任务的进度展示（不自动弹编辑窗，成功后刷新当前视图即可）。
+    // 重开客户详情时恢复在途生成任务的进度展示（不自动弹编辑窗，成功后刷新当前视图即可）；
+    // stalled（孤儿 running，服务重启遗留）跳过——收编会永久显示「案例生成中」，其出口是重新生成。
     void (async () => {
       try {
         const { jobs } = await api(`/api/draft-jobs?customer_id=${encodeURIComponent(customerId)}&status=active`);
-        const caseJob = (jobs || []).find((job) => job.kind === 'case_report');
+        const caseJob = (jobs || []).find((job) => job.kind === 'case_report' && !job.stalled);
         if (caseJob) {
           const outcome = await pollCaseJob(customerId, caseJob.id, caseJob.fingerprint, customerOverview);
           if (outcome.draft && activeCustomerId === customerId) await openCustomer(customerId);

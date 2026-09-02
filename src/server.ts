@@ -215,8 +215,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   }
   // 失败生成任务的片段明细：客户名 + 上海日 + 逐片段摘要（截断），支撑「失败后选片段重新生成」。
   // weekly_report 任务补算 weekStart（首个可解析种子事件的周界，与 process() 同逻辑）：页面重开后恢复进度需对周。
-  // 在途 heretry 任务补 dateKey（横幅按「客户 · 日期」标注）；running 但不在本进程处理集合 = 孤儿
-  //（服务重启遗留、resume 因 attempts 耗尽不再认领，永不终结）→ stalled，前端/CLI 据此提前退出并引导重新生成。
+  // 在途 heretry 任务补 dateKey（横幅按「客户 · 日期」标注）。heretry/case/weekly 三类生成任务：
+  // running 但不在本进程处理集合 = 孤儿（服务重启遗留、resume 因 attempts 耗尽不再认领，永不终结）
+  // → stalled，前端/CLI 据此提前退出并引导重新生成。
   function decorateDraftJob(job: DraftGenerationJob): DraftGenerationJob & { dateKey?: string; fragments?: Array<{ id: string; occurredAt: string; topic: string; summary: string }>; weekStart?: string; stalled?: boolean } {
     if (job.status === 'failed') {
       const fragments: Array<{ id: string; occurredAt: string; topic: string; summary: string }> = [];
@@ -230,19 +231,25 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
       return { ...job, dateKey: dateKey || undefined, fragments };
     }
+    const processing = job.kind === 'hemory' ? workbench.drafts.isJobProcessing(job.id)
+      : job.kind === 'case_report' ? workbench.cases.isJobProcessing(job.id)
+      : job.kind === 'weekly_report' ? workbench.weekly.isJobProcessing(job.id)
+      : null;
+    const stalled = processing === false && job.status === 'running';
     if (job.kind === 'hemory' && (job.status === 'pending' || job.status === 'running')) {
-      const stalled = job.status === 'running' && !workbench.drafts.isJobProcessing(job.id);
       for (const id of job.sourceEventIds) {
         const event = workbench.db.getSourceEvent(id);
         if (event) return { ...job, dateKey: shanghaiEventDate(event), ...(stalled ? { stalled: true } : {}) };
       }
       return stalled ? { ...job, stalled: true } : job;
     }
+    if (job.kind === 'case_report') return stalled ? { ...job, stalled: true } : job;
     if (job.kind === 'weekly_report') {
       for (const id of job.sourceEventIds) {
         const event = workbench.db.getSourceEvent(id);
-        if (event) return { ...job, weekStart: weekMonday(event.occurredAt) };
+        if (event) return { ...job, weekStart: weekMonday(event.occurredAt), ...(stalled ? { stalled: true } : {}) };
       }
+      return stalled ? { ...job, stalled: true } : job;
     }
     return job;
   }
