@@ -1658,3 +1658,41 @@ test('case cards show read-only full text with figures embedded at section posit
   assert.ok(listRule, '.case-doc-list rule was not found');
   assert.doesNotMatch(listRule, /display:\s*(grid|block)/);
 });
+
+test('opportunity board renders an ordered list of top-5 briefs with per-item sources', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const renderer = source.match(/const opportunities = el\('div'\);[\s\S]*?\n    \}\n    const actions/)?.[0];
+
+  assert.ok(renderer, 'opportunity renderer was not found');
+  // 有序列表：按可信度降序取前 5（v2：LLM 假设数量不固定，展示侧截断）。
+  assert.match(renderer, /const oppTop = \[\.\.\.\(data\.opportunities \|\| \[\]\)\]\.sort\(\(a, b\) => \(b\.confidence \|\| 0\) - \(a\.confidence \|\| 0\)\)\.slice\(0, 5\)/);
+  assert.match(renderer, /el\('ol', 'opportunity-list'\)/);
+  assert.match(renderer, /el\('li', 'opportunity-item'\)/);
+  // 每条 = 一句话简述（title）+ 置信度 + 来源行；不再渲染长文 detail 与推荐动作。
+  assert.match(renderer, /el\('div', 'opportunity-item-text', item\.title\)/);
+  assert.match(renderer, /el\('div', 'opportunity-evidence', '来源：'\)/);
+  assert.doesNotMatch(renderer, /item\.detail/);
+  assert.doesNotMatch(renderer, /recommendedAction/);
+  // 来源标注口径：会议录音/公开动态 + 日期，公开动态有 URL 渲染 source-link。
+  assert.match(renderer, /`会议录音（\$\{day\}\）`/);
+  assert.match(renderer, /`公开动态（\$\{day\}\）`/);
+  assert.match(renderer, /el\('a', 'source-link', name\)/);
+  // 无来源（引用失效）按 unknown 兜底；超出的来源聚合为「等 N 条来源」。
+  assert.match(renderer, /line\.append\('unknown'\)/);
+  assert.match(renderer, /等 \$\{item\.sourceCount\} 条来源/);
+  assert.match(renderer, /暂无识别到增购信号/);
+  // 手动重新分析入口与展示截断提示。
+  assert.match(renderer, /另有 \$\{hidden\} 条较低可信度假设未展示/);
+  assert.match(source, /\/opportunities\/refresh/, 'POST refresh endpoint is wired');
+  assert.match(source, /'重新分析增购机会'/);
+  // 旧卡片网格类已退役，不得残留。
+  assert.doesNotMatch(source, /opportunity-grid|opportunity-card/);
+  assert.doesNotMatch(styles, /opportunity-grid|opportunity-card/);
+  // 列表样式：序号不被 display 吞（grid/block 吃 ::marker 的教训），来源行小字灰。
+  assert.match(styles, /\.opportunity-list \{ margin: 0; padding-left: 24px; font-size: 13\.5px; \}/);
+  assert.match(styles, /\.opportunity-item-text \{/);
+  assert.match(styles, /\.opportunity-evidence \{/);
+  const itemRules = [styles.match(/\.opportunity-item[^{]*\{[^}]*\}/g) ?? []].flat().join('\n');
+  assert.doesNotMatch(itemRules, /display:\s*(grid|block)/, 'ol 序号需要 list-item 默认排版');
+});

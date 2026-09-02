@@ -951,11 +951,14 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .risk-dimension.unknown { background: var(--panel-3); }
 .unknown-line { margin-top: 10px; color: var(--warn-note); font-size: 12px; }
 
-/* 增购假设卡通栏一行一张：卡片少时不留半栏空洞，段落文字横排也更易读。 */
-.opportunity-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
-.opportunity-card, .action-card, .case-card-item { border: 1px solid var(--border); background: var(--panel); padding: 13px; border-radius: 10px; box-shadow: var(--shadow-xs); transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease; }
-.opportunity-card:hover, .action-card:hover, .case-card-item:hover { box-shadow: var(--shadow-m); transform: translateY(-1px); }
-.opportunity-card p, .action-card p { margin: 6px 0; color: var(--text-2); }
+/* 增购机会：有序列表（一句话简述 + 来源行），按可信度取前 5；条目不设 display 防 ol 序号被吞。 */
+.opportunity-list { margin: 0; padding-left: 24px; font-size: 13.5px; }
+.opportunity-item + .opportunity-item { margin-top: 9px; }
+.opportunity-item-text { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.opportunity-evidence { margin-top: 3px; color: var(--faint); font-size: 12px; overflow-wrap: anywhere; }
+.action-card, .case-card-item { border: 1px solid var(--border); background: var(--panel); padding: 13px; border-radius: 10px; box-shadow: var(--shadow-xs); transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease; }
+.action-card:hover, .case-card-item:hover { box-shadow: var(--shadow-m); transform: translateY(-1px); }
+.action-card p { margin: 6px 0; color: var(--text-2); }
 /* 案例配图：SVG 落库前经服务端消毒，这里按 viewBox 自适应限宽渲染。 */
 .case-figure { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 10px; }
 .case-figure svg { display: block; max-width: 100%; height: auto; }
@@ -976,7 +979,6 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .case-doc-table th, .case-doc-table td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; }
 .case-doc-table th { background: var(--panel-2); font-weight: 600; }
 .case-doc .case-figure { margin-top: 2px; }
-.recommended { margin-top: 9px; padding: 8px 10px; background: var(--ok-bg); border-left: 3px solid var(--ok-accent); border-radius: 0 6px 6px 0; color: var(--ok-text); }
 .action-board, .case-list { display: grid; gap: 9px; }
 .action-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 /* 批量完成操作条：复用 Hemory 归属栏的 34px 单行居中契约（select-all/计数沿用同款类），sticky 冻结在滚动容器顶。 */
@@ -1261,7 +1263,7 @@ header, #sidebar, #records { -webkit-backdrop-filter: blur(14px) saturate(1.25);
   .metric-item:nth-child(2n) { border-right: 0; }
   .definition-grid { grid-template-columns: repeat(2, 1fr); }
   .definition:nth-child(2n) { border-right: 0; }
-  .risk-grid, .opportunity-grid, .stat-strip { grid-template-columns: 1fr; }
+  .risk-grid, .stat-strip { grid-template-columns: 1fr; }
   #chat { min-height: calc(100vh - 110px); }
   #records { display: none !important; }
   /* 移动端侧栏 sticky 通栏、记录面板隐藏：footer 不再让位，恢复常规内边距。 */

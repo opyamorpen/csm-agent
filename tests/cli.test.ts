@@ -26,11 +26,15 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   // 公开动态检索能力：CLI 命令与强制刷新端点同源。
   assert.ok(capabilities.some((item) => item.workflow === 'web-intelligence-refresh' && item.api.includes('/api/customers/:id/web-intel')));
+  // 增购机会 v2：LLM 假设分析能力（读 overview + 强制重新分析端点）与展示口径说明。
+  const opportunityCapability = capabilities.find((item) => item.workflow === 'opportunity-analysis');
+  assert.ok(opportunityCapability && opportunityCapability.api.includes('POST /api/customers/:id/opportunities/refresh'));
+  assert.match(opportunityCapability.notes ?? '', /前 5 条/);
   // 企业微信待办同步能力已整体移除：命令、工作流与 API 都不得再出现。
   assert.ok(!commands.has('wecom'), 'wecom CLI command should be removed');
   assert.ok(!capabilities.some((item) => item.workflow === 'wecom-todo' || item.api.some((api) => api.includes('/api/wecom/'))),
@@ -86,6 +90,9 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent serve/);
   assert.match(help.stdout, /csm-agent customers .*--sort default\|renewal_date\|renewal_amount/);
   assert.match(help.stdout, /csm-agent capabilities/);
+  // 增购机会命令：--refresh 强制重新分析与来源标注说明。
+  assert.match(help.stdout, /csm-agent opportunities <客户ID或名称> \[--refresh\] \[--json\]/);
+  assert.match(help.stdout, /逐条附信息来源/);
   assert.doesNotMatch(help.stdout, /action accept/);
   assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
   // 两态模型：批量完成仅未完成生效，已完成跳过。

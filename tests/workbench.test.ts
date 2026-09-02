@@ -9,6 +9,7 @@ import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
+import { collectOpportunitySignals, OpportunityService, parseOpportunityAnalysis } from '../src/workbench/opportunity.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-workbench-'));
@@ -185,12 +186,14 @@ test('workbench: onesCompletionRates is full-population by status type and marks
   assert.ok((db.overview('crm-rates') as Record<string, unknown>).completionRates, 'overview 携带全量完成率');
 }));
 
-test('workbench: recompute wires full rates into risk and web positive signals into expansion opportunity', () => withDb((db) => {
+test('workbench: recompute wires full rates into risk and schedules opportunity analysis', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-web', name: '公开动态客户', shortName: '公开动态', lastContactAt: '2026-08-20T00:00:00Z' });
   db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-1', title: '建议1', occurredAt: '2026-08-01T00:00:00Z', payload: { field005: { name: '已完成', category: 'done' } } });
   db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'suggestion_feedback', externalId: 's-2', title: '建议2', occurredAt: '2026-08-02T00:00:00Z', payload: { field005: { name: '处理中', category: 'in_progress' } } });
   db.upsertSourceEvent({ customerId: 'crm-web', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 't-1', title: '工单1', occurredAt: '2026-08-03T00:00:00Z', payload: { field005: { name: '已完成', category: 'done' } } });
-  const sync = new PortfolioSyncService(db, {} as never, async () => ({ events: [], proposedCount: 0, includedCount: 0 }));
+  let scheduled = '';
+  const sync = new PortfolioSyncService(db, {} as never, async () => ({ events: [], proposedCount: 0, includedCount: 0 }),
+    undefined, async (customerId) => { scheduled = customerId; return { status: 'skipped' }; });
   db.addEvidence({ customerId: 'crm-web', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资 2 亿元', occurredAt: '2026-08-10', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
   sync.recompute('crm-web');
   const risk = db.latestRisk('crm-web')!;
@@ -199,11 +202,130 @@ test('workbench: recompute wires full rates into risk and web positive signals i
   assert.equal(risk.dimensions.ticket.score, 0);
   assert.equal(risk.dimensions.web.score, 0, '正向公开动态不产生风险分');
   assert.ok(risk.dimensions.web.known);
-  const opportunities = db.listOpportunities('crm-web');
-  const expansion = opportunities.find((item) => item.type === 'public_signal_expansion');
-  assert.ok(expansion, '正向 web_signal 生成增购假设');
-  assert.ok(expansion!.detail.includes('完成 B 轮融资'));
-  assert.ok(expansion!.evidenceRefs.length > 0);
+  // 增购机会 v2：recompute 不再直接生成规则双假设，改为落证据后异步调度 LLM 分析（server 注入实现）。
+  assert.equal(scheduled, 'crm-web', 'recompute 落证据后调度增购机会分析');
+  assert.equal(db.listOpportunities('crm-web').length, 0, '缺省注入（如测试环境）不产出假设');
+  // 信号口径收敛：正向 web 动态进入分析输入；hemory 会议信号按同一 collectOpportunitySignals 收集。
+  const signals = collectOpportunitySignals(db.listEvidence('crm-web'));
+  assert.equal(signals.web.length, 1);
+  assert.equal(signals.web[0].label, '完成 B 轮融资');
+  assert.equal(signals.hemory.length, 0);
+}));
+
+test('workbench: opportunity model output is sanitized, hallucination-filtered and fully replaces old hypotheses', async () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-opp', name: '机会客户', shortName: '机会', industry: '半导体' });
+  const ev1 = db.addEvidence({ customerId: 'crm-opp', kind: 'opportunity', label: '会议增购信号', detail: '我们计划下半年扩容 200 个账号', occurredAt: '2026-08-20', confidence: 0.75, sourceSystem: 'hemory' });
+  const ev2 = db.addEvidence({ customerId: 'crm-opp', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资 2 亿元', occurredAt: '2026-08-10', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
+  db.upsertOpportunity({ customerId: 'crm-opp', type: 'needs_led_expansion', title: '旧规则假设', detail: '旧长文', confidence: 0.6, status: 'hypothesis', evidenceRefs: [ev1], discoveryQuestions: [], recommendedAction: '旧建议' });
+  let calls = 0;
+  const runtime = { llm: { provider: 'fake', model: 'fake-model' }, models: { complete: async () => {
+    calls += 1;
+    return { content: [{ type: 'text', text: JSON.stringify({ opportunities: [
+      { summary: '  扩容 200 账号的增购机会 ', confidence: 5, evidence_ids: ['S1', 'S2'] },
+      { summary: '幻觉引用条目', confidence: 0.8, evidence_ids: ['S9'] },
+      { summary: '重复/无引用条目', confidence: 0.7, evidence_ids: [] },
+    ] }) }], stopReason: 'stop' };
+  } } } as any;
+  const service = new OpportunityService(db, runtime);
+  const first = await service.analyze('crm-opp');
+  assert.equal(first.status, 'succeeded');
+  assert.equal(first.generated, 1, '幻觉引用与零引用条目被过滤');
+  assert.equal(calls, 1);
+  const opportunities = db.listOpportunities('crm-opp');
+  assert.equal(opportunities.length, 1, '旧规则假设被全量替换');
+  assert.equal(opportunities[0].title, '扩容 200 账号的增购机会');
+  assert.equal(opportunities[0].type, 'signal_expansion');
+  assert.equal(opportunities[0].confidence, 0.95, 'confidence 夹取到 0.95');
+  assert.deepEqual(opportunities[0].evidenceRefs, [ev1, ev2]);
+  assert.ok(opportunities[0].detail.includes('会议录音') && opportunities[0].detail.includes('公开动态'), 'detail 为来源概要串');
+  assert.ok(db.getOpportunityGeneration('crm-opp')?.status === 'succeeded');
+
+  // 门控：证据无变化 → 秒级跳过，不再调模型；force 强制重跑。
+  const second = await service.analyze('crm-opp');
+  assert.equal(second.status, 'skipped');
+  assert.match(second.reason ?? '', /证据无变化/);
+  assert.equal(calls, 1);
+  const forced = await service.analyze('crm-opp', { force: true });
+  assert.equal(forced.status, 'succeeded');
+  assert.equal(calls, 2);
+
+  // 证据变化但距上次成功不足 24h → 节流跳过；拨到 25h 后重跑。
+  db.addEvidence({ customerId: 'crm-opp', kind: 'opportunity', label: '会议增购信号', detail: '还需要测试管理模块', occurredAt: '2026-08-25', confidence: 0.75, sourceSystem: 'hemory' });
+  const throttled = await service.analyze('crm-opp');
+  assert.equal(throttled.status, 'skipped');
+  assert.match(throttled.reason ?? '', /24/);
+  const later = await service.analyze('crm-opp', { now: Date.now() + 25 * 3_600_000 });
+  assert.equal(later.status, 'succeeded');
+  assert.equal(calls, 3);
+}));
+
+test('workbench: opportunity analysis keeps old hypotheses on model failure and retries after the failure gate', async () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-opf', name: '失败客户' });
+  const ev = db.addEvidence({ customerId: 'crm-opf', kind: 'opportunity', label: '会议增购信号', detail: '需要扩容账号', occurredAt: '2026-08-20', confidence: 0.75, sourceSystem: 'hemory' });
+  db.upsertOpportunity({ customerId: 'crm-opf', type: 'signal_expansion', title: '既有假设', detail: '会议录音（2026-08-20）', confidence: 0.7, status: 'hypothesis', evidenceRefs: [ev], discoveryQuestions: [], recommendedAction: '' });
+  const failRuntime = { llm: {}, models: { complete: async () => ({ content: [], stopReason: 'error', errorMessage: 'relay 连接超时' }) } } as any;
+  const service = new OpportunityService(db, failRuntime);
+  const failed = await service.analyze('crm-opf');
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.reason ?? '', /relay 连接超时/);
+  assert.equal(db.listOpportunities('crm-opf').length, 1, '失败保留旧假设');
+  assert.equal(db.getOpportunityGeneration('crm-opf')?.status, 'failed');
+  // 失败 1 小时门内重试仍跳过，过门后允许（换正常模型）重跑。
+  const gateRun = await service.analyze('crm-opf', { now: Date.now() + 30 * 60_000 });
+  assert.equal(gateRun.status, 'skipped');
+  const okRuntime = { llm: {}, models: { complete: async () => ({ content: [{ type: 'text', text: '{"opportunities":[{"summary":"扩容账号机会","confidence":0.8,"evidence_ids":["S1"]}]}' }], stopReason: 'stop' }) } } as any;
+  const healed = await new OpportunityService(db, okRuntime).analyze('crm-opf', { now: Date.now() + 2 * 3_600_000 });
+  assert.equal(healed.status, 'succeeded');
+  assert.equal(db.listOpportunities('crm-opf')[0].title, '扩容账号机会');
+}));
+
+test('workbench: opportunity analysis with no signals clears hypotheses deterministically without a model call', async () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-empty', name: '无信号客户' });
+  db.upsertOpportunity({ customerId: 'crm-empty', type: 'needs_led_expansion', title: '旧假设', detail: '旧', confidence: 0.6, status: 'hypothesis', evidenceRefs: [], discoveryQuestions: [], recommendedAction: '' });
+  let calls = 0;
+  const runtime = { llm: {}, models: { complete: async () => { calls += 1; return { content: [{ type: 'text', text: '[]' }], stopReason: 'stop' }; } } } as any;
+  const result = await new OpportunityService(db, runtime).analyze('crm-empty');
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.generated, 0);
+  assert.equal(calls, 0, '无证据不调模型');
+  assert.equal(db.listOpportunities('crm-empty').length, 0, '无证据支撑的旧假设被清空');
+}));
+
+test('workbench: parseOpportunityAnalysis rejects structurally invalid output and filters per-entry noise', () => {
+  const ev = { id: 'ev-1', customerId: 'c', kind: 'opportunity', label: 'x', detail: 'y', occurredAt: '2026-08-01', confidence: 0.5, sourceSystem: 'hemory' } as const;
+  const byRef = new Map([['S1', ev as never]]);
+  const parsed = parseOpportunityAnalysis('```json\n{"opportunities":[{"summary":"机会A","confidence":0.9,"evidence_ids":["S1","S1"]},{"summary":"机会A","confidence":0.2,"evidence_ids":["S1"]},{"summary":"幻觉","confidence":0.9,"evidence_ids":["S2"]}]}\n```', byRef);
+  assert.equal(parsed.length, 1, '幻觉引用丢弃、重复 summary 只留可信度更高的一条');
+  assert.equal(parsed[0].summary, '机会A');
+  assert.equal(parsed[0].confidence, 0.9);
+  assert.throws(() => parseOpportunityAnalysis('不是 JSON', byRef), /无法解析/);
+  assert.throws(() => parseOpportunityAnalysis('{"nope":1}', byRef), /无法解析/);
+});
+
+test('workbench: overview orders opportunities by confidence and decorates evidence sources', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-osrc', name: '来源客户' });
+  const evWeb = db.addEvidence({ customerId: 'crm-osrc', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资', occurredAt: '2026-08-10', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
+  const evHemory = db.addEvidence({ customerId: 'crm-osrc', kind: 'opportunity', label: '会议增购信号', detail: '扩容账号', occurredAt: '2026-08-20', confidence: 0.75, sourceSystem: 'hemory' });
+  db.upsertOpportunity({ customerId: 'crm-osrc', type: 'signal_expansion', title: '低可信', detail: '', confidence: 0.5, status: 'hypothesis', evidenceRefs: [evHemory], discoveryQuestions: [], recommendedAction: '' });
+  db.upsertOpportunity({ customerId: 'crm-osrc', type: 'signal_expansion', title: '高可信', detail: '', confidence: 0.9, status: 'hypothesis', evidenceRefs: [evWeb, evHemory], discoveryQuestions: [], recommendedAction: '' });
+  const overview = db.overview('crm-osrc') as Record<string, any>;
+  const items = overview.opportunities as any[];
+  assert.equal(items[0].title, '高可信', '按可信度降序');
+  assert.deepEqual(items[0].sources.map((item: any) => item.sourceSystem), ['web', 'hemory']);
+  assert.equal(items[0].sources[0].sourceUrl, 'https://news.example.com/1');
+  assert.equal(items[0].sourceCount, 2);
+  // 同一来源 URL 去重：webintel 多角度可能对同一链接存两条证据，来源行只留一条。
+  const evWebDup = db.addEvidence({ customerId: 'crm-osrc', kind: 'web_signal', label: '完成 B 轮融资（另一角度）', detail: '[contract] 同一报道', occurredAt: '2026-08-11', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
+  db.upsertOpportunity({ customerId: 'crm-osrc', type: 'signal_expansion', title: '同链双证', detail: '', confidence: 0.8, status: 'hypothesis', evidenceRefs: [evWeb, evWebDup], discoveryQuestions: [], recommendedAction: '' });
+  const deduped = ((db.overview('crm-osrc') as Record<string, any>).opportunities as any[]).find((item: any) => item.title === '同链双证');
+  assert.equal(deduped.sources.length, 1);
+  assert.equal(deduped.sourceCount, 1);
+  // 引用已失效（不存在的证据）不产生来源行，缺数据按 unknown 展示由前端兜底。
+  db.upsertOpportunity({ customerId: 'crm-osrc', type: 'signal_expansion', title: '悬空引用', detail: '', confidence: 0.3, status: 'hypothesis', evidenceRefs: ['ev-gone'], discoveryQuestions: [], recommendedAction: '' });
+  const refreshed = (db.overview('crm-osrc') as Record<string, any>).opportunities as any[];
+  const dangling = refreshed.find((item: any) => item.title === '悬空引用');
+  assert.equal(dangling.sources.length, 0);
+  assert.equal(dangling.sourceCount, 0);
 }));
 
 test('workbench: last interaction aggregates the latest business event across sources and formats', () => withDb((db) => {

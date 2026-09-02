@@ -359,6 +359,14 @@ export class WorkbenchDatabase {
         UNIQUE(customer_id, type, title)
       );
 
+      CREATE TABLE IF NOT EXISTS opportunity_generations (
+        customer_id TEXT PRIMARY KEY REFERENCES customers(id) ON DELETE CASCADE,
+        input_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        generated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS case_candidates (
         customer_id TEXT PRIMARY KEY REFERENCES customers(id) ON DELETE CASCADE,
         eligible INTEGER NOT NULL,
@@ -1223,6 +1231,26 @@ export class WorkbenchDatabase {
     }));
   }
 
+  /** 一次 LLM 分析结果全量替换该客户的增购机会假设（旧规则/v1 假设一并清掉）。 */
+  replaceOpportunities(customerId: string, items: Array<Omit<OpportunityHypothesis, 'id' | 'customerId' | 'generatedAt'>>): void {
+    this.db.prepare('DELETE FROM opportunities WHERE customer_id=?').run(customerId);
+    for (const item of items) this.upsertOpportunity({ ...item, customerId });
+  }
+
+  getOpportunityGeneration(customerId: string): { inputFingerprint: string; status: string; error: string | null; generatedAt: string } | null {
+    const row = this.db.prepare('SELECT * FROM opportunity_generations WHERE customer_id=?').get(customerId) as Row | undefined;
+    return row ? {
+      inputFingerprint: String(row.input_fingerprint), status: String(row.status), error: row.error == null ? null : String(row.error),
+      generatedAt: String(row.generated_at),
+    } : null;
+  }
+
+  saveOpportunityGeneration(customerId: string, inputFingerprint: string, status: 'succeeded' | 'failed', error?: string): void {
+    this.db.prepare(`INSERT INTO opportunity_generations(customer_id,input_fingerprint,status,error,generated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(customer_id) DO UPDATE SET input_fingerprint=excluded.input_fingerprint,status=excluded.status,error=excluded.error,generated_at=excluded.generated_at`)
+      .run(customerId, inputFingerprint, status, error ?? null, nowIso());
+  }
+
   setCaseCandidate(customerId: string, eligible: boolean, reason: string, evidenceRefs: string[], confidence: number): void {
     this.db.prepare(`INSERT INTO case_candidates(customer_id,eligible,reason,evidence_refs_json,confidence,updated_at) VALUES(?,?,?,?,?,?)
       ON CONFLICT(customer_id) DO UPDATE SET eligible=excluded.eligible,reason=excluded.reason,evidence_refs_json=excluded.evidence_refs_json,confidence=excluded.confidence,updated_at=excluded.updated_at`)
@@ -1802,7 +1830,24 @@ export class WorkbenchDatabase {
       lastInteractionAt: this.lastInteractionAt(customerId),
       identities: this.listIdentities(customerId),
       risk: this.latestRisk(customerId),
-      opportunities: this.listOpportunities(customerId),
+      // 增购机会：按可信度降序 + 逐条附信息来源（evidenceRefs 解析成可读 sources；引用已失效的证据自然消失）。
+      // 同一来源 URL 去重（webintel 多角度可能对同一链接存两条证据）；Hemory 无 URL 按证据 id，不同录音不误伤。
+      opportunities: (() => {
+        const evidenceById = new Map(this.listEvidence(customerId).map((item) => [item.id!, item]));
+        return this.listOpportunities(customerId)
+          .sort((a, b) => b.confidence - a.confidence)
+          .map((item) => {
+            const unique = new Map<string, { label: string; sourceSystem: string; sourceUrl: string | null; occurredAt: string }>();
+            for (const id of item.evidenceRefs) {
+              const entry = evidenceById.get(id);
+              if (!entry) continue;
+              const key = `${entry.sourceSystem}|${entry.sourceUrl ?? entry.id}`;
+              if (!unique.has(key)) unique.set(key, { label: entry.label, sourceSystem: entry.sourceSystem, sourceUrl: entry.sourceUrl ?? null, occurredAt: entry.occurredAt });
+            }
+            const sources = [...unique.values()];
+            return { ...item, sources: sources.slice(0, 4), sourceCount: sources.length };
+          });
+      })(),
       caseCandidate: this.getCaseCandidate(customerId),
       caseDrafts: this.listCaseDrafts(customerId),
       actions: this.listActions(customerId),

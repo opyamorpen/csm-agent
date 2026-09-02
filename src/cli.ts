@@ -54,6 +54,8 @@ const CLI_CAPABILITIES = [
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel'] },
+  { command: 'opportunities', workflow: 'opportunity-analysis', access: 'read-write', api: ['GET /api/customers/:id/overview', 'POST /api/customers/:id/opportunities/refresh'],
+    notes: '增购机会假设由 LLM 从会议录音片段+公开动态证据分析产出（数量不固定、按可信度排序、展示前 5 条，逐条附来源）；--refresh 强制重新分析（忽略指纹/24h 门），失败保留旧假设' },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
@@ -125,6 +127,9 @@ function help(): void {
   csm-agent webintel <客户ID或名称> [--json]
     （强制检索该客户最近三个月公开动态（8 个角度：融资/中标/产品/高管/组织/舆情/招聘/政策），
      落库后重算续约风险与增购机会；未搜到不构成任何信号，风险维度按 unknown 处理）
+  csm-agent opportunities <客户ID或名称> [--refresh] [--json]
+    （列出增购机会假设：LLM 从会议录音片段+公开动态证据分析，按可信度取前 5 条、
+     逐条附信息来源（会议录音/公开动态，可带链接）；--refresh 强制重新分析，失败保留旧假设）
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
@@ -302,7 +307,18 @@ async function showCustomer(input: string): Promise<void> {
     })));
   }
   console.log(`ONES 分类: ${Object.entries(counts).map(([key, value]) => `${key}=${value}`).join(', ') || 'none'}`);
-  console.log(`机会假设: ${(overview.opportunities ?? []).length}  行动: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
+  // 增购机会：与概览页同口径（前 5 条，一句话简述 + 来源行）；其余计数保持一行。
+  const opportunities = (overview.opportunities ?? []).slice(0, 5);
+  if (opportunities.length) {
+    console.log('增购机会（按可信度前 5）:');
+    opportunities.forEach((item: any, index: number) => {
+      console.log(`  ${index + 1}. ${item.title}（置信度 ${Math.round((item.confidence || 0) * 100)}%）`);
+      console.log(`     来源：${(item.sources ?? []).map(opportunitySourceLabel).join(' · ') || 'unknown'}`);
+    });
+  } else {
+    console.log('增购机会: 暂无识别到增购信号');
+  }
+  console.log(`行动: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
   console.log('身份映射:');
   console.table((overview.identities ?? []).map((item: any) => ({ system: item.system, externalId: item.external_id, label: item.label, status: item.status })));
 }
@@ -325,6 +341,41 @@ async function webintel(input: string): Promise<void> {
     const web = risk.dimensions?.web;
     if (web) console.log(`公开动态维度: ${web.known ? `${web.score}/${web.weight}` : 'unknown'} · ${web.reason}`);
   }
+}
+
+/** 来源行格式化：与概览页同口径（会议录音/公开动态 + 日期，公开动态带链接）。 */
+function opportunitySourceLabel(source: any): string {
+  const day = String(source.occurredAt ?? '').slice(0, 10);
+  const name = source.sourceSystem === 'hemory' ? `会议录音（${day}）`
+    : source.sourceSystem === 'web' ? `公开动态（${day}）${source.sourceUrl ? ` ${source.sourceUrl}` : ''}`
+    : (source.label ?? source.sourceSystem ?? 'unknown');
+  return name;
+}
+
+/** 增购机会：列出按可信度排序的前 5 条假设（一句话简述 + 来源行）；--refresh 强制重新分析。 */
+async function opportunitiesCommand(input: string, options: { refresh?: boolean } = {}): Promise<void> {
+  const customer = await resolveCustomer(input);
+  if (options.refresh) {
+    const result = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/opportunities/refresh`, { method: 'POST' });
+    if (jsonOutput) return print(result);
+    const statusLabel: Record<string, string> = { succeeded: '分析完成', skipped: '跳过' };
+    console.log(`增购机会重新分析（${customer.name}）：${statusLabel[result.status] ?? result.status}${result.reason ? ` · ${result.reason}` : ''}`);
+  }
+  const overview = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/overview`);
+  const items = (overview.opportunities ?? []).slice(0, 5);
+  if (jsonOutput) return print({ customer: { id: customer.id, name: customer.name }, total: (overview.opportunities ?? []).length, opportunities: overview.opportunities });
+  console.log(`增购机会（${customer.name}，按可信度前 ${items.length} 条）`);
+  if (!items.length) {
+    console.log('  暂无识别到增购信号');
+    return;
+  }
+  items.forEach((item: any, index: number) => {
+    console.log(`  ${index + 1}. ${item.title}（置信度 ${Math.round((item.confidence || 0) * 100)}%）`);
+    const sources = item.sources ?? [];
+    console.log(`     来源：${sources.map(opportunitySourceLabel).join(' · ') || 'unknown'}${(item.sourceCount ?? 0) > sources.length ? ` · 等 ${item.sourceCount} 条来源` : ''}`);
+  });
+  const hidden = (overview.opportunities ?? []).length - items.length;
+  if (hidden > 0) console.log(`  （另有 ${hidden} 条较低可信度假设未展示）`);
 }
 
 async function showTimeline(customerInput: string, sourceType?: string): Promise<void> {
@@ -1500,6 +1551,11 @@ async function main(): Promise<void> {
   if (command === 'customers') return showCustomers(args);
   if (command === 'customer') return showCustomer(args.join(' '));
   if (command === 'webintel') return webintel(args.join(' '));
+  if (command === 'opportunities') {
+    const refresh = rawArgs.includes('--refresh');
+    const input = args.filter((item) => item !== '--refresh' && !item.startsWith('--refresh=')).join(' ');
+    return opportunitiesCommand(input, { refresh });
+  }
   if (command === 'timeline') {
     const customer = args.shift() ?? '';
     return showTimeline(customer, args.shift());

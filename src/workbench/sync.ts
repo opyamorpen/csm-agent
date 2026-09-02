@@ -4,7 +4,7 @@ import type { McpGateway } from '../agent.js';
 import { WorkbenchDatabase } from './database.js';
 import { hemorySegmentationFingerprint } from './hemory.js';
 import type { HemorySegmentationResult } from './hemory.js';
-import { assessRisk, summarizeWebSignals } from './risk.js';
+import { assessRisk } from './risk.js';
 import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceEventInput, type SyncRun, type WorkhourRecord } from './types.js';
 
 const CRM_FIELDS = {
@@ -413,6 +413,8 @@ export class PortfolioSyncService {
     private readonly segmentRecording: (recording: SourceEvent) => Promise<HemorySegmentationResult>,
     /** 同步路径的公开动态检索（server 注入 WebIntelService.refresh）；缺省跳过（如测试环境）。 */
     private readonly refreshWebIntel: (customer: Customer, options: { force?: boolean }) => Promise<{ status: string; saved: number }> = async () => ({ status: 'skipped', saved: 0 }),
+    /** 增购机会 LLM 分析（server 注入 OpportunityService.analyze）；缺省跳过（如测试环境）。 */
+    private readonly analyzeOpportunities: (customerId: string) => Promise<{ status: string; reason?: string }> = async () => ({ status: 'skipped' }),
   ) {}
 
   /** 单客户公开动态检索（幂等去重：同一客户并发触发只跑一次）。失败只记状态，不抛给调用方。 */
@@ -984,11 +986,8 @@ export class PortfolioSyncService {
         attributionStatus: 'confirmed',
       });
       if (sourceType === 'support_ticket' || sourceType === 'operations_ticket') supportIssues.push(item);
-      if (sourceType === 'suggestion_feedback' && /需要|希望|增购|扩容|采购|模块|账号/.test(title)) {
-        this.db.addEvidence({ id: `ones-${hash(`${id}:opportunity`)}`, customerId: customer.id, sourceEventId: event.id,
-          kind: 'opportunity', label: 'ONES 客户建议与需求', detail: title, occurredAt: event.occurredAt,
-          confidence: 0.8, sourceSystem: 'ones', sourceUrl: event.url });
-      }
+      // 增购信号不再采信「建议与反馈」工单（业务拍板：该渠道需求大概率不驱动增购）；
+      // 增购机会由 OpportunityService 从会议录音片段 + 公开动态两类证据分析产出。
       if ((sourceType === 'support_ticket' || sourceType === 'operations_ticket') && /阻塞|挂起|blocked/i.test(status ?? '')) {
         this.db.addEvidence({ id: `ones-${hash(`${id}:risk`)}`, customerId: customer.id, sourceEventId: event.id,
           kind: 'risk', label: 'ONES 工单阻塞', detail: `${title}${status ? `（${status}）` : ''}`, occurredAt: event.occurredAt,
@@ -1096,27 +1095,10 @@ export class PortfolioSyncService {
     );
     this.db.saveRisk(risk);
 
-    const opportunityEvidence = evidence.filter((item) => item.kind === 'opportunity' || (item.kind === 'voice' && /增购|扩容|采购|需要|模块/.test(item.detail)));
-    const independentSources = new Set(opportunityEvidence.map((item) => item.sourceSystem));
-    const explicitNeed = opportunityEvidence.some((item) => /明确|需要|采购|增购|扩容|预算/.test(item.detail));
-    if (risk.level !== 'high' && (explicitNeed || independentSources.size >= 2)) {
-      this.db.upsertOpportunity({ customerId, type: 'needs_led_expansion', title: '需求驱动的增购假设',
-        detail: opportunityEvidence.slice(0, 3).map((item) => item.detail).join('；'), confidence: Math.min(0.9, 0.5 + opportunityEvidence.length * 0.1),
-        status: 'hypothesis', evidenceRefs: opportunityEvidence.map((item) => item.id!).filter(Boolean),
-        discoveryQuestions: ['该需求是否已有明确使用范围和负责人？', '客户是否确认预算与时间窗口？'],
-        recommendedAction: '与客户确认需求范围、决策人、预算和计划时间。' });
-    }
-
-    // 公开动态利好增购：近 90 天正向 web_signal（融资/中标/扩张等）≥1 条即成假设；high 风险客户不开新机会。
-    const web = summarizeWebSignals(evidence, new Date());
-    if (risk.level !== 'high' && web.positive.length > 0) {
-      this.db.upsertOpportunity({ customerId, type: 'public_signal_expansion', title: '公开动态利好增购',
-        detail: web.positive.slice(0, 3).map((item) => `${item.label}（${item.occurredAt.slice(0, 10)}）`).join('；'),
-        confidence: Math.min(0.9, 0.5 + web.positive.length * 0.1),
-        status: 'hypothesis', evidenceRefs: web.positive.map((item) => item.id!).filter(Boolean),
-        discoveryQuestions: ['公开动态里的扩张/投入是否落到我方产品的使用场景？', '客户是否已进入预算或立项窗口？'],
-        recommendedAction: '结合公开动态与客户确认扩张计划，评估增购切入点。' });
-    }
+    // 增购机会 v2：规则双假设（needs_led_expansion / public_signal_expansion）退役，
+    // 改由 OpportunityService 从会议录音片段 + 公开动态证据 LLM 分析产出（数量不固定、按可信度排序）。
+    // 落库证据已就绪，异步调度即可；门控/失败降级在服务内部，绝不阻塞同步。
+    void this.analyzeOpportunities(customerId).catch(() => undefined);
 
     // 案例候选判定用全量事件口径（与生成管线 listCaseContextEvents 一致）：200 条分页窗口会漏掉早期交付记录。
     const delivered = this.db.listCaseContextEvents(customerId).filter((item) => item.sourceSystem === 'ones' && isDeliveredOnesEvent(item));

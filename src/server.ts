@@ -20,6 +20,7 @@ import { WorkbenchDatabase } from './workbench/database.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { WebIntelService } from './workbench/webintel.js';
+import { OpportunityService } from './workbench/opportunity.js';
 import { RISK_RULE_VERSION } from './workbench/risk.js';
 import { CaseService, caseNarrativeWarnings } from './workbench/cases.js';
 import { HemoryDraftService, draftDisplayFields, shanghaiEventDate, draftEditContract, applyDraftEdits, confirmDraftEditContract, applyConfirmDraftEdits } from './workbench/drafts.js';
@@ -184,6 +185,7 @@ interface WorkbenchServices {
   drafts: HemoryDraftService;
   weekly: WeeklyReportService;
   wiki: WikiService;
+  opportunities: OpportunityService;
 }
 
 function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices): http.RequestListener {
@@ -682,6 +684,16 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           } catch (error) {
             return json(res, 502, { error: (error as Error).message });
           }
+        }
+        // 增购机会重新分析：强制（忽略指纹/时长门），从会议录音片段 + 公开动态证据重新产出假设，
+        // 失败保留旧假设；返回最新列表（含 sources）供三端同源展示。
+        if (req.method === 'POST' && sub === '/opportunities/refresh') {
+          const customer = workbench.db.getCustomer(customerId);
+          if (!customer) return json(res, 404, { error: 'customer not found' });
+          const result = await workbench.opportunities.analyze(customerId, { force: true });
+          const body: Record<string, unknown> = { ...result, opportunities: workbench.db.overview(customerId)?.opportunities ?? [] };
+          if (result.status === 'failed') return json(res, 502, { ...body, error: result.reason ?? '增购机会分析失败' });
+          return json(res, 200, body);
         }
       }
 
@@ -1466,6 +1478,8 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   }
   // 闭包延迟引用 sync（下方才声明）：resumePending 在启动 5s 后才运行，届时 sync 必已赋值。
   const drafts = new HemoryDraftService(db, runtime.mcp, runtime, (customerId: string) => sync.syncOnesForCustomer(customerId));
+  // 增购机会 v2：从会议录音片段 + 公开动态证据 LLM 分析产出假设（串行队列 + 指纹/时长门控在服务内部）。
+  const opportunities = new OpportunityService(db, runtime);
   let sync: PortfolioSyncService;
   const hemorySegments = new HemorySegmentationService(db, runtime, (events) => {
     const byCustomer = new Map<string, string[]>();
@@ -1487,7 +1501,9 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
       getApiKey: () => loadSearchConfig().apiKey,
       getMaxResults: () => loadSearchConfig().maxResults ?? 5,
       getKeylessEnabled: () => loadSearchConfig().keylessFallback,
-    }).refresh(customer, options));
+    }).refresh(customer, options),
+    // 增购机会分析注入：recompute 落证据后异步调度，服务内部有指纹 + 24h 门控与失败降级。
+    (customerId) => opportunities.analyze(customerId));
   const cases = new CaseService(db, runtime.mcp, runtime, {
     // 案例生成时联网检索（与 web_search 工具/公开动态同步同源配置）。
     getApiKey: () => loadSearchConfig().apiKey,
@@ -1514,6 +1530,9 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   for (const customer of db.listCustomers()) {
     if (db.latestRisk(customer.id)?.ruleVersion !== RISK_RULE_VERSION) sync.recompute(customer.id);
   }
+  // 增购机会 v2 首轮引导：无生成记录（或失败超过重试门）的客户排一次分析——
+  // 部署后不必等 02:00 全量同步或手动刷新，旧规则双假设即被替换；门控命中的秒级跳过，重启无感。
+  for (const customer of db.listCustomers()) opportunities.schedule(customer.id);
   const resumeTimer = setTimeout(() => {
     hemorySegments.resumePending();
     drafts.resumePending();
@@ -1521,7 +1540,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     cases.resumePending();
   }, 5_000);
   resumeTimer.unref();
-  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki }));
+  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki, opportunities }));
   // 旧进程检测的锚点：进程启动时加载的构建 + 受监管时的磁盘变化自检。
   loadedBuildInfo = readBuildInfo();
   serverStartedAt = new Date().toISOString();

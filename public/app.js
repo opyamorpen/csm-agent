@@ -2941,6 +2941,20 @@
       } catch (error) { await alertDialog(`公开动态检索失败：${error.message}`); }
       finally { webIntel.disabled = false; webIntel.textContent = '刷新公开动态'; }
     };
+    // 增购机会重新分析：强制（忽略指纹/时长门），从会议录音片段+公开动态证据重新产出假设，失败保留旧列表。
+    const reanalyze = el('button', 'quiet-command', '重新分析增购机会');
+    reanalyze.onclick = async () => {
+      try {
+        reanalyze.disabled = true;
+        reanalyze.textContent = '分析中…';
+        const result = await api(`/api/customers/${encodeURIComponent(customerId)}/opportunities/refresh`, { method: 'POST' });
+        await openCustomer(customerId);
+        await alertDialog(result.status === 'succeeded'
+          ? `已重新分析，识别到 ${result.generated} 条增购机会假设（按可信度展示前 5 条）。`
+          : `未重新生成：${result.reason || result.status}（展示仍为最近一次分析结果）。`);
+      } catch (error) { await alertDialog(`增购机会分析失败：${error.message}`); }
+      finally { reanalyze.disabled = false; reanalyze.textContent = '重新分析增购机会'; }
+    };
     const generate = el('button', 'primary-command', '生成案例');
     generate.onclick = async () => {
       try {
@@ -2974,19 +2988,46 @@
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
     };
-    commands.append(refresh, webIntel, generate, ask); head.append(title, commands); customerOverview.append(head);
+    commands.append(refresh, webIntel, reanalyze, generate, ask); head.append(title, commands); customerOverview.append(head);
 
     const summary = el('div', 'definition-grid');
     summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)),
       definition('使用版本', c.usageVersion || 'unknown'), definition('最后互动', formatDate(data.lastInteractionAt ?? c.lastContactAt)), definition('数据同步', formatDateTime(c.syncedAt)));
     customerOverview.append(summary);
 
-    const opportunities = el('div', 'opportunity-grid');
-    if (!(data.opportunities || []).length) opportunities.append(el('div', 'workspace-empty', '暂无满足双证据条件的增购假设'));
-    for (const item of data.opportunities || []) {
-      const card = el('article', 'opportunity-card');
-      card.append(el('strong', null, item.title), el('p', null, item.detail), el('div', 'cell-sub', `置信度 ${Math.round(item.confidence * 100)}%`), el('div', 'recommended', item.recommendedAction));
-      opportunities.append(card);
+    // 增购机会：有序列表（一句话简述 + 来源行），服务端已按可信度降序，展示取前 5。
+    const opportunities = el('div');
+    const oppTop = [...(data.opportunities || [])].sort((a, b) => (b.confidence || 0) - (a.confidence || 0)).slice(0, 5);
+    if (!oppTop.length) {
+      opportunities.append(el('div', 'workspace-empty', '暂无识别到增购信号'));
+    } else {
+      const list = el('ol', 'opportunity-list');
+      for (const item of oppTop) {
+        const li = el('li', 'opportunity-item');
+        li.append(el('div', 'opportunity-item-text', item.title));
+        li.append(el('span', 'cell-sub', `置信度 ${Math.round((item.confidence || 0) * 100)}%`));
+        const sources = item.sources || [];
+        const line = el('div', 'opportunity-evidence', '来源：');
+        if (!sources.length) line.append('unknown');
+        sources.forEach((source, index) => {
+          if (index) line.append(' · ');
+          const day = (source.occurredAt || '').slice(0, 10);
+          const name = source.sourceSystem === 'hemory' ? `会议录音（${day}）` : source.sourceSystem === 'web' ? `公开动态（${day}）` : (source.label || source.sourceSystem);
+          if (source.sourceUrl) {
+            const link = el('a', 'source-link', name);
+            link.href = source.sourceUrl;
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+            line.append(link);
+          } else line.append(name);
+        });
+        if ((item.sourceCount || 0) > sources.length) line.append(` · 等 ${item.sourceCount} 条来源`);
+        li.append(line);
+        list.append(li);
+      }
+      opportunities.append(list);
+      const hidden = (data.opportunities || []).length - oppTop.length;
+      if (hidden > 0) opportunities.append(el('div', 'cell-sub', `另有 ${hidden} 条较低可信度假设未展示`));
     }
     const actions = el('div', 'action-board');
     if (!(data.actions || []).length) actions.append(el('div', 'workspace-empty', '暂无行动事项'));

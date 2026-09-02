@@ -88,6 +88,7 @@ csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
 csm-agent customer <CRM客户ID> # 概览含续约风险五维度明细与全量完成率
 csm-agent webintel <CRM客户ID> # 强制检索该客户最近三个月公开动态（8 角度），落库并重算风险/机会
+csm-agent opportunities <CRM客户ID> [--refresh] # 增购机会假设（LLM 从会议录音片段+公开动态分析，按可信度前 5 条、逐条附来源）；--refresh 强制重新分析
 csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent workhours <CRM客户ID> # 总工时和登记明细，按工时日期倒序
 csm-agent actions [CRM客户ID]
@@ -199,6 +200,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
+- `POST /api/customers/:id/opportunities/refresh`（强制重新分析增购机会：LLM 从会议录音片段+公开动态证据产出假设，数量不固定、按可信度排序；证据变化自动重析（24h 节流）+失败 1h 重试门在服务端，失败保留旧假设；`GET /api/customers/:id/overview` 的 opportunities 逐条附 sources 来源标注）
 - `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制；`customer_id` 按客户过滤，配合 `status=confirmed` 查看某客户已归属片段）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`、`POST /api/hemory/fragments/regenerate`（按天强制重生成草稿，body `{eventIds}`，返回 `{jobs, days}` 与归属端点同形）、`POST /api/hemory/fragments/inherit`（存量孪生归属继承修复，body `{apply}`，默认 dry-run 返回逐录音修复计划）
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
 - `POST /api/draft-batches/:id/confirm`、`POST /api/draft-batches/:id/regenerate`、`POST /api/draft-items/:id/retry`、`GET /api/draft-jobs?ids=`（生成任务状态；归属/重生成响应返回 jobId，失败任务不创建批次只能在此查询；任务行含 progress 进度文案，heretry/case/weekly 的孤儿 running（服务重启遗留、永不终结）带 stalled 标注——前端恢复轮询跳过、CLI `--wait` 按终态退出）、`GET /api/draft-jobs?status=failed&kind=hemory`（失败任务列表）、`GET /api/draft-jobs?status=active&kind=hemory`（全局在途任务，Web 刷新恢复横幅/CLI `draft jobs --active`；在途任务带 dateKey 装饰，孤儿 running 带 stalled 标注）
