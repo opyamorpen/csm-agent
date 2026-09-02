@@ -1229,6 +1229,28 @@ test('send button doubles as stop control while a turn is running', () => {
   assert.match(css, /#send\.stopping:hover \{ background: var\(--danger-btn-hover\); filter: none; \}/);
 });
 
+test('stopping banner releases the top-right status when the turn ends', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+  // stopTurn 先同步置「正在停止对话…」再发停止请求：turn_end 可能先于本请求的响应到达，后置会错过释放。
+  const stopper = app.match(/async function stopTurn[\s\S]*?\n  \}\n\n  \/\/ 对话进行中发送按钮是「停止」/)?.[0];
+  assert.ok(stopper, 'stopTurn source was not found');
+  assert.match(stopper, /setStatus\('', '正在停止对话…'\);\n    try \{\n      await api/);
+  // 停止没成（409/网络失败）不留无意义的停止文案。
+  assert.match(stopper, /setIdleStatus\(\);\n      if \(busy\) await alertDialog/);
+  // turn_end 复位 composer 时按文案守卫释放停止文案（setStatus 纯赋值无自动清除曾把它永久钉死在顶栏）。
+  const turnEnd = app.match(/case 'turn_end':[\s\S]*?break;/)?.[0];
+  assert.ok(turnEnd, 'turn_end case was not found');
+  assert.match(turnEnd, /if \(statusEl\.lastChild\.textContent === '正在停止对话…'\) setIdleStatus\(\);/);
+  // 空闲态收敛为 setIdleStatus（MCP warn 摘要/就绪），重复的三元表达式只保留 helper 内一处。
+  const idle = app.match(/function setIdleStatus\(\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(idle, 'setIdleStatus source was not found');
+  assert.match(idle, /mcpFailures\.length \? 'warn' : 'ok'/);
+  assert.equal(app.match(/部分系统未连接/g)?.length ?? 0, 1);
+  // SSE 断线提示同样有释放路径：重连成功（onopen）按文案守卫回空闲态。
+  assert.match(app, /es\.onopen = \(\) => \{ if \(statusEl\.lastChild\.textContent === '连接中断，正在重连…'\) setIdleStatus\(\); \};/);
+});
+
 test('composer lives inside the chat column and aligns with the conversation list', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');

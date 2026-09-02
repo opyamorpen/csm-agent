@@ -155,6 +155,11 @@
     }, clearMs);
   }
 
+  /** 空闲态状态栏：MCP 部分未连接给 warn 摘要，否则「就绪」。 */
+  function setIdleStatus() {
+    setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+  }
+
   /** 侧边栏 Agent 角标 = Hemory 待归属 + 草稿箱两个数字之和（与两个 tab 角标同源）。 */
   function updateAgentNavCount() {
     const total = Number(hemoryPendingCount.textContent || 0) + Number(draftPendingCount.textContent || 0);
@@ -685,6 +690,8 @@
         addTokenUsage(e.usage);
         loadSessions();
         loadRecords();
+        // 「正在停止对话…」是纯赋值无自动清除：轮次结束时按文案守卫释放，别清掉其他面板置上的状态。
+        if (statusEl.lastChild.textContent === '正在停止对话…') setIdleStatus();
         break;
     }
   }
@@ -768,6 +775,8 @@
       } catch (_) { /* ignore */ }
     };
     es.onerror = () => setStatus('warn', '连接中断，正在重连…');
+    // 重连成功后释放断线提示（onerror 同样是纯赋值，没有 onopen 时文案会一直挂着）。
+    es.onopen = () => { if (statusEl.lastChild.textContent === '连接中断，正在重连…') setIdleStatus(); };
   }
 
   async function switchSession(id) {
@@ -779,7 +788,7 @@
     renderSessionList(list);
     const meta = list.find((s) => s.id === id);
     sessionCustomerId = meta?.customerId ?? null;
-    setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+    setIdleStatus();
   }
 
   /** 会话列表点击：切会话并回到对话面板——侧栏列表在 Hemory 片段/草稿箱 tab 下仍可见，只 switchSession 会停留在原面板。 */
@@ -1190,7 +1199,7 @@
 
       configResult.className = 'ok';
       configResult.textContent = results.join('；');
-      setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+      setIdleStatus();
     } catch (err) {
       configResult.className = 'err';
       configResult.textContent = '保存失败: ' + err.message;
@@ -3805,11 +3814,14 @@
   async function stopTurn() {
     if (!busy || !sessionId) return;
     sendEl.disabled = true;
+    // 文案先于停止请求置上：turn_end 可能先于本请求的响应到达，后置会错过 turn_end 的释放时机。
+    setStatus('', '正在停止对话…');
     try {
       await api(`/api/sessions/${sessionId}/stop`, { method: 'POST' });
-      setStatus('', '正在停止对话…');
     } catch (error) {
       sendEl.disabled = false;
+      // 停止没成（409/网络失败），不留无意义的停止文案。
+      setIdleStatus();
       if (busy) await alertDialog(error.message);
     }
   }
