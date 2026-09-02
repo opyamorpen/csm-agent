@@ -2451,8 +2451,12 @@
       if (job.status === 'succeeded') {
         if (notice) notice.remove();
         const list = await api(`/api/case-drafts?customer_id=${encodeURIComponent(customerId)}`);
-        const draft = (list.drafts || []).find((item) => item.fingerprint === fingerprint)
-          ?? (list.drafts || [])[0];
+        const drafts = list.drafts || [];
+        // job 指纹（重新生成时加盐）与草稿指纹（素材快照摘要）不同源，按指纹 find 必落空——
+        // 改按「任务创建之后新落库的草稿」定位（created_at ≥ job.createdAt），最后才兜底列表第一条。
+        const draft = drafts.find((item) => item.fingerprint === fingerprint)
+          ?? drafts.find((item) => !job.createdAt || (item.createdAt && item.createdAt >= job.createdAt))
+          ?? drafts[0];
         return draft ? { draft } : { error: '任务成功但未找到新草稿' };
       }
       if (job.status === 'failed') { if (notice) notice.remove(); return { error: job.error || '未知原因' }; }
@@ -2945,12 +2949,19 @@
         const result = await api('/api/case-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId }) });
         if (result.reused && result.draftId) {
           const detail = await api(`/api/case-drafts/${encodeURIComponent(result.draftId)}`);
+          ensureCaseNotice(customerOverview, '素材与最近版本一致，已复用现有草稿；如需强制重写请用草稿卡上的「重新生成」');
           editCase(detail.draft);
           return;
         }
         const outcome = await pollCaseJob(customerId, result.jobId, result.fingerprint, customerOverview);
         if (outcome.error) await alertDialog(`案例生成失败：${outcome.error}`);
-        else if (outcome.draft) editCase(outcome.draft);
+        else if (outcome.draft) {
+          // 新稿已落库：先重渲染客户页让卡片列表换新（否则关掉编辑弹窗仍停在生成前的旧列表），再打开新稿。
+          await openCustomer(customerId);
+          void loadCases();
+          editCase(outcome.draft);
+        }
+        // outcome.detached：页面已重渲染（锚点失效），openCustomer 的在途任务恢复轮询会接管进度与刷新。
       } catch (error) { await alertDialog(error.message); }
       finally { generate.disabled = false; generate.textContent = '生成案例'; }
     };
@@ -3211,7 +3222,13 @@
             const result = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}/regenerate`, { method: 'POST' });
             const outcome = await pollCaseJob(draft.customerId, result.jobId, result.fingerprint, card);
             if (outcome.error) await alertDialog(`重新生成失败：${outcome.error}`);
-            else if (outcome.draft) editCase(outcome.draft);
+            else if (outcome.draft) {
+              // 新稿已落库：先重渲染客户页让卡片列表换新，再打开新稿编辑（与「生成案例」路径同口径）。
+              await openCustomer(draft.customerId);
+              void loadCases();
+              editCase(outcome.draft);
+            }
+            // outcome.detached：页面已重渲染，openCustomer 的在途任务恢复轮询会接管进度与刷新。
           } catch (error) { await alertDialog(error.message); }
           finally { regenerate.disabled = false; regenerate.textContent = '重新生成'; }
         };

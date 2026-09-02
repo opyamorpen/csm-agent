@@ -4156,7 +4156,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v10.1-standard');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v10.2-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4938,7 +4938,9 @@ test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowl
   // 叠字防御（真实验收教训：<text> 内裸换行多行文字栅格化后叠在同一基线不可读）。
   assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">系统直接提报\n原始需求</text></svg>'), null, 'text 内裸换行拒绝');
   assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1">第二行</tspan></text></svg>'), null, '第二个起 tspan 缺 dy/y 拒绝');
-  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">裸文字<tspan x="1" dy="18">第二行</tspan></text></svg>'), null, '裸文字与 tspan 混用拒绝');
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">裸文字<tspan x="1" dy="18">第二行</tspan></text></svg>'), null, '裸文字与带 x/y 定位 tspan 混用拒绝（同位叠加）');
+  // v10.2：裸前缀 + 无 x/y 定位的 tspan = 合法行内接排（带状板分组头「模块名·副题」常见写法），放行。
+  assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">ONES Project·<tspan font-weight="bold">工作项管理</tspan></text></svg>'), '行内接排 tspan（无定位）放行');
   assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1" dy="18">第二行</tspan></text></svg>'), '规范 tspan 拆行放行');
   // dy 属性必须在消毒后存活（真实验收教训：dy 被当未知属性剥离 → 落库 SVG 多行叠在同一基线）。
   assert.match(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2"><tspan x="1">第一行</tspan><tspan x="1" dy="18">第二行</tspan></text></svg>')!, /dy="18"/, 'dy 不得被属性白名单剥离');
@@ -5102,9 +5104,12 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.match(architecture, /不构成交付证据/, '图谱护栏');
   const capabilityMap = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'capability_map' });
   assert.match(capabilityMap, /需求场景-产品能力映射图/, '映射图 brief');
-  assert.match(capabilityMap, /自上而下编号/, '场景按先后顺序编号');
+  assert.match(capabilityMap, /分层带状板/, '带状板版式（样例范式）');
+  assert.match(capabilityMap, /自左向右横排/, '场景短标签按先后顺序横排');
+  assert.match(capabilityMap, /列对位即映射/, '位置即归属');
+  assert.match(capabilityMap, /禁止画「需求→功能」的映射箭头/, '禁映射连线');
   assert.match(capabilityMap, /viewBox="0 0 800 460"/, '映射图画布（嵌入一指禅近无损）');
-  assert.match(capabilityMap, /场景→能力/, '映射连线方向');
+  assert.match(capabilityMap, /#2467EC/, '样例配色（实心蓝标签）');
   assert.match(capabilityMap, /【ONES 产品能力图谱/, '映射图注入能力图谱');
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
   assert.match(valueMap, /你只画两个区/, '全景图只画痛点带与价值栏两区');

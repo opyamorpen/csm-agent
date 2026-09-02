@@ -1326,6 +1326,19 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   assert.ok(pollCase, 'pollCaseJob source was not found');
   assert.match(pollCase, /\/api\/draft-jobs\?ids=/);
   assert.match(pollCase, /item\.fingerprint === fingerprint/);
+  // v10.2 新稿定位契约：加盐 job 指纹与草稿指纹不同源、指纹 find 必落空——
+  // 必须有「created_at 不早于任务创建时间」的兜底定位，不得只兜底 drafts[0]（旧稿被编辑会排最前）。
+  assert.match(pollCase, /item\.createdAt && item\.createdAt >= job\.createdAt/);
+  // v10.2 复用提示契约：素材未变复用旧稿时必须显式告知，不得静默打开旧稿。
+  assert.match(source, /素材与最近版本一致，已复用现有草稿/);
+  // v10.2 成功后刷新契约：新稿落库后先重渲染客户页与案例库再打开新稿——
+  // 否则关掉编辑弹窗仍停留在生成前的旧列表（audit 实证新稿落库后用户仍在旧卡导出旧版）。
+  const genHandler = source.match(/generate\.onclick = async \(\) => \{[\s\S]*?finally \{ generate\.disabled = false; generate\.textContent = '生成案例'; \}/)?.[0];
+  assert.ok(genHandler, '生成案例 handler 存在');
+  assert.match(genHandler, /await openCustomer\(customerId\);\s*\n\s*void loadCases\(\);\s*\n\s*editCase\(outcome\.draft\)/, '生成成功先刷新列表再开新稿');
+  const regenHandler = source.match(/regenerate\.onclick = async \(\) => \{[\s\S]*?finally \{ regenerate\.disabled = false; regenerate\.textContent = '重新生成'; \}/)?.[0];
+  assert.ok(regenHandler, '重新生成 handler 存在');
+  assert.match(regenHandler, /await openCustomer\(draft\.customerId\);\s*\n\s*void loadCases\(\);\s*\n\s*editCase\(outcome\.draft\)/, '重新生成成功先刷新列表再开新稿');
   // 进度展示契约：案例轮询消费 job.progress（阶段/检索角度/模型输出字数），锚点存活期间无超时放弃。
   assert.match(pollCase, /job\.progress \|\|/);
   assert.match(pollCase, /ensureCaseNotice/);

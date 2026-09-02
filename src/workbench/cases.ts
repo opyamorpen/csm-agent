@@ -13,9 +13,9 @@ import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 
-/** v10.1：一指禅图（value_map）升级为价值章规划标配（v10 首次真实生成被规划模型按条件图跳过）。
- * 提示词实质变化必须升版本破指纹短路，否则存量自然指纹会命中旧稿跳过重新生成。 */
-export const CASE_GENERATION_VERSION = 'case-v10.1-standard';
+/** v10.2：需求场景-产品能力映射图重画为样例的「分层带状板」范式（场景短标签带+功能列对位+平台带，
+ * 禁映射连线；配色单蓝色系分层）。提示词实质变化必须升版本破指纹短路。 */
+export const CASE_GENERATION_VERSION = 'case-v10.2-standard';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1565,10 +1565,12 @@ export function sanitizeCaseSvg(raw: string): string | null {
   if (rawTextNodes.some((node) => /\S\s*\n\s*\S/.test(decodeXmlEntities(node)))) return null;
   for (const textMatch of svg.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/g)) {
     const inner = textMatch[2];
-    // 裸文字 = 剥掉整个 tspan 元素（含其文字）后仍残留的文字——与首个 tspan 同位叠加才是叠字。
+    // 裸文字 = 剥掉整个 tspan 元素（含其文字）后仍残留的文字。
     const plainPrefix = inner.replace(/<tspan\b[\s\S]*?<\/tspan>/g, '').replace(/<[^>]+>/g, '').trim();
     const tspans = [...inner.matchAll(/<tspan\b([^>]*)>/g)].map((match) => match[1]);
-    if (plainPrefix && tspans.length) return null;
+    if (plainPrefix && tspans.some((attrs) => /\b(?:x|y)\s*=/.test(attrs))) return null;
+    // 裸前缀 + 无 x/y 定位的 tspan 是合法行内接排（v10.2 带状板分组头「模块名·副题」的常见写法），
+    // 只有 tspan 带 x/y 绝对定位回到 text 原点时才与裸前缀同位叠加（v7 叠字的真实场景），才拒绝。
     if (tspans.slice(1).some((attrs) => !/\b(?:dy|y)\s*=/.test(attrs))) return null;
   }
   // 文本内容过正文禁区词（联系人/金额/内部系统名等不得出现在图内）。
@@ -1688,7 +1690,7 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     + `- 每个条目的 idea 是「这一条要写什么」的要点描述（40 字以内，如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
     + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
     + `- 客户简介三小节（intro 前三槽）的摘录必须真的可抄：优先逐字取 customer 档案行（如「客户名称：…；行业：…」）或 web_context snippet 中的完整原句；档案与检索都查不到的信息（成立年份、规模、排名等具体事实）不得凭常识补写来源——对应小节写基于档案的收缩要点，缺失信息收进 unknowns（服务端会把无法定位摘录的简介/总结条目回退到档案锚点，但凭常识编造的事实仍会被公开检查标记）。\n`
-    + `- 配图（figures）：capability_map=需求场景-产品能力映射图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序编号、逐场景对应所采用的 ONES 产品能力，idea 写明场景顺序与对应能力主线）；value_map=痛点-方案-价值全景图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序收束对位，方案区由服务端嵌入需求场景-产品能力映射图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当素材中有外部系统与 ONES 对接/集成的表述时才在 capability_map 之外加画——此时解决方案章共两张图，idea 写明参与集成的系统与各自的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
+    + `- 配图（figures）：capability_map=需求场景-产品能力映射图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序横排短标签、功能项按场景列对位，idea 写明场景顺序与对应能力主线）；value_map=痛点-方案-价值全景图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序收束对位，方案区由服务端嵌入需求场景-产品能力映射图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当素材中有外部系统与 ONES 对接/集成的表述时才在 capability_map 之外加画——此时解决方案章共两张图，idea 写明参与集成的系统与各自的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
     + `- 章节路由：客户简介三小节（company_info/business_scope/competitive_strategy）只取客户档案与 web_context 可信公开信息（customer_official、government_procurement 优先，media 只能辅助）；项目背景取合作动因（档案、早期沟通记录、招采与政策类公开信息）；业务现状必须是合作前或当前问题；诉求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值与复盘条目必须来自客户说话人或可复核指标，价值发生在方案落地之后、复盘发生在合作期间。\n`
     + `- 信号表兜底：pain_point_signals/value_signals 是关键词预扫描的线索而非全集——若在 communications 片段原文中发现未被收录、但确属客户痛点或方案落地后价值反馈的表述，可直接引用该片段（source_ref 取片段 id）建条目，不受信号表限制，摘录从片段原文逐字截取。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于客户简介/项目背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
@@ -1823,7 +1825,7 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
 const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
   flow_current: '流程现状图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
   flow_target: '目标流程图：客户期望达成的目标流程——方案落地后的目标流转，步骤框 + 箭头，体现统一平台/自动化环节替代人工与断点',
-  capability_map: '需求场景-产品能力映射图：客户的每个需求场景按业务先后顺序编号排列，逐场景对应所采用的 ONES 产品能力（能力名以能力图谱为准）——左场景右能力的映射连线图',
+  capability_map: '需求场景-产品能力映射图：客户需求场景按业务先后顺序横排为短标签带，每个场景正下方挂其采用的功能项清单（模块分组头+条目，列对位即映射），底部为通用平台能力带——分层带状板式，不画映射连线',
   architecture: '系统集成架构图：多系统集成场景专用——素材表明方案涉及外部系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时绘制：ONES 平台为核心、外部系统环绕对接、连线带数据标注。模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
   value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——顶部痛点带 + 右栏价值栏两区由模型绘制（痛点与价值按序一一对位），左下方案区由服务端嵌入需求场景-产品能力映射图',
@@ -1854,12 +1856,14 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   flow_target: CASE_FIGURE_SIMPLE_KIND_RULES,
   milestone: CASE_FIGURE_SIMPLE_KIND_RULES,
   capability_map: [
-    '- 规模：需求场景 3~6 个、ONES 能力块 4~8 个，SVG 约 4~8k 字符即可。',
+    '- 规模：需求场景 4~6 个、每场景下挂功能项 3~5 条、底部通用能力 3~5 项，SVG 约 5~10k 字符即可。',
     '- 画布 viewBox="0 0 800 460"（此图后续会被服务端原比例嵌入一指禅图，不要改画布比例）。',
-    '- 布局：左列为客户需求场景卡——白底卡 + 实色编号标题条（白字 6~12 字场景名）+ 卡内一行副注（不超过 20 个字），按业务诉求/方案正文中的先后顺序自上而下编号 1、2、3… 排列；右侧为 ONES 产品能力块（白底块，能力名从下方能力图谱中选取，可按产品域加实色域名条分组）；每个能力块尽量垂直对齐其主要采用的场景行，使映射以水平短线为主；左列与右列之间留足连线走廊。',
-    '- 映射连线：每个场景向其采用的能力引 1~2 条单向箭头（场景→能力），深灰细线 + 小箭头，以水平线或浅折线为主；禁止长距离纵向干线、禁止连线互相交叉——某条映射难以无交叉布线时，宁可把目标能力块挪到对应场景的行高再连；一个能力被多个场景共用是正常的（多入汇聚，箭头从不同行汇入同块）；箭头尖端必须触达能力块的边框，不得停在块附近的空白处。',
-    '- 同一产品域拆出多个能力块时，块标题须带副题区分（如「ONES Project·工作项管理」「ONES Project·流程自动化」）。',
-    '- 场景与对应能力须有素材依据，不虚构未提及的需求或未采用的能力；除映射主线外不画其他装饰元素。',
+    '- 版式为「分层带状板」，需求与功能的对应关系靠位置表达（列对位即映射），不画映射连线：',
+    '  · 顶部场景带：客户需求场景压缩为 4~10 字短标签（尽量精简，过长的场景名须提炼压缩，不带句子描述），做成实心蓝（#2467EC）白字圆角块，按业务先后顺序自左向右横排一行；带左端放一块同色「需求场景」行标签块；相邻场景块之间可加细灰（#9CA3AF）小箭头表示先后。',
+    '  · 中部功能区面板（版面主体）：每个场景标签正下方挂一列——列顶为模块分组头（浅蓝 #D6E7FB 底、深蓝 #1D4FA8 字，写「ONES 模块名·副题」，模块名从下方能力图谱中选取），分组头下为白底无框功能项清单（深灰黑 #1F2329、4~8 字/条、每列 3~5 条）；该场景采用的功能就放在它这一列里。',
+    '  · 底部平台带：一条全宽浅蓝（#E8F1FD）横带，列跨场景通用的平台能力（如 开放集成、权限与安全、流程自动化——从能力图谱选取且须与方案相关），作为所有场景的公共支撑。',
+    '- 禁止画「需求→功能」的映射箭头或连线；箭头只允许用于顶部场景带内的流程先后。',
+    '- 同一产品模块在多列出现时，各列分组头须带副题区分；场景、模块、功能项均须有素材依据，不虚构未提及的需求或未采用的能力。',
   ].join('\n'),
   architecture: [
     '- 规模：块总数不超过 22、连线不超过 8 条，SVG 约 4~10k 字符即可。',
@@ -1878,7 +1882,7 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
     '- 你只画两个区：①顶部痛点带——红色虚线圆角框（x=44 至 x=1396、y=24 至 y=184）+ 框顶中央压红色实心「痛点」标题牌，框内痛点卡横向均排：红色实心标题条带编号（白字，如「1. 收集靠邮件」6~10 字）+ 白底卡身一行描述（不超过 30 个字），从业务现状/业务诉求正文中提炼；②右侧价值栏——蓝色虚线圆角框（x=1030 至 x=1396、y=208 至 y=696）+ 框顶蓝色实心「价值」标题牌，价值卡纵向排列：蓝色实心标题条带编号（如「1. 进度可控」）+ 白底卡身描述（不超过 30 个字）。',
     '- 痛点与价值按序一一对位：第 i 个痛点对应第 i 个价值，措辞互相呼应。',
     '- 左下方案区（x=44 至 x=1004、y=208 至 y=696）由服务端拼装解决方案章节的配图，你必须把该区域完全留空——不得在其中画任何框、线或文字，痛点带与价值栏也不得越界侵入该区域。',
-    '- 两区之间不画任何连线；色彩语义：痛点红、价值蓝，整图白底。',
+    '- 两区之间不画任何连线；色彩语义：痛点统一红色（标题牌与卡标题条用 #D32F2F）、价值统一蓝色（标题牌与卡标题条用 #2467EC，与左下方案区嵌入的映射图主蓝同色系），整图白底。',
   ].join('\n'),
 };
 
@@ -1934,8 +1938,8 @@ export function composeValueMapSvg(svg: string, solutionFigure: { svg: string } 
   const f = VALUE_MAP_SOLUTION_ZONE.frame;
   const plateX = Math.round(f.x + f.w / 2);
   const zone = `<g>`
-    + `<rect x="${f.x}" y="${f.y}" width="${f.w}" height="${f.h}" rx="12" fill="none" stroke="#1D4ED8" stroke-width="2" stroke-dasharray="8 6"/>`
-    + `<rect x="${plateX - 48}" y="${f.y - 17}" width="96" height="34" rx="6" fill="#1D4ED8"/>`
+    + `<rect x="${f.x}" y="${f.y}" width="${f.w}" height="${f.h}" rx="12" fill="none" stroke="#2467EC" stroke-width="2" stroke-dasharray="8 6"/>`
+    + `<rect x="${plateX - 48}" y="${f.y - 17}" width="96" height="34" rx="6" fill="#2467EC"/>`
     + `<text x="${plateX}" y="${f.y}" text-anchor="middle" dominant-baseline="middle" font-size="18" font-weight="bold" fill="#FFFFFF">方案</text>`
     + nested
     + `</g>`;
