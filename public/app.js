@@ -206,7 +206,7 @@
   };
   // 预警触发键 → 中文标签（与 CLI ALERT_TRIGGER_LABELS 同口径）。
   const ALERT_TRIGGER_LABEL = {
-    ones_inactivity: 'ONES 活动停滞',
+    engagement_inactivity: 'CRM 与 ONES 互动停滞',
     negative_public_signal: '公开负面动态',
   };
   const SOURCE_TYPE_LABEL = {

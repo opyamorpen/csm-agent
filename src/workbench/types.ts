@@ -120,8 +120,8 @@ export interface RiskAssessment {
   generatedAt: string;
 }
 
-/** 预警触发键：ONES 活动停滞（近 30 天无工作项新增/更新且无新增工时）/ 公开负面动态（检索到负面信息）。 */
-export type AlertTriggerKey = 'ones_inactivity' | 'negative_public_signal';
+/** 预警触发键：互动停滞（近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞）/ 公开负面动态（检索到负面信息，只要有就预警）。 */
+export type AlertTriggerKey = 'engagement_inactivity' | 'negative_public_signal';
 
 export interface CustomerAlert {
   id: string;

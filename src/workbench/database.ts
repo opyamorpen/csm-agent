@@ -632,6 +632,9 @@ export class WorkbenchDatabase {
     // 行动状态收敛两态（未完成 new / 已完成 completed）：历史上 accepted/「接受」流程与 in_progress/snoozed/false_positive
     // 等仅 CLI 可设的旧状态在开库时一律归入未完成；completed 不动，保持周报完成统计口径（幂等，新库无旧状态行）。
     this.db.prepare(`UPDATE action_items SET status='new', updated_at=? WHERE status NOT IN ('new','completed')`).run(nowIso());
+    // 预警触发键 ones_inactivity → engagement_inactivity（口径升级为 CRM+ONES 同时停滞）：不迁移则存量 active 行
+    // 不再被 evaluate 触达、成为孤儿；重命名后由启动对账按新口径重估（不满足者自动解除）。幂等。
+    this.db.prepare(`UPDATE customer_alerts SET trigger_key='engagement_inactivity' WHERE trigger_key='ones_inactivity'`).run();
     // 案例草稿收敛单版本：每客户只保留 updated_at 最新一行（平局以 id 决胜），历史版本行连同旧配图
     // 与发布尝试记录（FK 级联）一并删除。幂等自愈：createCaseDraft 建行时同样清理，此处兜底存量库。
     this.db.exec(`
@@ -1279,11 +1282,10 @@ export class WorkbenchDatabase {
     return row ? alertFromRow(row) : null;
   }
 
-  /** 最近一次已消除的预警：重报抑制用它做事实快照比对。 */
-  latestResolvedAlert(customerId: string, triggerKey: AlertTriggerKey): CustomerAlert | null {
-    const row = this.db.prepare(`SELECT * FROM customer_alerts WHERE customer_id=? AND trigger_key=? AND status='resolved'
-      ORDER BY resolved_at DESC LIMIT 1`).get(customerId, triggerKey) as Row | undefined;
-    return row ? alertFromRow(row) : null;
+  /** 该触发键的全部已消除预警：重报抑制按「已确认事实的最全集」比对，不依赖单行排序（同毫秒 resolve 会平局）。 */
+  listResolvedAlerts(customerId: string, triggerKey: AlertTriggerKey): CustomerAlert[] {
+    return (this.db.prepare(`SELECT * FROM customer_alerts WHERE customer_id=? AND trigger_key=? AND status='resolved'
+      ORDER BY resolved_at DESC`).all(customerId, triggerKey) as Row[]).map(alertFromRow);
   }
 
   listAlerts(options: { status?: 'active' | 'resolved' | 'all'; customerId?: string } = {}): Array<CustomerAlert & { customerName: string | null; customerShortName: string | null }> {
@@ -1925,6 +1927,12 @@ export class WorkbenchDatabase {
   /** 预警判定用：该客户全部确认归属的 ONES source_events（含 payload 快照与 synced_at 新鲜度）。 */
   listOnesSourceEvents(customerId: string): SourceEvent[] {
     return (this.db.prepare(`SELECT * FROM source_events WHERE customer_id=? AND source_system='ones' AND attribution_status='confirmed'`)
+      .all(customerId) as Row[]).map(sourceEventFromRow);
+  }
+
+  /** 预警判定用：该客户确认归属的 CRM 跟进记录（occurred_at + synced_at；同步侧只拉全局最近 200 条，覆盖有限）。 */
+  listCrmFollowupEvents(customerId: string): SourceEvent[] {
+    return (this.db.prepare(`SELECT * FROM source_events WHERE customer_id=? AND source_system='crm' AND source_type='crm_followup' AND attribution_status='confirmed'`)
       .all(customerId) as Row[]).map(sourceEventFromRow);
   }
 

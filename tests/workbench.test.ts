@@ -5685,7 +5685,7 @@ test('workbench: case publish is idempotent under concurrency and missing page i
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-// ── 风险预警名单（customer_alerts）：触发、状态机与重报抑制 ──────────────────
+// ── 风险预警名单（customer_alerts）：触发（AND 口径）、状态机与重报抑制 ─────────
 import { evaluateCustomerAlerts } from '../src/workbench/alerts.js';
 
 /** ONES 工作项 fixture：field009/field010 为 naive 上海时间（与真实同步写入口径一致）。 */
@@ -5696,25 +5696,39 @@ function onesWorkItemFixture(customerId: string, externalId: string, field009: s
   };
 }
 
-test('workbench: alert triggers — 30-day ONES inactivity and negative public signal', () => withDb((db) => {
+/** CRM 跟进记录 fixture：occurred_at 为跟进时间（field_oUaZx__c 同步后已归一为 ISO）。 */
+function crmFollowupFixture(customerId: string, externalId: string, occurredAt: string) {
+  return { customerId, sourceSystem: 'crm' as const, sourceType: 'crm_followup', externalId, title: `跟进 ${externalId}`, occurredAt };
+}
+
+test('workbench: alert triggers — CRM+ONES both inactive AND negative public signal', () => withDb((db) => {
   const now = new Date('2026-09-02T04:00:00Z'); // 上海 12:00
 
-  // ① 45 天前最后工作项活动 → 触发；naive 上海时间按 +08:00 解析（非 UTC）。
+  // ① 两侧都停滞（最后跟进与最后工作项活动都 >30 天）→ 触发；naive 上海时间按 +08:00 解析。
   db.upsertCustomer({ id: 'crm-a1', name: '沉默客户' });
   db.upsertSourceEvent(onesWorkItemFixture('crm-a1', 'sg-1', '2026-06-10 10:00:00', '2026-07-19 09:00:00'));
+  db.upsertSourceEvent(crmFollowupFixture('crm-a1', 'fu-1', '2026-07-01T02:00:00.000Z'));
   const first = evaluateCustomerAlerts(db, 'crm-a1', now);
-  assert.ok(first.created.includes('ones_inactivity'), JSON.stringify(first));
-  const inactive = db.activeAlert('crm-a1', 'ones_inactivity');
+  assert.ok(first.created.includes('engagement_inactivity'), JSON.stringify(first));
+  const inactive = db.activeAlert('crm-a1', 'engagement_inactivity');
   assert.ok(inactive);
-  assert.match(inactive!.reasons[0], /近 30 天无 ONES 工作项新增\/更新，且无新增工时/);
+  assert.match(inactive!.reasons[0], /近 30 天无 CRM 跟进记录，且无 ONES 工作项新增\/更新与新增工时/);
   assert.equal(inactive!.details.lastOnesActivityAt, '2026-07-19T01:00:00.000Z');
+  assert.equal(inactive!.details.lastEngagementAt, '2026-07-19T01:00:00.000Z');
 
-  // ② 近期有工作项更新 → 不触发。
-  db.upsertCustomer({ id: 'crm-a2', name: '活跃客户' });
+  // ② ONES 活跃（近期有工作项更新）→ 不触发（AND 口径：单侧活跃即豁免）。
+  db.upsertCustomer({ id: 'crm-a2', name: 'ONES 活跃' });
   db.upsertSourceEvent(onesWorkItemFixture('crm-a2', 'sg-2', '2026-06-10 10:00:00', '2026-08-25 09:00:00'));
-  assert.ok(!evaluateCustomerAlerts(db, 'crm-a2', now).created.includes('ones_inactivity'));
+  db.upsertSourceEvent(crmFollowupFixture('crm-a2', 'fu-2', '2026-06-01T02:00:00.000Z'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a2', now).created.includes('engagement_inactivity'));
 
-  // ③ 工作项沉默但近 30 天有工时登记 → 不触发（新增工时即活动）。
+  // ③ CRM 活跃（近期有跟进）→ 不触发。
+  db.upsertCustomer({ id: 'crm-a7', name: '跟进活跃' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-a7', 'sg-7', '2026-06-10 10:00:00', '2026-06-15 09:00:00'));
+  db.upsertSourceEvent(crmFollowupFixture('crm-a7', 'fu-7', '2026-08-28T02:00:00.000Z'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a7', now).created.includes('engagement_inactivity'));
+
+  // ④ ONES 侧仅靠近期工时登记也算活跃 → 不触发（新增工时即活动）。
   db.upsertCustomer({ id: 'crm-a3', name: '工时活跃' });
   db.upsertSourceEvent({
     customerId: 'crm-a3', sourceSystem: 'ones', sourceType: 'customer_manhour', externalId: 'mh-1',
@@ -5722,18 +5736,27 @@ test('workbench: alert triggers — 30-day ONES inactivity and negative public s
     payload: { field009: '2026-05-01 09:00:00', field010: '2026-06-01 09:00:00',
       workhourRecords: [{ id: 'w1', startTime: '2026-08-28', hours: 1.5, description: '支持' }] },
   });
-  assert.ok(!evaluateCustomerAlerts(db, 'crm-a3', now).created.includes('ones_inactivity'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a3', now).created.includes('engagement_inactivity'));
 
-  // ④ 零 ONES 记录 → 不触发（无法区分「没用 ONES」与「刚接入」，用户拍板不进名单）。
+  // ⑤ 档案「最后联系」兜底：跟进事件很旧但 lastContactAt 较新 → 不触发（跟进同步只拉全局 200 条，档案值防误报）。
+  db.upsertCustomer({ id: 'crm-a8', name: '档案兜底', lastContactAt: '2026-08-30T02:00:00.000Z' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-a8', 'sg-8', '2026-06-10 10:00:00', '2026-06-15 09:00:00'));
+  db.upsertSourceEvent(crmFollowupFixture('crm-a8', 'fu-8', '2026-06-01T02:00:00.000Z'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a8', now).created.includes('engagement_inactivity'));
+
+  // ⑥ 两侧都零历史 → 不触发；单侧零历史不豁免（CRM 从未跟进但 ONES 也停 30 天照常预警）。
   db.upsertCustomer({ id: 'crm-a4', name: '新客户' });
-  assert.ok(!evaluateCustomerAlerts(db, 'crm-a4', now).created.includes('ones_inactivity'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a4', now).created.includes('engagement_inactivity'));
+  db.upsertCustomer({ id: 'crm-a9', name: '仅 ONES 历史' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-a9', 'sg-9', '2026-05-01 10:00:00', '2026-05-01 10:00:00'));
+  assert.ok(evaluateCustomerAlerts(db, 'crm-a9', now).created.includes('engagement_inactivity'));
 
-  // ⑤ 负面公开动态触发（含新增关键词：罚款/收入下降）；正向不触发。
+  // ⑦ 负面公开动态触发（含新增关键词：罚款/收入下降）；正向不触发。
   db.upsertCustomer({ id: 'crm-a5', name: '舆情客户' });
   db.addEvidence({ id: 'ev-fine', customerId: 'crm-a5', kind: 'web_signal', label: '因数据违规被罚款 50 万', detail: '[sentiment] 监管处罚', occurredAt: '2026-08-20', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/fine' });
   db.addEvidence({ id: 'ev-rev', customerId: 'crm-a5', kind: 'web_signal', label: '季度收入下降 12%', detail: '财报', occurredAt: '2026-08-21', confidence: 0.6, sourceSystem: 'web' });
-  const fifth = evaluateCustomerAlerts(db, 'crm-a5', now);
-  assert.ok(fifth.created.includes('negative_public_signal'));
+  const seventh = evaluateCustomerAlerts(db, 'crm-a5', now);
+  assert.ok(seventh.created.includes('negative_public_signal'));
   const negative = db.activeAlert('crm-a5', 'negative_public_signal');
   assert.equal(negative?.details.negativeCount, 2);
   assert.match(negative!.reasons.join('\n'), /罚款/);
@@ -5743,30 +5766,31 @@ test('workbench: alert triggers — 30-day ONES inactivity and negative public s
   assert.ok(!evaluateCustomerAlerts(db, 'crm-a6', now).created.includes('negative_public_signal'));
 }));
 
-test('workbench: alert lifecycle — auto resolve on new activity, manual resolve, re-fire suppression', () => withDb((db) => {
+test('workbench: alert lifecycle — auto resolve on any-side activity, manual resolve, re-fire suppression', () => withDb((db) => {
   const t0 = new Date('2026-09-02T04:00:00Z');
   db.upsertCustomer({ id: 'crm-l1', name: '生命周期' });
   db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-1', '2026-06-01 10:00:00', '2026-06-15 09:00:00'));
+  db.upsertSourceEvent(crmFollowupFixture('crm-l1', 'fu-1', '2026-06-10T02:00:00.000Z'));
 
-  // ① 沉默 → 建单。
+  // ① 双侧沉默 → 建单。
   evaluateCustomerAlerts(db, 'crm-l1', t0);
-  const first = db.activeAlert('crm-l1', 'ones_inactivity');
+  const first = db.activeAlert('crm-l1', 'engagement_inactivity');
   assert.ok(first);
 
-  // ② 恢复活动 → 自动解除（resolvedBy=system + 说明）。
+  // ② ONES 恢复活动（任一侧活跃即不满足 AND）→ 自动解除（resolvedBy=system + 说明）。
   db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-2', '2026-08-30 10:00:00', '2026-08-30 10:00:00'));
   const afterActivity = evaluateCustomerAlerts(db, 'crm-l1', t0);
-  assert.ok(afterActivity.autoResolved.includes('ones_inactivity'));
-  assert.equal(db.activeAlert('crm-l1', 'ones_inactivity'), null);
-  const auto = db.latestResolvedAlert('crm-l1', 'ones_inactivity');
+  assert.ok(afterActivity.autoResolved.includes('engagement_inactivity'));
+  assert.equal(db.activeAlert('crm-l1', 'engagement_inactivity'), null);
+  const auto = db.listResolvedAlerts('crm-l1', 'engagement_inactivity')[0];
   assert.equal(auto?.resolvedBy, 'system');
   assert.match(auto?.resolutionNote ?? '', /自动解除/);
 
-  // ③ 新活动后又沉默 30 天 → 重报（活动时间晚于已消除快照）。
+  // ③ 之后又双双沉默 30 天 → 重报（lastEngagementAt 前移过）。
   const t1 = new Date('2026-10-05T04:00:00Z');
   const refired = evaluateCustomerAlerts(db, 'crm-l1', t1);
-  assert.ok(refired.created.includes('ones_inactivity'));
-  const second = db.activeAlert('crm-l1', 'ones_inactivity');
+  assert.ok(refired.created.includes('engagement_inactivity'));
+  const second = db.activeAlert('crm-l1', 'engagement_inactivity');
   assert.ok(second && second.id !== first!.id);
 
   // ④ 人工消除（消除原因落库；重复消除返回 null = API 409 语义）。
@@ -5775,14 +5799,14 @@ test('workbench: alert lifecycle — auto resolve on new activity, manual resolv
 
   // ⑤ 情况无新变化 → 抑制不重报。
   const suppressed = evaluateCustomerAlerts(db, 'crm-l1', t1);
-  assert.ok(suppressed.suppressed.includes('ones_inactivity'));
-  assert.equal(db.activeAlert('crm-l1', 'ones_inactivity'), null);
+  assert.ok(suppressed.suppressed.includes('engagement_inactivity'));
+  assert.equal(db.activeAlert('crm-l1', 'engagement_inactivity'), null);
 
-  // ⑥ 再度出现新活动并重新沉默 → 允许重报（新一轮沉默周期）。
-  db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-3', '2026-10-20 10:00:00', '2026-10-20 10:00:00'));
+  // ⑥ CRM 侧出现新跟进后又双双沉默 → 允许重报（任一渠道前移 lastEngagementAt 都算新周期）。
+  db.upsertSourceEvent(crmFollowupFixture('crm-l1', 'fu-2', '2026-10-20T02:00:00.000Z'));
   const t2 = new Date('2026-11-25T04:00:00Z');
   const refiredAgain = evaluateCustomerAlerts(db, 'crm-l1', t2);
-  assert.ok(refiredAgain.created.includes('ones_inactivity'));
+  assert.ok(refiredAgain.created.includes('engagement_inactivity'));
 }));
 
 test('workbench: negative signal alert — re-fire only on new evidence, auto resolve out of window', () => withDb((db) => {
@@ -5820,14 +5844,36 @@ test('workbench: alert list joins customer names and counts by status', () => wi
   db.upsertSourceEvent(onesWorkItemFixture('crm-c2', 'sg-2', '2026-06-01 10:00:00', '2026-06-01 10:00:00'));
   evaluateCustomerAlerts(db, 'crm-c1', new Date('2026-09-02T04:00:00Z'));
   evaluateCustomerAlerts(db, 'crm-c2', new Date('2026-09-02T04:00:00Z'));
-  db.resolveAlert(db.activeAlert('crm-c2', 'ones_inactivity')!.id, 'csm', '已回访');
+  db.resolveAlert(db.activeAlert('crm-c2', 'engagement_inactivity')!.id, 'csm', '已回访');
 
   const active = db.listAlerts({ status: 'active' });
   assert.equal(active.length, 1);
   assert.equal(active[0].customerName, '客户一');
+  assert.equal(active[0].triggerKey, 'engagement_inactivity');
   assert.equal(db.countAlerts('active'), 1);
   assert.equal(db.countAlerts('resolved'), 1);
   const overview = db.overview('crm-c1');
   assert.equal((overview?.alerts as unknown[]).length, 1, 'overview 携带该客户待处理预警（详情横幅数据源）');
   assert.equal((db.overview('crm-c2')?.alerts as unknown[]).length, 0, '已消除预警不进 overview');
 }));
+
+test('workbench: legacy ones_inactivity alert rows migrate to engagement_inactivity on open', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-alert-migrate-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    // 存量行直接按旧键落库（模拟 de3965a 版本数据），重开库 migrate 改键后由启动对账按新口径重估。
+    db.upsertCustomer({ id: 'crm-m1', name: '迁移客户' });
+    const alertId = crypto.randomUUID();
+    (db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
+      .prepare(`INSERT INTO customer_alerts(id,customer_id,trigger_key,status,reasons_json,details_json,created_at,updated_at)
+        VALUES(?,?,?,'active','["旧口径预警"]','{}',?,?)`).run(alertId, 'crm-m1', 'ones_inactivity', '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z');
+    db.close();
+    const reopened = new WorkbenchDatabase(dir);
+    try {
+      const migrated = reopened.activeAlert('crm-m1', 'engagement_inactivity');
+      assert.equal(migrated?.id, alertId, '旧键行应原位改名为 engagement_inactivity（不建新行）');
+      const legacy = reopened.listAlerts({ status: 'all' }).filter((item) => item.triggerKey === ('ones_inactivity' as never));
+      assert.equal(legacy.length, 0, '不应残留 ones_inactivity 键的行');
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

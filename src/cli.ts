@@ -60,7 +60,7 @@ const CLI_CAPABILITIES = [
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
   { command: 'alerts', workflow: 'risk-watchlist', access: 'read-write', api: ['/api/alerts', '/api/alerts?status=resolved', '/api/alerts?status=all', 'POST /api/alerts/:id/resolve'],
-    notes: '风险预警名单：近 30 天无 ONES 工作项新增/更新且无新增工时、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
+    notes: '风险预警名单：近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
     readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures'],
@@ -140,8 +140,8 @@ function help(): void {
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
   csm-agent alerts [--status active|resolved|all] [--json]
-    （风险预警名单：近 30 天无 ONES 工作项新增/更新且无新增工时，或公开动态检索到该客户
-     负面信息（收入下降/罚款/投诉等）即进入；--status 默认 active，all 含已消除）
+    （风险预警名单：近 30 天无 CRM 跟进记录且无 ONES 工作项新增/更新与新增工时（两侧同时停滞），
+     或公开动态检索到该客户负面信息（收入下降/罚款/投诉等）即进入；--status 默认 active，all 含已消除）
   csm-agent alerts resolve <预警ID> --note <原因/动作>
     （消除风险必须写明原因或动作，写入审计；消除后情况无新变化不重报）
   csm-agent cases [客户ID或名称] [--json]
@@ -459,7 +459,7 @@ function parseObject(input: string, label: string): Record<string, unknown> {
 }
 
 const ALERT_TRIGGER_LABELS: Record<string, string> = {
-  ones_inactivity: 'ONES 活动停滞',
+  engagement_inactivity: 'CRM 与 ONES 互动停滞',
   negative_public_signal: '公开负面动态',
 };
 

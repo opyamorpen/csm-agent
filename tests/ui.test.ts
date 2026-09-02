@@ -1707,11 +1707,11 @@ test('risk watchlist exposes trigger labels, dual tabs and mandatory resolve not
   // 显示契约：触发键 → 中文标签，两个触发键都必须有（漏键会渲染裸 key）。
   const labels = source.match(/const ALERT_TRIGGER_LABEL = \{[\s\S]*?\};/)?.[0];
   assert.ok(labels, 'ALERT_TRIGGER_LABEL source was not found');
-  assert.match(labels, /ones_inactivity: 'ONES 活动停滞'/);
+  assert.match(labels, /engagement_inactivity: 'CRM 与 ONES 互动停滞'/);
   assert.match(labels, /negative_public_signal: '公开负面动态'/);
 
-  // 导航入口 + 待处理/已消除双 tab + 名单容器。
-  assert.match(html, /data-view="alerts">预警 <span id="alertNavCount"/);
+  // 导航入口（侧边栏文案「风险预警」）+ 待处理/已消除双 tab + 名单容器。
+  assert.match(html, /data-view="alerts">风险预警 <span id="alertNavCount"/);
   assert.match(html, /id="alertsView"/);
   assert.match(html, /data-alert-tab="pending"/);
   assert.match(html, /data-alert-tab="resolved"/);
