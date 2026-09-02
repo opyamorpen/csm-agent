@@ -96,13 +96,13 @@
     "figures": {
       "type": "array",
       "readOnly": true,
-      "description": "内部只读字段：章节配图（流程现状/目标流程/方案架构/服务里程碑时间轴），生成管线绘制并经服务端消毒后落库，编辑与精修不可覆写",
+      "description": "内部只读字段：章节配图（流程现状/目标流程/方案架构/服务里程碑时间轴/痛点-方案-价值全景图），生成管线绘制并经服务端消毒后落库，编辑与精修不可覆写",
       "items": {
         "type": "object",
         "required": ["section", "kind", "svg", "caption", "source_refs"],
         "properties": {
           "section": { "enum": ["status", "demands", "solution", "value"] },
-          "kind": { "enum": ["flow_current", "flow_target", "architecture", "milestone"] },
+          "kind": { "enum": ["flow_current", "flow_target", "architecture", "milestone", "value_map"] },
           "svg": { "type": "string", "description": "消毒后的自包含 SVG（白名单标签/属性，无脚本与外链）" },
           "caption": { "type": "string", "description": "30 字以内图注，Markdown 端以引用块占位；docx 导出栅格化为 PNG 嵌入" },
           "source_refs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "图级证据：整图挂来源，不逐节点定位" }

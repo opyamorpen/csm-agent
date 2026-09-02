@@ -137,6 +137,8 @@ export async function renderCaseDocx(draft: CaseDraft): Promise<Buffer> {
       push(heading('经验复盘与沉淀', HeadingLevel.HEADING_2));
       v8.lessons.forEach((item, index) => push(listItemParagraph(index, item)));
     }
+    // value_map（痛点-方案-价值全景图）插在价值章末尾、项目总结之前，与 Markdown 渲染同位。
+    push(...figureBlocks(draft, 'value', 'value_map'));
     push(heading('四、项目总结', HeadingLevel.HEADING_1), textParagraph(v8.summary));
   } else {
     const texts = caseSectionTexts(draft.fields);

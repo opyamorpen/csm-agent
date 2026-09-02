@@ -11,8 +11,11 @@ import { caseSpeakerRole, isDeliveredOnesEvent, type CaseSpeakerRole } from './s
 import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
+import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 
-export const CASE_GENERATION_VERSION = 'case-v8-standard';
+/** v9：架构图细节化（集成画法）+ ONES 能力图谱注入 + 痛点-方案-价值全景图（value_map）。
+ * 提示词实质变化必须升版本破指纹短路，否则存量自然指纹会命中旧稿跳过重新生成。 */
+export const CASE_GENERATION_VERSION = 'case-v9-standard';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -79,8 +82,8 @@ export interface CaseClaimEvidence {
   confidence?: number;
 }
 
-/** 配图类型：现状/目标流程、方案架构，以及 v8 新增的服务里程碑时间轴。 */
-export type CaseFigureKind = 'flow_current' | 'flow_target' | 'architecture' | 'milestone';
+/** 配图类型：现状/目标流程、方案架构、服务里程碑时间轴，以及 v9 新增的痛点-方案-价值全景图。 */
+export type CaseFigureKind = 'flow_current' | 'flow_target' | 'architecture' | 'milestone' | 'value_map';
 
 /** 落库配图（图级证据：整图挂 source_refs，不逐节点定位；svg 为服务端消毒后的产物）。 */
 export interface CaseFigure {
@@ -687,6 +690,8 @@ export function renderCaseMarkdown(draft: CaseDraft): string {
   }
   parts.push(`### 价值成效\n\n${v8.value_items.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`);
   if (v8.lessons.length) parts.push(`### 经验复盘与沉淀\n\n${v8.lessons.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`);
+  // value_map（痛点-方案-价值全景图）是全案收束图，占位固定在价值章末尾（项目总结之前）。
+  if (figureNote('value', 'value_map').length) parts.push(`${figureNote('value', 'value_map').join('\n')}\n`);
   parts.push(`## 四、项目总结\n\n${v8.summary}\n`);
   return parts.join('\n');
 }
@@ -1500,20 +1505,20 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
     const empty = plan.filter((entry) => !entry.items.length);
     if (empty.length) throw new Error(`打捞后章节条目为空: ${empty.map((entry) => CASE_SECTIONS.find((section) => section.key === entry.section)!.label).join('、')}`);
   }
-  // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 4 张。
+  // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 5 张（v9：milestone 与 value_map 可共存）。
   const figures: PlanFigure[] = [];
   if (Array.isArray(raw.figures)) {
     for (const entry of raw.figures) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || figures.length >= 4) continue;
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || figures.length >= 5) continue;
       const row = entry as Record<string, unknown>;
       const section = String(row.section ?? '') as CaseFigureSectionKey;
       const kind = String(row.kind ?? '') as CaseFigureKind;
       const idea = typeof row.idea === 'string' ? row.idea.trim() : '';
       const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).map((ref) => ref.trim()).filter(Boolean) : [];
-      // milestone 时间轴只挂在价值章；其余 kind 不挂价值章（v8 章节键）；旧键（challenges/requirements）不再接受新规划。
-      const sectionAllowed = kind === 'milestone' ? section === 'value'
+      // milestone 与 value_map 只挂在价值章；其余 kind 不挂价值章（v8 章节键）；旧键（challenges/requirements）不再接受新规划。
+      const sectionAllowed = kind === 'milestone' || kind === 'value_map' ? section === 'value'
         : ['status', 'demands', 'solution'].includes(section);
-      if (!sectionAllowed || !['flow_current', 'flow_target', 'architecture', 'milestone'].includes(kind) || !idea || !refs.length) continue;
+      if (!sectionAllowed || !['flow_current', 'flow_target', 'architecture', 'milestone', 'value_map'].includes(kind) || !idea || !refs.length) continue;
       if (refs.some((ref) => !allowedRefs.has(ref))) continue;
       if (figures.some((figure) => figure.kind === kind)) continue;
       figures.push({ section, kind, idea, source_refs: refs });
@@ -1601,7 +1606,7 @@ export function caseFiguresOf(fields: Record<string, unknown> | undefined): Case
     const kind = String(row.kind ?? '') as CaseFigureKind;
     const svg = typeof row.svg === 'string' ? row.svg : '';
     const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).filter(Boolean) : [];
-    if (!CASE_FIGURE_SECTION_KEYS.has(section) || !['flow_current', 'flow_target', 'architecture', 'milestone'].includes(kind)
+    if (!CASE_FIGURE_SECTION_KEYS.has(section) || !['flow_current', 'flow_target', 'architecture', 'milestone', 'value_map'].includes(kind)
       || !svg || !refs.length) return [];
     return [{ id: String(row.id ?? ''), section, kind, svg, caption: String(row.caption ?? '').trim(), source_refs: refs,
       note: typeof row.note === 'string' ? row.note : undefined }];
@@ -1682,13 +1687,14 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     + `- 每个条目的 idea 是「这一条要写什么」的要点描述（40 字以内，如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
     + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
     + `- 客户简介三小节（intro 前三槽）的摘录必须真的可抄：优先逐字取 customer 档案行（如「客户名称：…；行业：…」）或 web_context snippet 中的完整原句；档案与检索都查不到的信息（成立年份、规模、排名等具体事实）不得凭常识补写来源——对应小节写基于档案的收缩要点，缺失信息收进 unknowns（服务端会把无法定位摘录的简介/总结条目回退到档案锚点，但凭常识编造的事实仍会被公开检查标记）。\n`
-    + `- 配图（figures，可选）：当沟通素材中有客户用一段话描述的流程（现状流程/期望流程）、可归纳的方案架构或值得呈现的合作里程碑时规划配图——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、architecture=方案架构（业务解决方案章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 4 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；无合适素材就返回空数组，宁缺毋滥。\n`
+    + `- 配图（figures，可选）：当沟通素材中有客户用一段话描述的流程（现状流程/期望流程）、可归纳的方案架构、值得呈现的合作里程碑，或痛点/方案/价值素材齐全时规划配图——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、architecture=方案架构（业务解决方案章；若为多系统集成方案，idea 需写明参与集成的系统与各自的数据流向）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）、value_map=痛点-方案-价值全景图（方案价值概述章末尾：把前文客户痛点、方案结构与已确认价值收束为一张总览大图）；至多 5 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；无合适素材就返回空数组，宁缺毋滥。\n`
     + `- 章节路由：客户简介三小节（company_info/business_scope/competitive_strategy）只取客户档案与 web_context 可信公开信息（customer_official、government_procurement 优先，media 只能辅助）；项目背景取合作动因（档案、早期沟通记录、招采与政策类公开信息）；业务现状必须是合作前或当前问题；诉求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值与复盘条目必须来自客户说话人或可复核指标，价值发生在方案落地之后、复盘发生在合作期间。\n`
     + `- 信号表兜底：pain_point_signals/value_signals 是关键词预扫描的线索而非全集——若在 communications 片段原文中发现未被收录、但确属客户痛点或方案落地后价值反馈的表述，可直接引用该片段（source_ref 取片段 id）建条目，不受信号表限制，摘录从片段原文逐字截取。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于客户简介/项目背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
     + `- 交付统计（delivery_stats）可被 intro/status/solution/value 条目引用（source_ref "${CASE_STATS_SOURCE_ID}"、摘录取其 facts 原文）；只可作事实陈述，不得自行计算百分比。\n`
     + `- unknowns 每条写明「缺失项 + 建议向谁/从哪里确认」（如系统使用情况表缺账号数/有效期/使用部门，建议向客户成功经理或合同记录确认）。\n`
     + `${onesAsrAliasRule()}该订正适用于全部正文与摘录。\n`
+    + `${ONES_CAPABILITY_MAP}\n（idea 与摘录中提到 ONES 产品模块/集成机制时，命名须与图谱一致。）\n`
     + `上下文：${contextText}`;
   // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
   const MAX_ATTEMPTS = 4;
@@ -1759,6 +1765,7 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
     + `写作要求：\n`
     + `- 客户叙事视角：客户是主角；多个系统中同一件事合并为一条叙述，禁止流水账。\n`
     + `- 只写有证据的事实：正文内容须与写作要点及其证据一致，不得虚构数字/引语/ROI；没有量化证据时只写有证据支持的定性表述。\n`
+    + `${ONES_CAPABILITY_MAP}\n（正文提到 ONES 产品模块或集成机制时命名须与图谱一致；某能力是否已为客户交付/配置/打通仍须以写作要点的证据为准。）\n`
     + `- 正文禁止出现 unknown 等占位词、内部系统名（Hemory、CRM）、风险评级、工时统计、联系人姓名/联系方式/合同金额，不得泄露其他客户或其他项目信息。\n`
     + `${CHAPTER_WRITING_BRIEFS[section]}\n`
     + `- 篇幅契约是质量要求而非硬性字符数：素材不足以支撑下限时允许略低，禁止空泛注水。\n`
@@ -1815,9 +1822,82 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
 const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
   flow_current: '流程现状图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
   flow_target: '目标流程图：客户期望达成的目标流程——方案落地后的目标流转，步骤框 + 箭头，体现统一平台/自动化环节替代人工与断点',
-  architecture: '方案架构图：交付方案的分层结构——接入层/平台模块/集成关系的框线图，模块名与连接关系须有素材依据，不虚构未交付组件',
+  architecture: '方案架构图：交付方案的框线图。素材表明方案涉及多系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时按「系统集成图」画——ONES 平台为核心、外部系统环绕对接、连线带数据标注；纯平台落地方案则按分层结构画。模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
+  value_map: '痛点-方案-价值全景图：把前文客户痛点、方案结构与已确认价值收束为一张总览大图——顶部痛点带、左下方案主体、右栏价值栏三区，痛点与价值按序一一对位',
 };
+
+/** 配图绘图规范·通用条目（所有 kind 适用；规模/画布/布局差异在 CASE_FIGURE_KIND_RULES 专属条目里）。 */
+const CASE_FIGURE_COMMON_RULES = [
+  '- 思考从简：先在思考里直接定下节点/分区清单与连接关系（规模上限见本图专属规范）就立即开始输出，不要反复推敲布局与配色；{"svg","caption"} JSON 是唯一交付物。',
+  '- svg 是一个自包含的 <svg>…</svg> 字符串（不引用外部资源、不含脚本与交互属性），根元素必须声明 viewBox；画布尺寸与比例按本图专属规范取值。',
+  '- 文字一律 <text> 中文标签（font-size 不小于 12；每行不超过 10 个汉字，长标签用 <tspan> 拆行且每个 tspan 必须带递增 dy（如 dy="18"，首个可不带），否则多行文字会叠在一起）；<text> 元素内严禁直接换行写多行文字——多行必须且只能用 tspan 逐行拆分。',
+  '- 块/节点用 <rect> 圆角框；连线用 <line> 或 <path> 并以 marker 箭头标示方向；节点不重叠、连线不穿越文字。',
+  '- 所有图形与文字元素必须完整落在 viewBox 画布范围内（坐标不小于 0、不超出画布宽高），顶部内容从 y≥40 开始，不得出现被画布边缘裁切的元素；每个块都必须带文字标签，禁止无文字的空白占位块。',
+  '- 配色克制：浅色填充 + 深色描边 + 深色文字；只使用纯 SVG 绘制元素，不使用 <image>、外链或 CSS 样式表。',
+  '- 图内文字与正文禁区相同：不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）、其他客户信息；caption 是 30 字以内的图注（如「客户现状：三套系统并行、人工汇总对齐」）。',
+].join('\n');
+
+/** 流程/时间轴类的专属规范（v7 原口径不变：节点 ≤10、2~4k 字符、横向布局）。 */
+const CASE_FIGURE_SIMPLE_KIND_RULES = '- 规模：节点总数不超过 10 个、每个标签不超过 10 个字，SVG 通常 2~4k 字符即可。\n'
+  + '- 画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）；整体横向布局。';
+
+/**
+ * 配图绘图规范·kind 专属条目（v9：架构图集成画法细化——ONES 能力模块化、连线方向+数据标注+端点落模块；
+ * 新增 value_map 痛点-方案-价值全景图）。画法对齐手绘示例图：核心平台内部画能力模块清单、连线端点精确到模块、
+ * 线色=数据发出方、线上标注框写数据内容；全景图三区不连线、靠编号对位表达映射。
+ */
+const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
+  flow_current: CASE_FIGURE_SIMPLE_KIND_RULES,
+  flow_target: CASE_FIGURE_SIMPLE_KIND_RULES,
+  milestone: CASE_FIGURE_SIMPLE_KIND_RULES,
+  architecture: [
+    '- 规模：块总数不超过 22、连线不超过 8 条，SVG 约 4~10k 字符即可。',
+    '- 画布 viewBox="0 0 900 540"（可按内容在 700~960 × 460~600 间调整）。',
+    '- 素材中有外部系统向 ONES 接入信息、或从 ONES 抓取数据的对接时，按「系统集成图」画：',
+    '  · 布局：ONES 平台为核心容器置于中部——容器顶部边框上骑一块实心深色「ONES 平台」标题牌（不要把平台名画成与能力模块并排的普通块），标题牌下方按 2~3 行网格（每行 2~3 块）排列本方案涉及的能力模块块（白底块，模块名从下方能力图谱与素材中选取，数量与方案正文涉及的能力相当、通常 3~6 个且不少于 3 个——除非素材确实只支撑更少）；容器高度与宽度贴合内容收拢，内容区应占满画布高度与宽度的 80% 以上、四周留白大致均衡、不得留大片空白；外部系统环绕在核心容器四周，各系统块之间留出空白走廊供连线走线。',
+    '  · 外部系统：素材提到该系统的具体功能/模块时，画「浅色容器 + 实心系统名块 + 若干白底模块块」的组块；素材没提内部模块的系统只画系统级单块；每个系统分配一个专属主题色（容器浅色、系统名块实色）。',
+    '  · 连线：横平竖直的正交折线（只在 90° 转角改向），单向实心箭头，箭头方向=数据流向——外部系统向 ONES 接入信息、以及 ONES 向外部系统供数（外部从 ONES 抓取）都要按素材如实画出方向；每条连线必须带 marker 箭头，两端都无箭头的无方向线段禁止出现；素材未写明方向时按语境选择最可能的流向画单向箭头、并在标注中写明数据发出方；连线与箭头用数据发出方系统的主题色；连线不交叉、不穿过任何容器。',
+    '  · 连线标注：每条连线必须配一个白底、与线同色细边框的圆角小标签框，紧贴所标注的连线放置（不得悬浮在远离连线的空白处，也不得压住任何块或容器的边框），框内写这条对接传输的数据内容（须有素材依据，每行不超过 10 个字）；标注动词方向必须与箭头一致——指向 ONES 用「推送/同步至 ONES」语义（如「推送工单状态」），从 ONES 指出用「输出/供数至外部」语义（如「输出项目进度」）。',
+    '  · 端点精度：连线两端必须落到具体的模块块边缘——ONES 侧箭头指向消费或提供该数据的能力模块块（不得只指平台容器外框），外部系统侧指向相关模块块或系统块边缘。',
+    '- 纯平台落地方案（素材中无外部系统对接）按分层架构画：接入层/平台能力模块层/数据层的分层框线，模块名须与素材及能力图谱一致。',
+  ].join('\n'),
+  value_map: [
+    '- 规模：痛点卡与价值卡各 3~4 条且数量必须相等，方案区不超过 12 个块，SVG 约 6~15k 字符即可。',
+    '- 画布 2:1 横版，viewBox="0 0 960 480"。',
+    '- 三区「挂牌式」布局：顶部痛点带横贯全宽（红色虚线圆角框，框顶中央压红色实心「痛点」标题牌）；左下方方案区约占七成宽（蓝色虚线圆角框 + 蓝色实心「方案」标题牌）；右侧价值栏（蓝色虚线圆角框 + 蓝色实心「价值」标题牌）。三区之间不画任何连线。',
+    '- 痛点卡：红色实心标题条（白字 6~10 字）+ 白底卡身一行描述（不超过 30 个字），从业务现状/业务诉求正文中提炼，在痛点带内横向均排。',
+    '- 价值卡：与痛点卡同构但用蓝色，标题条带编号（如「1. 进度可控」）+ 白底卡身描述（不超过 30 个字），在价值栏内纵向排列；价值条目与痛点条目按顺序一一对位——第 i 个痛点对应第 i 个价值，措辞互相呼应。',
+    '- 方案区：业务解决方案正文的简化版结构（块数收敛）——多系统集成方案画简化集成架构（ONES 核心 + 外部系统 + 主干连线），平台落地方案画分层或主干流程；与正文及本章配图口径一致；ONES 模块命名从下方能力图谱中选取；方案区内容须占满或垂直居中于分区，不得下半大面积空置（内容不足时在流程下方补一行交付节奏/阶段说明）。',
+    '- 色彩语义：痛点统一红色系，方案与价值统一蓝色系，整图白底。',
+  ].join('\n'),
+};
+
+/**
+ * 配图生成 prompt 的唯一组装出口（生成调用 / 探针脚本 / 单测共用一份实现，防止三处漂移）。
+ * architecture 与 value_map 额外注入 ONES 能力图谱（模块命名依据），其余 kind 不注入。
+ */
+export function buildCaseFigurePrompt(input: {
+  customerName: string;
+  sectionLabel: string;
+  kind: CaseFigureKind;
+  idea: string;
+  /** 图所依托的定稿正文锚点（普通图=本章锚点；value_map=痛点/方案/价值三段合并锚点，自带段落标记）。 */
+  chapterAnchor: string;
+  materials: string[];
+}): string {
+  const knowledge = input.kind === 'architecture' || input.kind === 'value_map'
+    ? `${ONES_CAPABILITY_MAP}\n（图中 ONES 能力模块的命名须与图谱一致；图谱不构成该客户已交付的证据——是否交付以正文与素材为准。）\n`
+    : '';
+  return `为客户「${input.customerName}」的客户成功案例绘制「${input.sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[input.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。只输出 JSON：{"svg":"...","caption":"..."}\n`
+    + `绘图规范：\n`
+    + `${CASE_FIGURE_COMMON_RULES}\n`
+    + `本图专属规范：\n${CASE_FIGURE_KIND_RULES[input.kind]}\n`
+    + knowledge
+    + `- 本图要表达的内容（来自章节规划）：${input.idea}\n`
+    + `- 图所依托的定稿正文（图内容须与正文口径一致）：${input.chapterAnchor}\n`
+    + `- 支撑素材原文（图内容的事实依据，图中的环节/模块/角色/数字必须能在这里找到）：\n${input.materials.join('\n\n')}`;
+}
 
 /**
  * 配图生成模型调用（各章完成后逐图执行）：输入 = 关联来源完整原文 + 该章定稿正文 + 画法规范，
@@ -1841,16 +1921,14 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     materials.unshift(`[milestones] 服务端派生的合作里程碑清单（时间轴节点的唯一事实来源，日期与标签逐项对应）：\n${milestones.map((item) => `- ${item.date} ${item.label}`).join('\n')}`);
   }
   if (!materials.length) return null; // 规划引用的来源已不可解析（如降级摘要后），直接放弃该图
-  const prompt = `为客户「${input.customer.name}」的客户成功案例绘制「${sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[figure.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。只输出 JSON：{"svg":"...","caption":"..."}\n`
-    + `绘图规范：\n`
-    + `- 思考从简：先在思考里直接定下节点清单与连接关系（节点总数不超过 10 个、每个标签不超过 10 个字）就立即开始输出，不要反复推敲布局与配色；{"svg","caption"} JSON 是唯一交付物，SVG 通常 2~4k 字符即可。\n`
-    + `- svg 是一个自包含的 <svg>…</svg> 字符串（不引用外部资源、不含脚本与交互属性），画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）。\n`
-    + `- 节点用 <rect> 圆角框 + <text> 中文标签（font-size 不小于 12；每行不超过 10 个汉字，长标签用 <tspan> 拆行且每个 tspan 必须带递增 dy（如 dy="18"，首个可不带），否则多行文字会叠在一起）；<text> 元素内严禁直接换行写多行文字——多行必须且只能用 tspan 逐行拆分；连线用 <line> 或 <path> 并以 marker 箭头指向流转方向；整体横向布局，节点不重叠、连线不穿越文字。\n`
-    + `- 配色克制：浅色填充 + 深色描边 + 深色文字；只使用纯 SVG 绘制元素，不使用 <image>、外链或 CSS 样式表。\n`
-    + `- 图内文字与正文禁区相同：不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）、其他客户信息；caption 是 30 字以内的图注（如「客户现状：三套系统并行、人工汇总对齐」）。\n`
-    + `- 本图要表达的内容（来自章节规划）：${figure.idea}\n`
-    + `- 该章节定稿正文（图内容须与正文口径一致）：${chapterText}\n`
-    + `- 支撑素材原文（图内容的事实依据，图中的环节/模块/角色/数字必须能在这里找到）：\n${materials.join('\n\n')}`;
+  const prompt = buildCaseFigurePrompt({
+    customerName: input.customer.name,
+    sectionLabel,
+    kind: figure.kind,
+    idea: figure.idea,
+    chapterAnchor: chapterText,
+    materials,
+  });
   // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
   const MAX_ATTEMPTS = 4;
   const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
@@ -1953,6 +2031,18 @@ function chapterAnchorText(section: CaseChapterKey, output: ChapterOutput): stri
   return output.texts.join('\n');
 }
 
+/** value_map（痛点-方案-价值全景图）的合并锚点：触发于价值章登记时，前序波次均已定稿——
+ * 痛点取业务现状/业务诉求两章，方案取业务解决方案章，价值取本章；三段自带段落标记供画图对位取材。 */
+function valueMapAnchorText(chapters: Map<CaseChapterKey, ChapterOutput>): string {
+  const demands = (chapters.get('demands')?.texts ?? []).map((item, index) => `${index + 1}. ${item}`).join('\n');
+  return [
+    `【痛点素材·业务现状】\n${(chapters.get('status')?.texts ?? []).join('\n')}`,
+    `【痛点素材·业务诉求】\n${demands}`,
+    `【方案正文·业务解决方案】\n${chapterAnchorText('solution', chapters.get('solution')!)}`,
+    `【价值正文·方案价值概述】\n${chapterAnchorText('value', chapters.get('value')!)}`,
+  ].join('\n');
+}
+
 /** 章节波次（提速并行，锚点语义不变）：简介先行 → 现状+诉求并行（互不依赖，素材在规划期已分流）→
  * 方案（锚点=前两波）→ 价值 → 总结。波内并行、波间串行，前序章节锚点与串行版完全一致。 */
 const CHAPTER_WAVES: ReadonlyArray<readonly CaseChapterKey[]> = [['intro'], ['status', 'demands'], ['solution'], ['value'], ['summary']];
@@ -2024,8 +2114,11 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
     figureTasks.push((async () => {
       const release = await slots.acquire('figure');
       try {
-        return await generateFigureWithModel(runtime, input, snapshot, figure, communications,
-          chapterAnchorText(figure.section as CaseChapterKey, chapterOutput), milestones, stamped);
+        // value_map 收束全案三段（痛点=现状/诉求两章 + 方案 + 价值=本章）；其余图只锚定本章定稿正文。
+        const anchor = figure.kind === 'value_map'
+          ? valueMapAnchorText(chapters)
+          : chapterAnchorText(figure.section as CaseChapterKey, chapterOutput);
+        return await generateFigureWithModel(runtime, input, snapshot, figure, communications, anchor, milestones, stamped);
       } finally {
         release();
       }
