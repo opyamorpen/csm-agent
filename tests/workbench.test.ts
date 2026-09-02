@@ -709,8 +709,8 @@ test('workbench: fragments mentioning a customer name stay unattributed (no auto
     assert.equal(fragments.length, 1);
     assert.equal(fragments[0].attributionStatus, 'unattributed');
     assert.equal(fragments[0].customerId, null);
-    // 提及客户名的片段与其他片段一样进入待归属列表，等 CSM 人工标记。
-    const pending = db.listHemoryFragments({ status: 'pending' });
+    // 提及客户名的片段与其他片段一样进入待归属列表，等 CSM 人工标记（夹具日期固定，绕开滚动的 7 天窗口防日历翻转 flake）。
+    const pending = db.listHemoryFragments({ status: 'pending', days: 0 });
     assert.equal(pending.length, 1);
     assert.equal(pending[0].id, fragments[0].id);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
