@@ -3287,18 +3287,114 @@
     buttons.append(exportDocx);
     if (draft.publishedPageId) buttons.append(badge(`ONES ${draft.publishedPageId}`, 'success'));
     card.append(buttons);
-    // 配图：服务端消毒产物 + 前端防御检查后才注入（innerHTML 前必须过 sanitizeCaseSvgForRender）。
-    const figures = (detail?.draft?.fields?.figures) || (draft.fields && draft.fields.figures) || [];
-    for (const figure of figures || []) {
-      const safe = sanitizeCaseSvgForRender(figure.svg);
-      if (!safe) continue;
-      const wrap = el('div', 'case-figure');
-      const holder = el('div');
-      holder.innerHTML = safe;
-      wrap.append(holder, el('div', 'case-figure-caption', figure.caption || ''));
-      card.append(wrap);
-    }
+    // 案例全文只读视图：不进编辑即可看全文，配图按章节位置嵌入（与导出 Word、Markdown 占位同口径）。
+    // 客户详情 tab 默认展开；全局案例库默认折叠，避免整页长文。
+    const fulltext = document.createElement('details');
+    fulltext.className = 'case-fulltext';
+    if (customerMode) fulltext.open = true;
+    fulltext.append(el('summary', 'case-fulltext-summary', '案例全文'));
+    fulltext.append(renderCaseFullText(detail?.draft?.fields || draft.fields || {}, draft.title));
+    card.append(fulltext);
     return card;
+  }
+
+  /**
+   * 案例全文只读渲染：章节顺序对齐服务端 renderCaseMarkdown（唯一权威口径），配图按
+   * section/kind 嵌入对应章节末尾（status→业务现状、demands→业务诉求、solution→业务解决方案、
+   * value/milestone→服务里程碑、value/value_map→价值章末尾），不再在卡片底部单独排一排。
+   * v8 四章深结构（company_info 键判定）+ 存量旧稿五段分支；渲染前配置图必须过 sanitizeCaseSvgForRender。
+   */
+  function renderCaseFullText(fields, title) {
+    const doc = el('div', 'case-doc');
+    const figures = Array.isArray(fields.figures) ? fields.figures : [];
+    const figureBlocks = (section, kind) => {
+      const blocks = [];
+      for (const figure of figures) {
+        if (figure.section !== section || (kind && figure.kind !== kind)) continue;
+        const safe = sanitizeCaseSvgForRender(figure.svg);
+        if (!safe) continue;
+        const wrap = el('div', 'case-figure');
+        const holder = el('div');
+        holder.innerHTML = safe;
+        wrap.append(holder, el('div', 'case-figure-caption', figure.caption || ''));
+        blocks.push(wrap);
+      }
+      return blocks;
+    };
+    const str = (value) => (typeof value === 'string' ? value.trim() : '');
+    const arr = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
+    const h2 = (text) => el('div', 'case-doc-h2', text);
+    const h3 = (text) => el('div', 'case-doc-h3', text);
+    const h4 = (text) => el('div', 'case-doc-h4', text);
+    const p = (text) => el('p', 'case-doc-p', text);
+    const ol = (items) => {
+      const list = el('ol', 'case-doc-list');
+      for (const item of items) list.append(el('li', null, item));
+      return list;
+    };
+    doc.append(el('div', 'case-doc-title', title || ''));
+    if (typeof fields.company_info === 'string') {
+      doc.append(h2('一、客户及背景介绍'), h3('（一）客户简介'));
+      if (str(fields.company_info)) doc.append(h4('公司信息'), p(str(fields.company_info)));
+      if (str(fields.business_scope)) doc.append(h4('核心业务范围'), p(str(fields.business_scope)));
+      if (str(fields.competitive_strategy)) doc.append(h4('竞争优势与发展战略'), p(str(fields.competitive_strategy)));
+      doc.append(h3('（二）项目背景'), p(str(fields.project_background)));
+      const usage = Array.isArray(fields.system_usage) ? fields.system_usage.filter((row) => row && (row.item || row.content)) : [];
+      if (usage.length) {
+        const table = el('table', 'case-doc-table');
+        const thead = el('thead');
+        const head = el('tr');
+        head.append(el('th', null, '项目'), el('th', null, '内容'));
+        thead.append(head);
+        table.append(thead);
+        for (const row of usage) {
+          const tr = el('tr');
+          tr.append(el('td', null, row.item || ''), el('td', null, row.content || ''));
+          table.append(tr);
+        }
+        doc.append(h3('（三）系统使用情况'), table);
+      }
+      doc.append(h2('二、场景及解决方案'));
+      doc.append(h3('（一）业务现状'));
+      for (const item of arr(fields.business_status)) doc.append(p(item));
+      doc.append(...figureBlocks('status'));
+      doc.append(h3('（二）业务诉求'), ol(arr(fields.demands)), ...figureBlocks('demands'));
+      doc.append(h3('（三）业务解决方案'));
+      const sections = Array.isArray(fields.solution_sections) ? fields.solution_sections.filter((section) => section && str(section.text)) : [];
+      sections.forEach((section, index) => {
+        doc.append(h4(`${index + 1}、${section.title || '方案举措'}`), p(str(section.text)));
+      });
+      doc.append(...figureBlocks('solution'));
+      doc.append(h2('三、方案价值概述'));
+      const milestones = Array.isArray(fields.milestones) ? fields.milestones.filter((item) => item && item.date && item.label) : [];
+      if (milestones.length) {
+        const milestoneList = el('ul', 'case-doc-list');
+        for (const item of milestones) milestoneList.append(el('li', null, `${item.date} ${item.label}`));
+        doc.append(h3('服务里程碑'), milestoneList, ...figureBlocks('value', 'milestone'));
+      }
+      doc.append(h3('价值成效'), ol(arr(fields.value_items)));
+      if (arr(fields.lessons).length) doc.append(h3('经验复盘与沉淀'), ol(arr(fields.lessons)));
+      // value_map（痛点-方案-价值全景图）是全案收束图，位置固定在价值章末尾、项目总结之前。
+      doc.append(...figureBlocks('value', 'value_map'));
+      doc.append(h2('四、项目总结'), p(str(fields.summary)));
+      return doc;
+    }
+    // 存量旧稿五段分支：与 renderLegacyCaseMarkdown 同序，配图跟在各章正文后。
+    const legacyList = (value, legacyKey) => {
+      const source = Array.isArray(value) ? value : (Array.isArray(fields[legacyKey]) ? fields[legacyKey] : []);
+      return source.map((item) => typeof item === 'string' ? item : `${item.metric || ''}: ${item.value || ''}`.trim()).filter(Boolean);
+    };
+    const legacySections = [
+      { key: 'background', label: '客户背景', body: () => [p(str(fields.background))] },
+      { key: 'challenges', label: '痛点、现状与挑战', body: () => [ol(legacyList(fields.challenges, 'pain_points'))] },
+      { key: 'requirements', label: '需求与要求', body: () => [ol(legacyList(fields.requirements))] },
+      { key: 'solution', label: '解决方案', body: () => [p(str(fields.solution))] },
+      { key: 'value', label: '价值与成效', body: () => [ol(legacyList(fields.value, 'results'))] },
+    ];
+    legacySections.forEach((section, index) => {
+      doc.append(h2(`${'一二三四五'[index]}、${section.label}`), ...section.body(), ...figureBlocks(section.key));
+    });
+    return doc;
   }
 
   async function loadCases() {

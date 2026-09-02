@@ -1617,3 +1617,44 @@ test('case figures render only after frontend defense check with responsive cont
   assert.match(styles, /\.case-figure svg \{ display: block; max-width: 100%; height: auto; \}/);
   assert.match(styles, /\.case-figure-caption \{/);
 });
+
+test('case cards show read-only full text with figures embedded at section positions', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 全文只读视图：不进编辑即可看全文；客户详情 tab 默认展开、全局案例库默认折叠。
+  // 卡片底部不再单独铺配图 gallery——配图全部嵌入全文对应章节。
+  const card = source.match(/async function caseCard[\s\S]*?\n  \}\n\n  \/\*\*[\s\S]*?案例全文只读渲染/)?.[0];
+  assert.ok(card, 'caseCard source was not found');
+  assert.match(card, /renderCaseFullText\(detail\?\.draft\?\.fields \|\| draft\.fields \|\| \{\}, draft\.title\)/);
+  assert.match(card, /if \(customerMode\) fulltext\.open = true;/);
+  assert.match(card, /'案例全文'/);
+  assert.doesNotMatch(card, /card\.append\(wrap\)/, '卡片底部不得再直接铺配图 gallery');
+
+  const renderer = source.match(/function renderCaseFullText[\s\S]*?\n  \}\n\n  async function loadCases/)?.[0];
+  assert.ok(renderer, 'renderCaseFullText source was not found');
+  // 配图嵌入位置与导出 Word、Markdown 占位同口径：status→业务现状、demands→业务诉求、
+  // solution→业务解决方案、value/milestone→服务里程碑、value/value_map→价值章末尾（总结之前）。
+  assert.match(renderer, /const figureBlocks = \(section, kind\) =>/);
+  assert.match(renderer, /doc\.append\(h3\('（一）业务现状'\)\);[\s\S]*?doc\.append\(\.\.\.figureBlocks\('status'\)\);/);
+  assert.match(renderer, /doc\.append\(h3\('（二）业务诉求'\), ol\(arr\(fields\.demands\)\), \.\.\.figureBlocks\('demands'\)\);/);
+  assert.match(renderer, /doc\.append\(\.\.\.figureBlocks\('solution'\)\);/);
+  assert.match(renderer, /figureBlocks\('value', 'milestone'\)/);
+  assert.ok(renderer.indexOf("figureBlocks('value', 'value_map')") >= 0
+    && renderer.indexOf("figureBlocks('value', 'value_map')") < renderer.indexOf("四、项目总结"),
+  'value_map 全景图必须嵌在价值章末尾、项目总结之前');
+  // 存量旧稿五段分支：配图跟在各章正文后。
+  assert.match(renderer, /\.\.\.figureBlocks\(section\.key\)/);
+  // 嵌入前必须过前端防御消毒（与卡片 gallery 时代的同一契约）。
+  assert.match(renderer, /const safe = sanitizeCaseSvgForRender\(figure\.svg\);/);
+  // 系统使用情况表：两列表格而非纯文本。
+  assert.match(renderer, /el\('th', null, '项目'\), el\('th', null, '内容'\)/);
+
+  // 全文样式：新类存在；ol 列表保持默认排版（grid/block 会吞 ::marker 序号，见周报序号教训）。
+  assert.match(styles, /\.case-fulltext \{/);
+  assert.match(styles, /\.case-doc-title \{/);
+  assert.match(styles, /\.case-doc-table th, \.case-doc-table td \{/);
+  const listRule = styles.match(/\.case-doc-list \{[^}]*\}/)?.[0];
+  assert.ok(listRule, '.case-doc-list rule was not found');
+  assert.doesNotMatch(listRule, /display:\s*(grid|block)/);
+});

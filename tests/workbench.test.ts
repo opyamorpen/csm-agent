@@ -374,6 +374,45 @@ test('workbench: case drafts use optimistic versions', () => withDb((db) => {
   assert.equal(db.updateCaseDraft(draft.id, 1, '冲突', {}), null);
 }));
 
+test('workbench: case drafts keep only the latest version per customer', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-6', name: '客户己' });
+  const first = db.createCaseDraft('crm-6', '第一版', { background: 'A' }, []);
+  const updated = db.updateCaseDraft(first.id, 1, '第一版', { background: 'A2' })!;
+  db.markCasePublished(updated.id, updated.version, 'page-old');
+  db.beginCasePublishAttempt(updated.id, updated.version, 'parent-1', 'hash-old');
+  // 已发布旧行也一并让位：新稿落库即删除同客户所有旧行，发布尝试记录 FK 级联清理（用户拍板单版本保留）。
+  const second = db.createCaseDraft('crm-6', '第二版', { background: 'B' }, []);
+  assert.equal(db.listCaseDrafts('crm-6').length, 1);
+  assert.equal(db.listCaseDrafts('crm-6')[0].id, second.id);
+  assert.equal(db.getCaseDraft(first.id), undefined);
+  assert.equal(db.getCasePublishAttemptByHash('hash-old'), undefined, '旧行发布尝试记录随 FK 级联删除');
+  // 其他客户的草稿不受影响。
+  db.upsertCustomer({ id: 'crm-7', name: '客户庚' });
+  db.createCaseDraft('crm-7', '别家案例', { background: 'C' }, []);
+  assert.equal(db.listCaseDrafts('crm-6').length, 1);
+  assert.equal(db.listCaseDrafts('crm-7').length, 1);
+}));
+
+test('workbench: case draft startup cleanup keeps the latest row per customer', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-keep-'));
+  try {
+    const db = new WorkbenchDatabase(dir);
+    db.upsertCustomer({ id: 'crm-8', name: '客户辛' });
+    // 直接 SQL 造存量多版本数据（绕过 createCaseDraft 的单版本清理，模拟历史库）。
+    for (const [id, title, stamp] of [['d-old', '旧版', '2026-08-01T00:00:00Z'], ['d-new', '新版', '2026-08-20T00:00:00Z']] as const) {
+      db.db.prepare('INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id, 'crm-8', 1, 'draft', title, '{}', '[]', stamp, stamp);
+    }
+    db.close();
+    // 重开触发 migrate 存量清理（幂等自愈）：仅保留 updated_at 最新一行。
+    const reopened = new WorkbenchDatabase(dir);
+    const drafts = reopened.listCaseDrafts('crm-8');
+    assert.equal(drafts.length, 1);
+    assert.equal(drafts[0].id, 'd-new');
+    reopened.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: manual Hemory attribution survives a later full upsert', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-h', name: '客户海' });
   const event = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: 'r1:t1:x',
@@ -4150,11 +4189,14 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal(again.jobId, null);
     assert.equal(again.reused, true);
     assert.equal(again.draftId, draft.id);
-    // force 重新生成：新任务落新草稿。
+    // force 重新生成：新任务落新草稿（单版本保留：同客户旧行连同旧配图一并删除）。
     const forced = service.generate('crm-c1', true);
     assert.ok(forced.jobId);
     await waitForJob(db, forced.jobId!);
-    assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
+    const drafts = db.listCaseDrafts('crm-c1');
+    assert.equal(drafts.length, 1, 'force 生成后同客户仅保留最新一版');
+    assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
+    assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
     assert.equal(CASE_GENERATION_VERSION, 'case-v10.3-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }

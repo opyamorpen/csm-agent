@@ -595,6 +595,14 @@ export class WorkbenchDatabase {
     // 行动状态收敛两态（未完成 new / 已完成 completed）：历史上 accepted/「接受」流程与 in_progress/snoozed/false_positive
     // 等仅 CLI 可设的旧状态在开库时一律归入未完成；completed 不动，保持周报完成统计口径（幂等，新库无旧状态行）。
     this.db.prepare(`UPDATE action_items SET status='new', updated_at=? WHERE status NOT IN ('new','completed')`).run(nowIso());
+    // 案例草稿收敛单版本：每客户只保留 updated_at 最新一行（平局以 id 决胜），历史版本行连同旧配图
+    // 与发布尝试记录（FK 级联）一并删除。幂等自愈：createCaseDraft 建行时同样清理，此处兜底存量库。
+    this.db.exec(`
+      DELETE FROM case_drafts WHERE id NOT IN (
+        SELECT id FROM case_drafts c WHERE NOT EXISTS (
+          SELECT 1 FROM case_drafts n WHERE n.customer_id = c.customer_id
+            AND (n.updated_at > c.updated_at OR (n.updated_at = c.updated_at AND n.id > c.id))))
+    `);
     this.repairMiswrittenDraftItems();
   }
 
@@ -1231,6 +1239,8 @@ export class WorkbenchDatabase {
       fingerprint: meta?.fingerprint ?? null, generator: meta?.generator ?? null, createdAt: now, updatedAt: now };
     this.db.prepare(`INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,fingerprint,generator,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
       .run(draft.id, customerId, 1, 'draft', title, json(fields), json(evidenceRefs), meta?.fingerprint ?? null, meta?.generator ?? null, now, now);
+    // 单版本保留（用户拍板）：新稿落库即删除同客户历史版本行，旧配图随行删除、发布尝试记录 FK 级联清理。
+    this.db.prepare('DELETE FROM case_drafts WHERE customer_id=? AND id<>?').run(customerId, draft.id);
     return draft;
   }
 
@@ -1246,9 +1256,10 @@ export class WorkbenchDatabase {
   }
 
   listCaseDrafts(customerId?: string): CaseDraft[] {
+    // id DESC 平局决胜：与 migrate() 的「保留最新一行」清理口径一致，updated_at 相同时以 id 定序。
     const rows = customerId
-      ? this.db.prepare('SELECT id FROM case_drafts WHERE customer_id=? ORDER BY updated_at DESC').all(customerId) as Row[]
-      : this.db.prepare('SELECT id FROM case_drafts ORDER BY updated_at DESC').all() as Row[];
+      ? this.db.prepare('SELECT id FROM case_drafts WHERE customer_id=? ORDER BY updated_at DESC, id DESC').all(customerId) as Row[]
+      : this.db.prepare('SELECT id FROM case_drafts ORDER BY updated_at DESC, id DESC').all() as Row[];
     return rows.map((row) => this.getCaseDraft(String(row.id))!);
   }
 
