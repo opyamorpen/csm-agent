@@ -2438,7 +2438,7 @@
 
   /**
    * 案例生成轮询：展示服务端进度文案（阶段/检索角度/模型输出字数），锚点 DOM 存活期间
-   * 一直跟踪（前 90 次 2s、之后降为 5s，无超时放弃）。任务到终态后按指纹定位新草稿并回调。
+   * 一直跟踪（前 90 次 2s、之后降为 5s，无超时放弃）。终态移除进度行后按指纹定位新草稿并回调。
    * 返回 { draft } 或 { error }；锚点被移除（切走客户/重开页面）返回 { detached: true }。
    */
   async function pollCaseJob(customerId, jobId, fingerprint, anchor) {
@@ -2446,15 +2446,16 @@
     for (let attempt = 0; !anchor || anchor.isConnected; attempt++) {
       const data = await api(`/api/draft-jobs?ids=${encodeURIComponent(jobId)}`);
       const job = (data.jobs || [])[0];
-      if (!job) throw new Error('生成任务不存在');
-      if (notice) notice.textContent = `案例生成中…（${job.progress || (job.status === 'running' ? '正在处理' : '排队中')}）`;
+      if (!job) { if (notice) notice.remove(); throw new Error('生成任务不存在'); }
       if (job.status === 'succeeded') {
+        if (notice) notice.remove();
         const list = await api(`/api/case-drafts?customer_id=${encodeURIComponent(customerId)}`);
         const draft = (list.drafts || []).find((item) => item.fingerprint === fingerprint)
           ?? (list.drafts || [])[0];
         return draft ? { draft } : { error: '任务成功但未找到新草稿' };
       }
-      if (job.status === 'failed') return { error: job.error || '未知原因' };
+      if (job.status === 'failed') { if (notice) notice.remove(); return { error: job.error || '未知原因' }; }
+      if (notice) notice.textContent = `案例生成中…（${job.progress || (job.status === 'running' ? '正在处理' : '排队中')}）`;
       await new Promise((resolve) => setTimeout(resolve, attempt < 90 ? 2000 : 5000));
     }
     return { detached: true };

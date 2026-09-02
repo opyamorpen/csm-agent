@@ -1327,6 +1327,11 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   assert.match(pollCase, /anchor\.isConnected/);
   assert.match(pollCase, /attempt < 90 \? 2000 : 5000/);
   assert.doesNotMatch(pollCase, /timeout/);
+  // 终态清理契约：succeeded/failed 分支先移除进度行（notice.remove，对齐 pollWeeklyJob），
+  // 「案例生成中」文案刷新位于终态判断之后——终态轮次不再刷进行中文案、框不残留。
+  assert.match(pollCase, /status === 'succeeded'\) \{[\s\S]*?if \(notice\) notice\.remove\(\);/);
+  assert.match(pollCase, /status === 'failed'\) \{ if \(notice\) notice\.remove\(\); return/);
+  assert.match(pollCase, /job\.status === 'failed'[\s\S]*?notice\.textContent = `案例生成中…/);
   // 案例进度行组件：app.js 建行 + style.css 供样式（与周报 notice 同一视觉契约）。
   assert.match(source, /function ensureCaseNotice/);
   assert.match(source, /\.generation-notice/);
