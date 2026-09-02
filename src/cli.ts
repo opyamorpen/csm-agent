@@ -75,7 +75,7 @@ const CLI_CAPABILITIES = [
   { command: 'update', workflow: 'self-update', access: 'local', api: [] },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
-  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/attachments/:attId', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_detail', 'get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'] },
+  { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/attachments/:attId', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_detail', 'get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'], notes: '贴截图/聊天记录说「帮我提 bug/需求/工单」：agent 从贴入内容分析生成 ONES 建议/工单/运维工单待确认草稿（先取 get_ones_desk_required_fields 字段契约，证据不足走兜底值+unknowns），会话内 [y] 批准/[e] 编辑后批准按参数哈希回写 ONES' },
   { command: 'sessions', workflow: 'agent-sessions', access: 'read-write', api: ['/api/sessions', '/api/sessions?include=archived', '/api/sessions/:id', '/api/sessions/:id/export', '/api/sessions/:id/stop'] },
   { command: 'api', workflow: 'api-fallback', access: 'read-write', api: ['/api/*'] },
 ] as const;
@@ -230,7 +230,9 @@ function help(): void {
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
      落库 record_web_intelligence；
      --attach 附带本地文件（文本类/Office（docx/xlsx/pptx）/PDF 内容注入上下文，可重复；
-     图片要求视觉模型，自定义端点先 config llm set ... --vision=on 声明能力））
+     图片要求视觉模型，自定义端点先 config llm set ... --vision=on 声明能力）；
+     贴截图/聊天记录说「帮我提 bug/需求」时，agent 从贴入内容分析生成 ONES
+     建议/工单/运维工单待确认草稿，会话内 [y] 批准 / [e] 编辑后批准即回写 ONES）
   csm-agent sessions [list] [--all] [--json]
   csm-agent sessions show <会话ID> [--json]
     （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）

@@ -13,7 +13,7 @@ import { CUSTOMER_PROFILE_TOOL_NAME, CUSTOMER_EVENTS_TOOL_NAME, makeWorkbenchToo
 import { CUSTOMER_DETAIL_TOOL_NAME, makeCustomerDetailResult } from './tools/customer-detail.js';
 import { WEB_SEARCH_TOOL_NAME, RECORD_WEB_INTELLIGENCE_TOOL_NAME, makeWebSearchHandler, makeRecordWebIntelligenceHandler } from './tools/websearch.js';
 import { ONES_DESK_FIELDS_TOOL_NAME, makeOnesDeskFieldsHandler } from './tools/onesdesk.js';
-import { missingOnesDeskSpecFields, applyDeploymentTypeOverride, ONES_DESK_DEPLOYMENT_FIELD_ID } from './workbench/drafts.js';
+import { missingOnesDeskSpecFields, missingOnesDeskDescription, unknownOnesDeskFieldIds, applyDeploymentTypeOverride, ONES_DESK_DEPLOYMENT_FIELD_ID, resolveOnesOption } from './workbench/drafts.js';
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent } from './transcript.js';
 import { WorkbenchDatabase } from './workbench/database.js';
@@ -153,12 +153,23 @@ function pickNarrativeFields(fields: Record<string, unknown>): Record<string, un
   return picked;
 }
 
-export function validateCustomerBoundDraft(draft: ConfirmDraft, customer: CustomerContext | null): string | null {
+/** 批准校验用的客户绑定 ID 当前值（从工作台库按绑定客户重解析；缺失项回退会话上下文）。 */
+export type BoundCustomerIds = Partial<Pick<CustomerContext, 'ones_customer_option_id' | 'customer_manhour_issue_id'>>;
+
+export function validateCustomerBoundDraft(
+  draft: ConfirmDraft,
+  customer: CustomerContext | null,
+  resolveCurrentIds?: (customer: CustomerContext) => BoundCustomerIds,
+): string | null {
   if (!customer?.crm_customer_id || !customer.customer_name) return '当前 Agent 会话未绑定 CRM 售后客户，不能批准回写';
   const draftCustomerId = draft.fields.customer_id ?? draft.fields.crm_customer_id;
   if (draftCustomerId !== customer.crm_customer_id || draft.fields.customer_name !== customer.customer_name) {
     return '草稿中的 CRM 客户 ID/客户名称与当前客户不一致';
   }
+  // 会话上下文可能早于身份解析/售后工时项绑定创建（或已过期）：校验用工作台库当前值兜底，不回写 session.customer。
+  const current = resolveCurrentIds?.(customer) ?? {};
+  const onesOptionId = current.ones_customer_option_id || customer.ones_customer_option_id;
+  const manhourIssueId = current.customer_manhour_issue_id || customer.customer_manhour_issue_id;
   if (draft.target_system === 'crm') {
     return containsExactValue(draft.target_arguments, customer.crm_customer_id)
       ? null
@@ -167,16 +178,16 @@ export function validateCustomerBoundDraft(draft: ConfirmDraft, customer: Custom
   if (draft.target_system !== 'ones') return 'target_system 只允许 crm 或 ones';
   if (draft.record_type === 'case' || draft.record_type === 'profile') return null;
   if (draft.record_type === 'workhour') {
-    return customer.customer_manhour_issue_id && draft.target_arguments.issueID === customer.customer_manhour_issue_id
+    return manhourIssueId && draft.target_arguments.issueID === manhourIssueId
       ? null
       : '工时回写必须指向当前客户已绑定的“售后客户”工作项';
   }
   const fieldValues = Array.isArray(draft.target_arguments.fieldValues) ? draft.target_arguments.fieldValues : [];
   const customerFieldId = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
   const binding = fieldValues.find((item) => isRecord(item) && item.fieldID === customerFieldId);
-  return binding && customer.ones_customer_option_id && containsExactValue(binding.value, customer.ones_customer_option_id)
+  return binding && onesOptionId && containsExactValue(binding.value, onesOptionId)
     ? null
-    : `ONES 回写参数必须在 fieldValues 中绑定 ${customerFieldId}=${customer.ones_customer_option_id ?? '(未解析)'}`;
+    : `ONES 回写参数必须在 fieldValues 中绑定 ${customerFieldId}=${onesOptionId ?? '(未解析，请刷新客户同步后重试)'}`;
 }
 
 interface WorkbenchServices {
@@ -320,6 +331,16 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         { recordings: report.length, inherited: report.reduce((sum, item) => sum + item.inherited.length, 0), metaBackfilled: report.filter((item) => item.metaBackfilled).length });
     }
     return report;
+  }
+
+  // 批准门的当前值兜底：会话上下文里的 ONES 客户选项/售后工时项 ID 可能早于身份解析或绑定创建，
+  // 按绑定客户从工作台库重解析（与 Hemory 自动草稿同一权威来源），只用于校验、不回写会话上下文。
+  function resolveBoundCustomerIds(customer: CustomerContext): BoundCustomerIds {
+    if (!customer.crm_customer_id) return {};
+    const bound = workbench.db.getCustomer(customer.crm_customer_id);
+    const option = bound ? resolveOnesOption(workbench.db, bound) : undefined;
+    const manhour = workbench.db.findCustomerManhourIssue(customer.crm_customer_id);
+    return { ones_customer_option_id: option?.id, customer_manhour_issue_id: manhour?.externalId };
   }
 
   function makeAgent(session: Session): AgentSession {
@@ -1411,7 +1432,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               if (expectedVersion !== caseDraft.version) {
                 return json(res, 400, { error: `案例草稿版本已变化（当前 v${caseDraft.version}），请重新发起精修` });
               }
-              const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer);
+              const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer, resolveBoundCustomerIds);
               if (bindingError) return json(res, 400, { error: bindingError });
               const updated = workbench.cases.update(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title,
                 pickNarrativeFields(approvedDraft.fields));
@@ -1441,21 +1462,29 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {
               return json(res, 400, { error: '目标工具不是已连接的写工具' });
             }
-            const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer);
+            const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer, resolveBoundCustomerIds);
             if (bindingError) return json(res, 400, { error: bindingError });
             // ONES 工作项批准门：规格表字段（所属产品/所属模块/实例部署类型等）必须齐备，批准即写入，
             // 缺失会到 ONES 端才报错。agent 无法从 get_issue_fields 自行枚举选项（大选项集截断），必须用本地工具补齐。
-            const specMissing = missingOnesDeskSpecFields(approvedDraft.record_type,
-              Array.isArray(approvedDraft.target_arguments.fieldValues) ? approvedDraft.target_arguments.fieldValues as Array<Record<string, unknown>> : []);
+            const deskFieldValues = Array.isArray(approvedDraft.target_arguments.fieldValues)
+              ? approvedDraft.target_arguments.fieldValues as Array<Record<string, unknown>> : [];
+            const specMissing = missingOnesDeskSpecFields(approvedDraft.record_type, deskFieldValues);
             if (specMissing.length) {
               return json(res, 400, { error: `ONES 工作项缺少必填字段: ${specMissing.map((spec) => `${spec.label}(${spec.uuid})`).join('、')}（请调用 get_ones_desk_required_fields 获取选项 UUID 补齐后重新 confirm_write）` });
+            }
+            // 描述必须写进 field016（真实验收发现模型把描述写进发明的 field002），且 fieldValues 不允许
+            // 规格字段/客户信息/描述之外的未知字段 ID——未知 ID 只有到 ONES 端才会报错，必须在门禁拦下。
+            if (missingOnesDeskDescription(approvedDraft.record_type, deskFieldValues)) {
+              return json(res, 400, { error: 'ONES 工作项描述必须写入 field016（fieldValues 携带 {"fieldID":"field016","value":"完整描述"}），不得省略或改用其他字段' });
+            }
+            const unknownFields = unknownOnesDeskFieldIds(approvedDraft.record_type, deskFieldValues);
+            if (unknownFields.length) {
+              return json(res, 400, { error: `ONES 工作项 fieldValues 含未知字段: ${unknownFields.join('、')}（只允许规格字段、客户信息 JrvswW8P 与描述字段 field016），请移除后重新 confirm_write` });
             }
             // 实例部署类型以 CRM 使用版本为唯一依据（公有云版→公有云，其余→私有云），与 Hemory 自动草稿同一规则。
             if (approvedDraft.record_type === 'suggestion' || approvedDraft.record_type === 'ticket') {
               const expected = applyDeploymentTypeOverride(approvedDraft.record_type as 'suggestion' | 'ticket', session.customer?.usage_version)[0];
-              const actual = (Array.isArray(approvedDraft.target_arguments.fieldValues)
-                ? approvedDraft.target_arguments.fieldValues as Array<Record<string, unknown>> : [])
-                .find((value) => value.fieldID === ONES_DESK_DEPLOYMENT_FIELD_ID);
+              const actual = deskFieldValues.find((value) => value.fieldID === ONES_DESK_DEPLOYMENT_FIELD_ID);
               if (!expected || !actual || String(actual.value) !== expected.value) {
                 return json(res, 400, { error: `实例部署类型必须按 CRM 使用版本判定为 ${expected?.value ?? '(规则解析失败)'}，当前草稿为 ${actual?.value ?? '(缺失)'}（公有云版→公有云，其余→私有云）` });
               }

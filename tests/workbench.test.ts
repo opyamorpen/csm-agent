@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
-import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption } from '../src/workbench/drafts.js';
+import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskDescription, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption, unknownOnesDeskFieldIds } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 import { collectOpportunitySignals, OpportunityService, parseOpportunityAnalysis } from '../src/workbench/opportunity.js';
 
@@ -2304,6 +2304,29 @@ test('workbench: missingOnesDeskSpecFields gates the approval of agent-session d
   assert.deepEqual(missingOnesDeskSpecFields('followup', []), []);
   assert.deepEqual(missingOnesDeskSpecFields('case', []), []);
   assert.deepEqual(missingOnesDeskSpecFields('unknown-type', []), []);
+});
+
+test('workbench: desk description must land on field016 and unknown field IDs are rejected', () => {
+  // 真实验收形态：模型把完整描述写进发明的 field002，规格字段齐全——描述落点与未知字段都必须拦下。
+  const acceptedTicket = [
+    { fieldID: 'JrvswW8P', value: 'opt1' },
+    { fieldID: 'CATNfrrF', value: 'JuTTumjJ' },
+    { fieldID: 'HS5u8PNB', value: 'Fzg8dBCT' },
+    { fieldID: 'Su4v8xFs', value: 'M1eT99eW' },
+    { fieldID: 'field029', value: 'UPYjaEgNQX1K9R3L' },
+    { fieldID: 'field002', value: '## 问题描述\n导出测试报告 500' },
+  ];
+  assert.equal(missingOnesDeskDescription('ticket', acceptedTicket), true, '描述未写 field016 应判缺失');
+  assert.deepEqual(unknownOnesDeskFieldIds('ticket', acceptedTicket), ['field002'], '未知字段 field002 应被点名');
+  // 描述移到 field016 后两者都通过。
+  const corrected = acceptedTicket.filter((value) => value.fieldID !== 'field002').concat([{ fieldID: 'field016', value: '## 问题描述\n导出测试报告 500' }]);
+  assert.equal(missingOnesDeskDescription('ticket', corrected), false);
+  assert.deepEqual(unknownOnesDeskFieldIds('ticket', corrected), []);
+  // 空白描述值视为缺失。
+  assert.equal(missingOnesDeskDescription('ticket', [...corrected.filter((v) => v.fieldID !== 'field016'), { fieldID: 'field016', value: '  ' }]), true);
+  // 非 ONES Desk 类型不校验。
+  assert.equal(missingOnesDeskDescription('followup', []), false);
+  assert.deepEqual(unknownOnesDeskFieldIds('case', [{ fieldID: 'anything', value: '1' }]), []);
 });
 
 test('workbench: parseOnesManhourMode tolerates ONES status envelopes', () => {

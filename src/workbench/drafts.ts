@@ -271,6 +271,26 @@ export function missingOnesDeskSpecFields(recordType: string, fieldValues: Array
   const provided = new Set(fieldValues.filter((value) => value.value != null && value.value !== '').map((value) => String(value.fieldID)));
   return ONES_DESK_FIELD_SPECS[deskType].filter((spec) => !provided.has(spec.uuid));
 }
+
+/** 批准门校验：描述必须写入 field016（真实验收曾发现模型把描述写进发明的 field002）。非 ONES Desk 类型不校验。 */
+export function missingOnesDeskDescription(recordType: string, fieldValues: Array<Record<string, unknown>>): boolean {
+  const deskType = onesDeskTypeId(recordType as DraftItemType);
+  if (!deskType) return false;
+  const desc = fieldValues.find((value) => String(value.fieldID) === ONES_DESK_DESC_FIELD_ID);
+  return !desc || desc.value == null || String(desc.value).trim() === '';
+}
+
+/** 批准门校验：fieldValues 只允许 规格字段 + 客户信息字段 + 描述字段（field016）；未知字段 ID 在 ONES 端才会报错，必须在门禁拦下。非 ONES Desk 类型返回空。 */
+export function unknownOnesDeskFieldIds(recordType: string, fieldValues: Array<Record<string, unknown>>): string[] {
+  const deskType = onesDeskTypeId(recordType as DraftItemType);
+  if (!deskType) return [];
+  const allowed = new Set<string>([
+    ...ONES_DESK_FIELD_SPECS[deskType].map((spec) => spec.uuid),
+    ONES_CUSTOMER_FIELD_ID,
+    ONES_DESK_DESC_FIELD_ID,
+  ]);
+  return [...new Set(fieldValues.map((value) => String(value.fieldID)).filter((fieldId) => !allowed.has(fieldId)))];
+}
 // ONES 工时按实例配置的模式二选一写工具；宽松正则匹配曾把 create_new_issue（描述里带 manhour 字样）误当工时工具。
 type OnesWorkhourMode = 'simple' | 'summary';
 const ONES_WORKHOUR_TOOLS: Record<OnesWorkhourMode, string> = { simple: 'add_workhour_in_simple_mode', summary: 'add_workhour_in_summary_mode' };
