@@ -831,8 +831,8 @@ footer {
 
 body { color: var(--text); font-size: 14px; line-height: 1.5; }
 header { height: 54px; flex: 0 0 54px; padding: 0 18px; }
-.brand { font-size: 15px; }
-.right { gap: 14px; }
+.brand { font-size: 15px; flex: none; white-space: nowrap; }
+.right { gap: 14px; min-width: 0; }
 .quiet-command, .primary-command, .back-command {
   min-height: 34px;
   padding: 6px 12px;
@@ -850,8 +850,12 @@ header { height: 54px; flex: 0 0 54px; padding: 0 18px; }
 .quiet-command.small, .primary-command.small { min-height: 28px; padding: 3px 9px; font-size: 12px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button:disabled:hover { transform: none; }
-header .quiet-command { background: transparent; border-color: var(--header-btn-border); color: var(--header-text); min-height: 30px; }
+header .quiet-command { background: transparent; border-color: var(--header-btn-border); color: var(--header-text); min-height: 30px; flex: none; white-space: nowrap; }
 header .quiet-command:hover { border-color: var(--header-text); background: rgba(255, 255, 255, 0.08); }
+/* 顶栏单行契约：品牌/按钮不折行不收缩，状态文本可收缩并按 ellipsis 截断——长状态文案曾把窄窗口顶栏各元素挤到内部折行错位。 */
+.status { min-width: 0; }
+.status .dot { flex: none; }
+.status .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 #sidebar { width: 194px; flex-basis: 194px; padding: 12px 10px; }
 .product-nav { display: grid; gap: 3px; }

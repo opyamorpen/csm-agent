@@ -784,7 +784,9 @@ test('draft generation shows a loading banner and polls job status after attribu
   assert.match(tracker, /\/api\/draft-jobs\?ids=/);
   // 实时进度契约：横幅按任务渲染「客户 · 日期：阶段文案」，阶段优先取服务端 progress（与周报/案例同源）。
   assert.match(tracker, /job\.progress \|\| \(job\.status === 'running' \? '正在处理' : '排队中'\)/);
-  assert.match(tracker, /const summary = `正在生成草稿（\$\{runningJobs\.length\} 个任务\$\{slow\}，已进行 \$\{duration\}\）：\$\{lines\.join\('；'\)\}`;/);
+  // 顶栏短摘要（head）+ 横幅完整明细（summary）：长文案不再整体塞进顶栏状态位。
+  assert.match(tracker, /const head = `正在生成草稿（\$\{runningJobs\.length\} 个任务\$\{slow\}，已进行 \$\{duration\}）`/);
+  assert.match(tracker, /const summary = `\$\{head\}：\$\{lines\.join\('；'\)\}`;/);
   assert.match(tracker, /draftGenerationNotice\.classList\.remove\('hidden'\)/);
   assert.match(tracker, /draftGenerationText\.textContent/);
   // 轮询降频（2s→5s）且不再 180s 硬放弃：180s 只是「耗时较长」提示阈值，600s 才是安全阀，
@@ -1728,4 +1730,34 @@ test('risk watchlist exposes trigger labels, dual tabs and mandatory resolve not
   // 双主题契约：预警样式只引用主题 token（浅色/深色同名变量）。
   assert.match(css, /\.alert-banner \{[^\}]*var\(--warn-border\)/);
   assert.match(css, /\.alert-card \{[^\}]*var\(--panel\)/);
+});
+
+test('header stays single-line: status text ellipsizes, brand/buttons never wrap', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 顶栏状态文本必须是 span：ellipsis 无法作用于 flex 容器里的裸文本节点（匿名 flex item）。
+  assert.match(html, /<div id="status" class="status"><span class="dot"><\/span><span class="text">/);
+
+  // 单行契约：品牌/按钮不折行不收缩，.right 允许收缩给状态位让位，状态文本按 ellipsis 截断。
+  assert.match(css, /\.brand \{ font-size: 15px; flex: none; white-space: nowrap; \}/);
+  assert.match(css, /\.right \{ gap: 14px; min-width: 0; \}/);
+  assert.match(css, /header \.quiet-command \{[^}]*min-height: 30px; flex: none; white-space: nowrap; \}/);
+  assert.match(css, /\.status \{ min-width: 0; \}/);
+  assert.match(css, /\.status \.dot \{ flex: none; \}/);
+  assert.match(css, /\.status \.text \{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+
+  // 生成中顶栏只写短摘要（完整明细在草稿箱横幅），长文案曾把窄窗口顶栏挤到全面折行错位。
+  const tracker = source.match(/function trackDraftGeneration[\s\S]*?\n  \}\n\n  function draftTypeLabel/)?.[0];
+  assert.ok(tracker, 'trackDraftGeneration source was not found');
+  assert.match(tracker, /const head = `正在生成草稿（\$\{runningJobs\.length\} 个任务\$\{slow\}，已进行 \$\{duration\}）`/);
+  assert.match(tracker, /draftGenerationText\.textContent = summary/);
+  assert.match(tracker, /setStatus\('', head\)/);
+  assert.doesNotMatch(tracker, /summary\.slice\(0, 160\)/);
+
+  // 截断后全文靠 title 悬停补读。
+  const setStatusFn = source.match(/function setStatus\(cls, text\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(setStatusFn, 'setStatus source was not found');
+  assert.match(setStatusFn, /statusEl\.lastChild\.title = text/);
 });

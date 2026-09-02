@@ -137,6 +137,8 @@
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
     statusEl.lastChild.textContent = text;
+    // 顶栏状态位窄窗口下按 ellipsis 截断，title 保留全文供悬停查看。
+    statusEl.lastChild.title = text;
   }
 
   /**
@@ -1512,10 +1514,12 @@
           const where = `${customerNameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''}`;
           return `${where}：${phase}`;
         });
-        const summary = `正在生成草稿（${runningJobs.length} 个任务${slow}，已进行 ${duration}）：${lines.join('；')}`;
+        // 顶栏只放短摘要（完整明细在草稿箱横幅）：无约束的长文案曾把窄窗口顶栏各元素挤到折行错位。
+        const head = `正在生成草稿（${runningJobs.length} 个任务${slow}，已进行 ${duration}）`;
+        const summary = `${head}：${lines.join('；')}`;
         draftGenerationNotice.classList.remove('hidden');
         draftGenerationText.textContent = summary;
-        setStatus('', summary.slice(0, 160));
+        setStatus('', head);
       } else {
         for (const id of finished) draftJobTracking.delete(id);
         draftJobTimer = null;
