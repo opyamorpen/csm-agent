@@ -726,7 +726,7 @@
       del.onclick = (ev) => { ev.stopPropagation(); deleteSession(s.id); };
       ops.append(share, rename, archive, del);
       item.append(t, ops);
-      item.onclick = () => switchSession(s.id);
+      item.onclick = () => openSessionView(s.id);
       sessionListEl.appendChild(item);
     }
   }
@@ -780,6 +780,13 @@
     const meta = list.find((s) => s.id === id);
     sessionCustomerId = meta?.customerId ?? null;
     setStatus(mcpFailures.length ? 'warn' : 'ok', mcpFailures.length ? '部分系统未连接: ' + mcpFailures.map(([n]) => n).join(', ') : '就绪');
+  }
+
+  /** 会话列表点击：切会话并回到对话面板——侧栏列表在 Hemory 片段/草稿箱 tab 下仍可见，只 switchSession 会停留在原面板。 */
+  async function openSessionView(id) {
+    await switchSession(id);
+    showView('agent');
+    await showAgentMode('conversation');
   }
 
   /** Ensure the active agent session is bound to this customer; create one if not. */
@@ -2999,6 +3006,7 @@
         await ensureCustomerSession(c);
       } catch (error) { await alertDialog(error.message); return; }
       showView('agent');
+      await showAgentMode('conversation');
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
     };
@@ -3847,7 +3855,8 @@
     }
   });
 
-  newSessionBtn.addEventListener('click', newSession);
+  // 新对话后须落回对话 tab（boot 的 init() 也调 newSession，故在绑定处导航而不动函数本身）。
+  newSessionBtn.addEventListener('click', async () => { await newSession(); await showAgentMode('conversation'); });
   archivedToggle.addEventListener('click', () => {
     archivedExpanded = !archivedExpanded;
     archivedListEl.classList.toggle('hidden', !archivedExpanded);

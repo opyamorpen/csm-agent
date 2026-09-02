@@ -682,6 +682,25 @@ test('session list supports share, archive and an archived fold with restore', (
   assert.match(html, /id="archivedList"/);
 });
 
+test('clicking a session in the agent sidebar lands on the conversation panel', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // 显示契约：侧栏会话列表在 Hemory 片段/草稿箱二级 tab 下仍可见；点击会话名称必须切回对话面板，
+  // 只 switchSession（切数据不切面板）会让界面停留在原 tab，表现为「点击对话名称没反应」。
+  const opener = source.match(/async function openSessionView[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(opener, 'openSessionView source was not found');
+  assert.match(opener, /await switchSession\(id\)/);
+  assert.match(opener, /showView\('agent'\)/);
+  assert.match(opener, /await showAgentMode\('conversation'\)/);
+  const listRenderer = source.match(/function renderSessionList[\s\S]*?\n  }\n\n  function renderArchivedList/)?.[0];
+  assert.ok(listRenderer, 'renderSessionList source was not found');
+  assert.match(listRenderer, /item\.onclick = \(\) => openSessionView\(s\.id\)/);
+  // 新对话按钮与「询问 Agent」同口径：进入 agent 视图后必须落在对话 tab，否则输入框不可见。
+  assert.match(source, /newSessionBtn\.addEventListener\('click', async \(\) => \{ await newSession\(\); await showAgentMode\('conversation'\); \}\)/);
+  const ask = source.match(/const ask = el\('button', 'quiet-command', '询问 Agent'\);[\s\S]*?\n    };/)?.[0];
+  assert.ok(ask, 'ask agent button source was not found');
+  assert.match(ask, /await showAgentMode\('conversation'\)/);
+});
+
 test('sidebar scrollbar only appears on hover inside its own track pad', () => {
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
 
