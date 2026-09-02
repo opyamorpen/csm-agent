@@ -1360,7 +1360,11 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   // v8 导出 Word：案例卡经 /export 二进制流下载（与复制/Wiki 发布同一内容口径）。
   assert.match(caseCard, /'导出 Word'/);
   assert.match(caseCard, /\/api\/case-drafts\/\$\{encodeURIComponent\(draft\.id\)\}\/export/);
-  assert.match(caseCard, /createObjectURL\(blob\)/);
+  // 下载路径：Chrome/Edge 走 showSaveFilePicker 选保存位置，其余环境回退 saveBlobViaAnchor
+  // （<a download>，createObjectURL 在该 helper 内；Mac 壳由 WKDownloadDelegate 弹 NSSavePanel）。
+  assert.match(caseCard, /window\.showSaveFilePicker/);
+  assert.match(caseCard, /saveBlobViaAnchor\(blob, name\)/);
+  assert.match(source, /function saveBlobViaAnchor[\s\S]*?createObjectURL\(blob\)/);
   // 编辑写回护栏：保存/PATCH 响应的 warnings 以弹窗提示（非阻断）。
   const editCaseSource = source.match(/function editCase[\s\S]*?\n  \}\n\n  async function pollSync/)?.[0];
   assert.ok(editCaseSource, 'editCase source was not found');
@@ -1494,6 +1498,25 @@ test('mac app shell implements the WKWebView open-panel delegate (file inputs wo
   // 三件套 JS 面板代理仍在（历史回归守护）。
   assert.match(swift, /runJavaScriptAlertPanelWithMessage/);
   assert.match(swift, /runJavaScriptConfirmPanelWithMessage/);
+});
+
+test('mac app shell routes downloads through NSSavePanel instead of silently dropping them', () => {
+  const swift = readFileSync(new URL('../scripts/mac-app/main.swift', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // WKWebView 里 <a download>（案例导出 Word）没有下载委托链会被静默丢弃——
+  // decidePolicy → didBecome → WKDownloadDelegate 缺一不可，保存目标必须经
+  // NSSavePanel 由用户选择（与 JS 面板/open panel 静默失败是同一类坑）。
+  assert.match(swift, /WKUIDelegate, WKDownloadDelegate/);
+  assert.match(swift, /navigationAction\.shouldPerformDownload/);
+  assert.match(swift, /navigationResponse: WKNavigationResponse,\s*didBecome download: WKDownload/);
+  assert.match(swift, /func download\(_ download: WKDownload,\s*decideDestinationUsing response: URLResponse,/);
+  assert.match(swift, /panel\.nameFieldStringValue = suggestedFilename\.isEmpty \? "客户成功案例\.docx" : suggestedFilename/);
+  assert.match(swift, /didFailWithError error: Error,\s*resumeData: Data\?/);
+  // 前端：Chrome/Edge 走 showSaveFilePicker 由用户选位置（取消 AbortError 静默）；
+  // 不可用环境保留 <a download> 回退（Mac 壳由此走进下载委托），两条路径都在才算契约成立。
+  assert.match(source, /if \(window\.showSaveFilePicker\) \{/);
+  assert.match(source, /pickerError\.name === 'AbortError'/);
+  assert.match(source, /link\.download = name;/);
 });
 
 test('static shell assets are served no-store so a restarted app never runs a stale front-end', () => {

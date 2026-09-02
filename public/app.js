@@ -3148,6 +3148,20 @@
     return svg;
   }
 
+  /**
+   * blob 下载回退（showSaveFilePicker 不可用或失败时）：浏览器落默认下载目录；
+   * Mac 壳 WKWebView 由 Swift 侧 WKDownloadDelegate 接管弹 NSSavePanel 选位置。
+   * 故意不 revokeObjectURL：壳里保存面板可能开很久，WebKit 在选定目标后才读
+   * blob 数据，提前 revoke 会让下载失败；文档卸载时 blob 自然释放。
+   */
+  function saveBlobViaAnchor(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.click();
+  }
+
   async function caseCard(draft, customerMode = false, customerId = null) {
     const card = el('article', 'case-card-item');
     card.append(el('strong', null, draft.title), el('div', 'cell-sub', `${draft.status === 'published' ? '已发布' : `草稿 v${draft.version}`} · ${formatDateTime(draft.updatedAt)}`));
@@ -3220,12 +3234,21 @@
         const blob = await response.blob();
         const disposition = response.headers.get('content-disposition') || '';
         const name = decodeURIComponent((disposition.match(/filename\*=UTF-8''([^;]+)/) || [])[1] || '客户成功案例.docx');
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = name;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        // Chrome/Edge：File System Access API 弹保存位置选择由用户定路径；
+        // WKWebView/Safari/Firefox 无此 API，回退 <a download>（Mac 壳由此走进 NSSavePanel）。
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await window.showSaveFilePicker({ suggestedName: name });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+          } catch (pickerError) {
+            if (pickerError && pickerError.name === 'AbortError') return; // 用户取消保存，静默
+            saveBlobViaAnchor(blob, name); // 其他异常（如用户激活过期）回退默认下载
+          }
+        } else {
+          saveBlobViaAnchor(blob, name);
+        }
         exportDocx.textContent = '已导出'; setTimeout(() => { exportDocx.textContent = '导出 Word'; }, 1500);
       } catch (error) { await alertDialog(`导出失败：${error.message}`); }
       finally { exportDocx.disabled = false; exportDocx.textContent = '导出 Word'; }

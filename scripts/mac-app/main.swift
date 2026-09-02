@@ -11,7 +11,7 @@ let repoDir = "__REPO_DIR__"
 let npxDir = "__NPX_DIR__"
 let csmPort = "__CSM_PORT__"
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     var window: NSWindow?
     var webView: WKWebView?
     var server: Process?
@@ -232,6 +232,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         } else {
             completionHandler(nil)
         }
+    }
+
+    // Downloads (案例导出 Word 的 <a download>、直开导出 URL) are silently dropped
+    // unless the host app implements the full delegate chain: decidePolicy →
+    // didBecome → WKDownloadDelegate. Destination goes through NSSavePanel so
+    // the user picks where to save — the same silent-failure class as the
+    // JS panels and open panel above.
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(.download)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if navigationResponse.canShowMIMEType {
+            decisionHandler(.allow)
+        } else {
+            decisionHandler(.download)
+        }
+    }
+
+    func webView(_ webView: WKWebView,
+                 navigationAction: WKNavigationAction,
+                 didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView,
+                 navigationResponse: WKNavigationResponse,
+                 didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func download(_ download: WKDownload,
+                  decideDestinationUsing response: URLResponse,
+                  suggestedFilename: String,
+                  completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedFilename.isEmpty ? "客户成功案例.docx" : suggestedFilename
+        if panel.runModal() == .OK, let url = panel.url {
+            completionHandler(url)
+        } else {
+            completionHandler(nil)
+        }
+    }
+
+    func download(_ download: WKDownload, didFinish: () -> Void) {
+        NSLog("Download finished")
+    }
+
+    func download(_ download: WKDownload,
+                  didFailWithError error: Error,
+                  resumeData: Data?) {
+        NSLog("Download failed: \(error)")
+        let alert = NSAlert()
+        alert.messageText = "CSM Agent"
+        alert.informativeText = "下载失败：\(error.localizedDescription)"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     // Retry until the Node server is up (it takes a moment to boot).
