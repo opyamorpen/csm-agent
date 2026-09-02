@@ -4156,7 +4156,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v10.2-standard');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v10.3-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5110,6 +5110,9 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.match(capabilityMap, /禁止画「需求→功能」的映射箭头/, '禁映射连线');
   assert.match(capabilityMap, /viewBox="0 0 800 460"/, '映射图画布（嵌入一指禅近无损）');
   assert.match(capabilityMap, /#2467EC/, '样例配色（实心蓝标签）');
+  assert.match(capabilityMap, /「通用平台能力」行标签块/, '平台带左端标签块（真实生成质检缺失项）');
+  assert.match(capabilityMap, /不得整排同名/, '分组头去同质化');
+  assert.match(capabilityMap, /功能项不小于 14/, '字号下限（嵌入一指禅后可读）');
   assert.match(capabilityMap, /【ONES 产品能力图谱/, '映射图注入能力图谱');
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
   assert.match(valueMap, /你只画两个区/, '全景图只画痛点带与价值栏两区');
