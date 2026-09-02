@@ -59,6 +59,8 @@ const CLI_CAPABILITIES = [
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
   { command: 'workhours', workflow: 'customer-workhours', access: 'read', api: ['/api/customers/:id/workhours'] },
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
+  { command: 'alerts', workflow: 'risk-watchlist', access: 'read-write', api: ['/api/alerts', '/api/alerts?status=resolved', '/api/alerts?status=all', 'POST /api/alerts/:id/resolve'],
+    notes: '风险预警名单：近 30 天无 ONES 工作项新增/更新且无新增工时、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
     readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures'],
@@ -137,6 +139,11 @@ function help(): void {
     （批量完成：仅未完成状态生效，已完成跳过；单项失败不影响其他项；
      --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
   csm-agent action update <行动ID> <JSON>
+  csm-agent alerts [--status active|resolved|all] [--json]
+    （风险预警名单：近 30 天无 ONES 工作项新增/更新且无新增工时，或公开动态检索到该客户
+     负面信息（收入下降/罚款/投诉等）即进入；--status 默认 active，all 含已消除）
+  csm-agent alerts resolve <预警ID> --note <原因/动作>
+    （消除风险必须写明原因或动作，写入审计；消除后情况无新变化不重报）
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
     （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
@@ -449,6 +456,49 @@ function parseObject(input: string, label: string): Record<string, unknown> {
   const value: unknown = JSON.parse(input);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} JSON 必须是对象`);
   return value as Record<string, unknown>;
+}
+
+const ALERT_TRIGGER_LABELS: Record<string, string> = {
+  ones_inactivity: 'ONES 活动停滞',
+  negative_public_signal: '公开负面动态',
+};
+
+/** 风险预警名单：--status active|resolved|all（默认 active），表格含触发原因/消除信息。 */
+async function showAlerts(status: 'active' | 'resolved' | 'all'): Promise<void> {
+  const body = await request<{ alerts: any[]; counts: { active: number; resolved: number } }>(`/api/alerts?status=${status}`);
+  if (jsonOutput) return print(body);
+  console.table(body.alerts.map((alert) => ({
+    id: alert.id,
+    客户: alert.customerName ?? alert.customerId,
+    触发: ALERT_TRIGGER_LABELS[alert.triggerKey] ?? alert.triggerKey,
+    发现: String(alert.createdAt).slice(0, 10),
+    ...(alert.status === 'resolved'
+      ? { 消除: String(alert.resolvedAt ?? '').slice(0, 10), 消除人: alert.resolvedBy ?? '', 消除原因: alert.resolutionNote }
+      : { 原因: (alert.reasons ?? []).join('；') }),
+  })));
+  console.log(`预警名单：待处理 ${body.counts.active} · 已消除 ${body.counts.resolved}`);
+}
+
+async function alertsCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'resolve') {
+    const id = values.find((value) => !value.startsWith('--'));
+    if (!id) throw new Error('alerts resolve 缺少预警 ID（先 csm-agent alerts 查看名单）');
+    const note = inlineOptionOf(values, '--note');
+    if (!note) throw new Error('消除风险必须填写原因/动作：--note "..."');
+    const alert = await request<any>(`/api/alerts/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }),
+    });
+    if (jsonOutput) return print(alert);
+    console.log(`已消除预警：${alert.customerId} · ${ALERT_TRIGGER_LABELS[alert.triggerKey] ?? alert.triggerKey}`);
+    console.log(`原因/动作：${alert.resolutionNote}`);
+    return;
+  }
+  if (subcommand === 'list' || subcommand === '') {
+    const statusFlag = inlineOptionOf(values, '--status');
+    const status = statusFlag === 'resolved' || statusFlag === 'all' ? statusFlag : 'active';
+    return showAlerts(status);
+  }
+  throw new Error('alerts 子命令只允许 list/resolve');
 }
 
   /** inlineOption：从 values 中取 `--flag 值` 或 `--flag=值`（值不能以 -- 开头）。 */
@@ -1563,6 +1613,11 @@ async function main(): Promise<void> {
   if (command === 'workhours') return showWorkhours(args.join(' '));
   if (command === 'actions') return showActions(args.join(' ') || undefined);
   if (command === 'action') return actionCommand(args.shift() ?? '', args);
+  if (command === 'alerts') {
+    // 首参是 flag（如 alerts --status=resolved）时默认走 list，不吞子命令。
+    const sub = args[0] && !args[0].startsWith('--') ? args.shift()! : 'list';
+    return alertsCommand(sub, args);
+  }
   if (command === 'cases') return showCases(args.join(' ') || undefined);
   if (command === 'case') return caseCommand(args.shift() ?? '', args);
   if (command === 'weekly-report') return weeklyReportCommand(args.shift() ?? '', args);

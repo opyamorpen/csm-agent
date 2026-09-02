@@ -9,8 +9,8 @@ export const RISK_RULE_VERSION = 'csm-risk-v3';
 /** 公开动态证据回看窗口（天）。 */
 export const WEB_SIGNAL_WINDOW_DAYS = 90;
 
-/** 公开动态负向关键词（命中 label/detail 任一即计负向；category 兜底另算）。 */
-export const WEB_NEGATIVE_PATTERN = /裁员|处罚|诉讼|投诉|违规|亏损|退市|减持|高管离职|组织调整|破产|被执行|失信|欠薪|降薪|仲裁|立案|谴责/;
+/** 公开动态负向关键词（命中 label/detail 任一即计负向；category 兜底另算）。收入/罚款类由预警需求补充。 */
+export const WEB_NEGATIVE_PATTERN = /裁员|处罚|罚款|诉讼|投诉|违规|亏损|收入下降|营收下降|收入下滑|营收下滑|业绩下滑|退市|减持|高管离职|组织调整|破产|被执行|失信|欠薪|降薪|仲裁|立案|谴责/;
 /** 公开动态正向关键词（用于增购机会侧，与负向互斥：先判负向）。 */
 export const WEB_POSITIVE_PATTERN = /融资|中标|签约|扩张|发布|招聘|增长|上市|战略合作|收购|增资|订单|扩产|新品/;
 

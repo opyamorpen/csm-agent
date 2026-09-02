@@ -94,6 +94,8 @@
   const customerOverview = document.getElementById('customerOverview');
   const actionBoard = document.getElementById('actionBoard');
   const actionNavCount = document.getElementById('actionNavCount');
+  const alertBoard = document.getElementById('alertBoard');
+  const alertNavCount = document.getElementById('alertNavCount');
   const actionTabPending = document.getElementById('actionTabPending');
   const actionTabCompleted = document.getElementById('actionTabCompleted');
   const actionBulkBar = document.querySelector('#actionsView .action-bulk-bar');
@@ -109,6 +111,7 @@
     portfolio: document.getElementById('portfolioView'),
     customer: document.getElementById('customerView'),
     actions: document.getElementById('actionsView'),
+    alerts: document.getElementById('alertsView'),
     cases: document.getElementById('casesView'),
   };
 
@@ -129,6 +132,7 @@
   let draftJobStartedAt = 0;
   let activeDraftTab = 'pending';
   let activeActionTab = 'pending';
+  let activeAlertTab = 'pending';
 
   function setStatus(cls, text) {
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -197,6 +201,11 @@
     engagement: '互动',
     voice: '客户声音',
     web: '公开动态',
+  };
+  // 预警触发键 → 中文标签（与 CLI ALERT_TRIGGER_LABELS 同口径）。
+  const ALERT_TRIGGER_LABEL = {
+    ones_inactivity: 'ONES 活动停滞',
+    negative_public_signal: '公开负面动态',
   };
   const SOURCE_TYPE_LABEL = {
     customer_snapshot: 'CRM 客户资料',
@@ -2000,6 +2009,7 @@
     for (const item of document.querySelectorAll('.nav-item')) item.classList.toggle('active', item.dataset.view === view);
     if (view === 'portfolio') void loadPortfolio();
     if (view === 'actions') void loadActions();
+    if (view === 'alerts') void loadAlerts();
     if (view === 'cases') void loadCases();
     if (agent) void showAgentMode(activeAgentMode);
   }
@@ -2990,6 +3000,14 @@
     };
     commands.append(refresh, webIntel, reanalyze, generate, ask); head.append(title, commands); customerOverview.append(head);
 
+    // 预警横幅：该客户存在待处理预警时置顶展示（逐条原因 + 消除），消除后重开客户页。
+    if ((data.alerts || []).length) {
+      const banner = el('div', 'alert-banner');
+      banner.append(el('strong', null, `风险预警（${data.alerts.length}）`));
+      for (const alert of data.alerts) banner.append(alertCard(alert, true));
+      customerOverview.append(banner);
+    }
+
     const summary = el('div', 'definition-grid');
     summary.append(definition('续约日期', formatDate(c.renewalDate)), definition('合同价值', formatMoney(c.contractValue)),
       definition('使用版本', c.usageVersion || 'unknown'), definition('最后互动', formatDate(data.lastInteractionAt ?? c.lastContactAt)), definition('数据同步', formatDateTime(c.syncedAt)));
@@ -3201,6 +3219,81 @@
     } catch (error) { await alertDialog(error.message); }
     finally { setActionBulkBusy(false); }
   };
+
+  // ── 风险预警名单：待处理 / 已消除 双 tab；消除必须填写原因/动作（与行动双 tab 同款交互骨架）。──
+  async function loadAlerts() {
+    const data = await api(`/api/alerts?status=${activeAlertTab === 'pending' ? 'active' : 'resolved'}`);
+    const alerts = data.alerts || [];
+    alertNavCount.textContent = data.counts?.active || '';
+    alertTabPendingEl().textContent = data.counts?.active ? `待处理（${data.counts.active}）` : '待处理';
+    alertTabResolvedEl().textContent = data.counts?.resolved ? `已消除（${data.counts.resolved}）` : '已消除';
+    for (const tab of document.querySelectorAll('[data-alert-tab]')) tab.classList.toggle('active', tab.dataset.alertTab === activeAlertTab);
+    alertBoard.innerHTML = '';
+    if (!alerts.length) {
+      alertBoard.append(el('div', 'workspace-empty', activeAlertTab === 'pending' ? '暂无待处理预警' : '暂无已消除预警'));
+      return;
+    }
+    for (const alert of alerts) alertBoard.append(alertCard(alert, false));
+  }
+
+  const alertTabPendingEl = () => document.getElementById('alertTabPending');
+  const alertTabResolvedEl = () => document.getElementById('alertTabResolved');
+
+  for (const tab of document.querySelectorAll('[data-alert-tab]')) tab.onclick = () => {
+    if (activeAlertTab === tab.dataset.alertTab) return;
+    activeAlertTab = tab.dataset.alertTab;
+    void loadAlerts();
+  };
+
+  /**
+   * 预警卡：触发标签 + 客户（全局视图可点进详情）+ 逐条原因 + 发现时间；
+   * 已消除态展示消除人/时间/原因说明。customerMode（详情页横幅）不重复显示客户名。
+   */
+  function alertCard(alert, customerMode) {
+    const card = el('article', 'alert-card');
+    const head = el('div', 'alert-head');
+    head.append(badge(ALERT_TRIGGER_LABEL[alert.triggerKey] || alert.triggerKey, alert.triggerKey === 'negative_public_signal' ? 'warning' : 'risk-high'));
+    if (!customerMode) {
+      const open = el('button', 'customer-link', alert.customerName || alert.customerId);
+      open.onclick = () => openCustomer(alert.customerId);
+      head.append(open);
+    }
+    head.append(el('span', 'cell-sub', `发现于 ${formatDate(alert.createdAt)}`));
+    if (alert.status === 'resolved') {
+      head.append(badge('已消除', 'success'));
+      card.append(head);
+      const note = el('div', 'alert-resolution');
+      note.append(el('span', 'cell-sub', `${alert.resolvedBy || 'unknown'} 于 ${formatDateTime(alert.resolvedAt)} 消除`));
+      note.append(el('div', 'alert-resolution-note', alert.resolutionNote || ''));
+      card.append(note);
+    } else {
+      head.append(badge('待处理', 'risk-high'));
+      card.append(head);
+      const resolve = el('button', 'quiet-command', '消除风险');
+      resolve.type = 'button';
+      resolve.onclick = () => resolveAlertAction(alert, activeView === 'customer' ? () => openCustomer(alert.customerId) : loadAlerts);
+      head.append(resolve);
+    }
+    const reasons = el('ul', 'alert-reasons');
+    for (const reason of alert.reasons || []) reasons.append(el('li', null, reason));
+    if ((alert.reasons || []).length) card.append(reasons);
+    return card;
+  }
+
+  /** 消除预警：原因/动作必填（空输入重问，取消放弃），成功后刷新当前视图与导航角标。 */
+  async function resolveAlertAction(alert, refresh) {
+    let note = await promptDialog(`消除「${ALERT_TRIGGER_LABEL[alert.triggerKey] || alert.triggerKey}」预警的原因/动作：`, '');
+    while (note !== null && !note.trim()) {
+      await alertDialog('消除风险必须填写原因或动作');
+      note = await promptDialog(`消除「${ALERT_TRIGGER_LABEL[alert.triggerKey] || alert.triggerKey}」预警的原因/动作：`, '');
+    }
+    if (note === null || !note.trim()) return;
+    try {
+      await api(`/api/alerts/${encodeURIComponent(alert.id)}/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: note.trim() }) });
+      setTransientStatus('ok', '预警已消除', 4000);
+      await refresh();
+    } catch (error) { await alertDialog(error.message); }
+  }
 
   /**
    * 案例草稿卡。customerMode（客户详情）：草稿态附 编辑/对话精修/重新生成 三操作与
@@ -3784,7 +3877,7 @@
       await newSession();
     }
     loadRecords();
-    await Promise.all([loadPortfolio(), loadActions(), loadCases(), loadHemoryInbox(), loadDraftBatches()]);
+    await Promise.all([loadPortfolio(), loadActions(), loadAlerts(), loadCases(), loadHemoryInbox(), loadDraftBatches()]);
     // 视觉能力决定附件入口是否放行图片（设置页每次保存也会刷新同一状态）。
     fetch('/api/config/llm').then((r) => r.json()).then((d) => { visionSupported = d.vision === true; }).catch(() => {});
     showView('portfolio');

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { McpGateway } from '../agent.js';
+import { evaluateCustomerAlerts } from './alerts.js';
 import { WorkbenchDatabase } from './database.js';
 import { hemorySegmentationFingerprint } from './hemory.js';
 import type { HemorySegmentationResult } from './hemory.js';
@@ -1094,6 +1095,10 @@ export class PortfolioSyncService {
       { suggestionRate: rates.suggestion_feedback, ticketRate: rates.support_ticket },
     );
     this.db.saveRisk(risk);
+
+    // 预警名单与风险重算同源触发（每日同步/手动刷新/公开动态落库后都会走到这里）：纯本地状态机，
+    // 新建/自动解除都会写审计；消除后重报抑制在 evaluate 内部按事实快照比对。
+    evaluateCustomerAlerts(this.db, customerId, new Date());
 
     // 增购机会 v2：规则双假设（needs_led_expansion / public_signal_expansion）退役，
     // 改由 OpportunityService 从会议录音片段 + 公开动态证据 LLM 分析产出（数量不固定、按可信度排序）。

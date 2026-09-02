@@ -120,6 +120,26 @@ export interface RiskAssessment {
   generatedAt: string;
 }
 
+/** 预警触发键：ONES 活动停滞（近 30 天无工作项新增/更新且无新增工时）/ 公开负面动态（检索到负面信息）。 */
+export type AlertTriggerKey = 'ones_inactivity' | 'negative_public_signal';
+
+export interface CustomerAlert {
+  id: string;
+  customerId: string;
+  triggerKey: AlertTriggerKey;
+  status: 'active' | 'resolved';
+  /** 人类可读预警原因（逐条）；展示与 CLI 直接使用。 */
+  reasons: string[];
+  /** 机器事实快照：ONES 侧为各最后活动时间，公开侧为负向证据 id 集；消除后重报比对也用它。 */
+  details: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  /** 消除原因/动作；系统自动解除时注明自动解除原因。 */
+  resolutionNote: string;
+}
+
 /** ONES 工作项完成率（按 field005.category==='done' 判定；stale=存在缺状态类型的旧记录，待刷新）。 */
 export interface CompletionRate {
   type: string;

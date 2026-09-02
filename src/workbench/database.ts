@@ -7,9 +7,11 @@ import type {
   ActionItem,
   ActionItemInput,
   ActionStatus,
+  AlertTriggerKey,
   CaseDraft,
   CasePublishAttempt,
   Customer,
+  CustomerAlert,
   CustomerInput,
   DraftBatch,
   DraftGenerationJob,
@@ -136,8 +138,9 @@ function shanghaiTodayStart(now = new Date()): Date {
  * occurred_at 历史上混有三种格式：ISO Z（部分 ONES/CRM）、+08:00（Hemory）、naive 本地时间
  * （ONES Desk 三类由启动迁移写入，无时区后缀，实为上海时间）。naive 必须补 +08:00 解析，
  * 否则会被 Date.parse 当 UTC，聚合出的最晚时间偏早 8 小时；无法解析返回 null。
+ * ONES payload 里的 field009/field010 同为 naive 上海时间，预警判定复用本函数。
  */
-function parseOccurredAt(value: string): number | null {
+export function parseOccurredAt(value: string): number | null {
   const text = value.trim();
   const at = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? Date.parse(`${text.replace(' ', 'T')}+08:00`) : Date.parse(text);
   return Number.isNaN(at) ? null : at;
@@ -221,6 +224,15 @@ function draftBatchFromRow(row: Row): DraftBatch {
     id: String(row.id), customerId: String(row.customer_id), fingerprint: String(row.fingerprint),
     sourceEventIds: parseJson(row.source_event_ids_json, []), generationVersion: String(row.generation_version),
     generator: String(row.generator), status: String(row.status), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function alertFromRow(row: Row): CustomerAlert {
+  return {
+    id: String(row.id), customerId: String(row.customer_id), triggerKey: String(row.trigger_key) as CustomerAlert['triggerKey'],
+    status: String(row.status) as CustomerAlert['status'], reasons: parseJson(row.reasons_json, []), details: parseJson(row.details_json, {}),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at), resolvedAt: row.resolved_at == null ? null : String(row.resolved_at),
+    resolvedBy: row.resolved_by == null ? null : String(row.resolved_by), resolutionNote: String(row.resolution_note ?? ''),
   };
 }
 
@@ -539,6 +551,23 @@ export class WorkbenchDatabase {
         UNIQUE(customer_id, week_start)
       );
       CREATE INDEX IF NOT EXISTS idx_weekly_report_customer ON weekly_reports(customer_id, week_start DESC);
+
+      CREATE TABLE IF NOT EXISTS customer_alerts (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        trigger_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        reasons_json TEXT NOT NULL DEFAULT '[]',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        resolved_by TEXT,
+        resolution_note TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_customer_alerts_status ON customer_alerts(status);
+      CREATE INDEX IF NOT EXISTS idx_customer_alerts_customer ON customer_alerts(customer_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_alerts_active ON customer_alerts(customer_id, trigger_key) WHERE status='active';
 
       CREATE TABLE IF NOT EXISTS audit_log (
         id TEXT PRIMARY KEY,
@@ -1213,6 +1242,77 @@ export class WorkbenchDatabase {
     } : null;
   }
 
+  saveAlert(input: Omit<CustomerAlert, 'status' | 'createdAt' | 'updatedAt' | 'resolvedAt' | 'resolvedBy' | 'resolutionNote'> & Partial<Pick<CustomerAlert, 'createdAt'>>): CustomerAlert {
+    const now = nowIso();
+    const value: CustomerAlert = {
+      ...input, status: 'active', createdAt: input.createdAt ?? now, updatedAt: now,
+      resolvedAt: null, resolvedBy: null, resolutionNote: '',
+    };
+    this.db.prepare(`INSERT INTO customer_alerts(id,customer_id,trigger_key,status,reasons_json,details_json,created_at,updated_at,resolved_at,resolved_by,resolution_note)
+      VALUES(?,?,?,'active',?,?,?,?,NULL,NULL,'')`)
+      .run(value.id, value.customerId, value.triggerKey, json(value.reasons), json(value.details), value.createdAt, now);
+    return value;
+  }
+
+  /** active 预警原地刷新原因/事实快照（保留发现时间 created_at）。 */
+  updateAlert(id: string, reasons: string[], details: Record<string, unknown>): void {
+    this.db.prepare('UPDATE customer_alerts SET reasons_json=?,details_json=?,updated_at=? WHERE id=? AND status=?')
+      .run(json(reasons), json(details), nowIso(), id, 'active');
+  }
+
+  /** 置 resolved（幂等：仅 active 行生效）；note 为人工消除原因或系统自动解除说明。 */
+  resolveAlert(id: string, resolvedBy: string, note: string): CustomerAlert | null {
+    const now = nowIso();
+    const changed = this.db.prepare("UPDATE customer_alerts SET status='resolved',updated_at=?,resolved_at=?,resolved_by=?,resolution_note=? WHERE id=? AND status='active'")
+      .run(now, now, resolvedBy, note, id).changes;
+    if (!changed) return null;
+    return this.getAlert(id);
+  }
+
+  getAlert(id: string): CustomerAlert | null {
+    const row = this.db.prepare('SELECT * FROM customer_alerts WHERE id=?').get(id) as Row | undefined;
+    return row ? alertFromRow(row) : null;
+  }
+
+  activeAlert(customerId: string, triggerKey: AlertTriggerKey): CustomerAlert | null {
+    const row = this.db.prepare("SELECT * FROM customer_alerts WHERE customer_id=? AND trigger_key=? AND status='active'").get(customerId, triggerKey) as Row | undefined;
+    return row ? alertFromRow(row) : null;
+  }
+
+  /** 最近一次已消除的预警：重报抑制用它做事实快照比对。 */
+  latestResolvedAlert(customerId: string, triggerKey: AlertTriggerKey): CustomerAlert | null {
+    const row = this.db.prepare(`SELECT * FROM customer_alerts WHERE customer_id=? AND trigger_key=? AND status='resolved'
+      ORDER BY resolved_at DESC LIMIT 1`).get(customerId, triggerKey) as Row | undefined;
+    return row ? alertFromRow(row) : null;
+  }
+
+  listAlerts(options: { status?: 'active' | 'resolved' | 'all'; customerId?: string } = {}): Array<CustomerAlert & { customerName: string | null; customerShortName: string | null }> {
+    const status = options.status ?? 'active';
+    const clauses: string[] = [];
+    const args: string[] = [];
+    if (status !== 'all') {
+      clauses.push('a.status=?');
+      args.push(status);
+    }
+    if (options.customerId) {
+      clauses.push('a.customer_id=?');
+      args.push(options.customerId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT a.*, c.name AS customer_name, c.short_name AS customer_short_name
+      FROM customer_alerts a LEFT JOIN customers c ON c.id=a.customer_id${where}
+      ORDER BY a.updated_at DESC`).all(...args) as Row[];
+    return rows.map((row) => ({
+      ...alertFromRow(row),
+      customerName: row.customer_name == null ? null : String(row.customer_name),
+      customerShortName: row.customer_short_name == null ? null : String(row.customer_short_name),
+    }));
+  }
+
+  countAlerts(status: 'active' | 'resolved'): number {
+    return Number((this.db.prepare('SELECT COUNT(*) AS n FROM customer_alerts WHERE status=?').get(status) as Row).n);
+  }
+
   upsertOpportunity(input: Omit<OpportunityHypothesis, 'id' | 'generatedAt'> & { id?: string; generatedAt?: string }): OpportunityHypothesis {
     const value: OpportunityHypothesis = { ...input, id: input.id ?? randomUUID(), generatedAt: input.generatedAt ?? nowIso() };
     this.db.prepare(`INSERT INTO opportunities(id,customer_id,type,title,detail,confidence,status,evidence_refs_json,discovery_questions_json,recommended_action,generated_at)
@@ -1822,6 +1922,12 @@ export class WorkbenchDatabase {
     return latest == null ? null : new Date(latest).toISOString();
   }
 
+  /** 预警判定用：该客户全部确认归属的 ONES source_events（含 payload 快照与 synced_at 新鲜度）。 */
+  listOnesSourceEvents(customerId: string): SourceEvent[] {
+    return (this.db.prepare(`SELECT * FROM source_events WHERE customer_id=? AND source_system='ones' AND attribution_status='confirmed'`)
+      .all(customerId) as Row[]).map(sourceEventFromRow);
+  }
+
   overview(customerId: string): Record<string, unknown> | null {
     const customer = this.getCustomer(customerId);
     if (!customer) return null;
@@ -1851,6 +1957,8 @@ export class WorkbenchDatabase {
       caseCandidate: this.getCaseCandidate(customerId),
       caseDrafts: this.listCaseDrafts(customerId),
       actions: this.listActions(customerId),
+      // 客户详情预警横幅数据源：仅 active 行（已消除的在全局预警视图查看）。
+      alerts: this.listAlerts({ status: 'active', customerId }),
       completionRates: this.onesCompletionRates(customerId),
       timeline: this.listTimeline(customerId, 30),
       sourceCounts: this.db.prepare(`SELECT source_system,COUNT(*) AS count,MAX(synced_at) AS last_synced_at FROM source_events

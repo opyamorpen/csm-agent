@@ -17,6 +17,7 @@ import { missingOnesDeskSpecFields, applyDeploymentTypeOverride, ONES_DESK_DEPLO
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent } from './transcript.js';
 import { WorkbenchDatabase } from './workbench/database.js';
+import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
 import { WebIntelService } from './workbench/webintel.js';
@@ -723,6 +724,30 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           const action = workbench.db.completeAction(actionId, typeof body.outcome === 'string' ? body.outcome : undefined);
           return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });
         }
+      }
+
+      // ── 风险预警名单：只读列表 + 人工消除（消除必须写明原因/动作，写审计）。 ──
+      if (req.method === 'GET' && path === '/api/alerts') {
+        const statusParam = url.searchParams.get('status');
+        const status = statusParam === 'resolved' || statusParam === 'all' ? statusParam : 'active';
+        const customerId = url.searchParams.get('customer_id')?.trim() || undefined;
+        return json(res, 200, {
+          alerts: workbench.db.listAlerts({ status, customerId }),
+          counts: { active: workbench.db.countAlerts('active'), resolved: workbench.db.countAlerts('resolved') },
+        });
+      }
+      const alertMatch = path.match(/^\/api\/alerts\/([0-9A-Za-z-]+)(\/.*)?$/);
+      if (alertMatch && req.method === 'POST' && alertMatch[2] === '/resolve') {
+        const body = await readBody(req);
+        const note = typeof body.note === 'string' ? body.note.trim() : '';
+        if (!note) return json(res, 400, { error: '消除风险必须填写原因/动作（note）' });
+        const alert = workbench.db.getAlert(alertMatch[1]);
+        if (!alert) return json(res, 404, { error: 'alert not found' });
+        const actor = typeof body.actor === 'string' && body.actor.trim() ? body.actor.trim() : 'csm';
+        const resolved = workbench.db.resolveAlert(alert.id, actor, note);
+        if (!resolved) return json(res, 409, { error: '该预警已消除，无需重复操作' });
+        workbench.db.audit(actor, 'alert.resolve', 'customer_alert', alert.id, { triggerKey: alert.triggerKey, note });
+        return json(res, 200, resolved);
       }
 
       if (req.method === 'GET' && path === '/api/case-drafts') {
@@ -1529,6 +1554,15 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   // 否则升级部署后库里还压着旧版评分（UI 维度标签对不上 key）。
   for (const customer of db.listCustomers()) {
     if (db.latestRisk(customer.id)?.ruleVersion !== RISK_RULE_VERSION) sync.recompute(customer.id);
+  }
+  // 预警名单启动对账：evaluate 是幂等状态机（无变化零写入、消除后重报有抑制），
+  // 全客户扫一遍纯本地查询，部署后不必等 02:00 同步名单即可见，也顺带自愈任何漏算。
+  for (const customer of db.listCustomers()) {
+    try {
+      evaluateCustomerAlerts(db, customer.id);
+    } catch (error) {
+      console.error(`[alerts] customer ${customer.id} 预警评估失败: ${String(error)}`);
+    }
   }
   // 增购机会 v2 首轮引导：无生成记录（或失败超过重试门）的客户排一次分析——
   // 部署后不必等 02:00 全量同步或手动刷新，旧规则双假设即被替换；门控命中的秒级跳过，重启无感。

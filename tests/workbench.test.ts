@@ -5684,3 +5684,150 @@ test('workbench: case publish is idempotent under concurrency and missing page i
     assert.equal(db.getCaseDraft(noIdDraft.id)?.publishedPageId ?? null, null);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── 风险预警名单（customer_alerts）：触发、状态机与重报抑制 ──────────────────
+import { evaluateCustomerAlerts } from '../src/workbench/alerts.js';
+
+/** ONES 工作项 fixture：field009/field010 为 naive 上海时间（与真实同步写入口径一致）。 */
+function onesWorkItemFixture(customerId: string, externalId: string, field009: string, field010: string, payload: Record<string, unknown> = {}) {
+  return {
+    customerId, sourceSystem: 'ones' as const, sourceType: 'suggestion_feedback', externalId,
+    title: `工作项 ${externalId}`, occurredAt: field009, payload: { field009, field010, ...payload },
+  };
+}
+
+test('workbench: alert triggers — 30-day ONES inactivity and negative public signal', () => withDb((db) => {
+  const now = new Date('2026-09-02T04:00:00Z'); // 上海 12:00
+
+  // ① 45 天前最后工作项活动 → 触发；naive 上海时间按 +08:00 解析（非 UTC）。
+  db.upsertCustomer({ id: 'crm-a1', name: '沉默客户' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-a1', 'sg-1', '2026-06-10 10:00:00', '2026-07-19 09:00:00'));
+  const first = evaluateCustomerAlerts(db, 'crm-a1', now);
+  assert.ok(first.created.includes('ones_inactivity'), JSON.stringify(first));
+  const inactive = db.activeAlert('crm-a1', 'ones_inactivity');
+  assert.ok(inactive);
+  assert.match(inactive!.reasons[0], /近 30 天无 ONES 工作项新增\/更新，且无新增工时/);
+  assert.equal(inactive!.details.lastOnesActivityAt, '2026-07-19T01:00:00.000Z');
+
+  // ② 近期有工作项更新 → 不触发。
+  db.upsertCustomer({ id: 'crm-a2', name: '活跃客户' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-a2', 'sg-2', '2026-06-10 10:00:00', '2026-08-25 09:00:00'));
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a2', now).created.includes('ones_inactivity'));
+
+  // ③ 工作项沉默但近 30 天有工时登记 → 不触发（新增工时即活动）。
+  db.upsertCustomer({ id: 'crm-a3', name: '工时活跃' });
+  db.upsertSourceEvent({
+    customerId: 'crm-a3', sourceSystem: 'ones', sourceType: 'customer_manhour', externalId: 'mh-1',
+    title: '售后客户工时', occurredAt: '2026-05-01 09:00:00',
+    payload: { field009: '2026-05-01 09:00:00', field010: '2026-06-01 09:00:00',
+      workhourRecords: [{ id: 'w1', startTime: '2026-08-28', hours: 1.5, description: '支持' }] },
+  });
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a3', now).created.includes('ones_inactivity'));
+
+  // ④ 零 ONES 记录 → 不触发（无法区分「没用 ONES」与「刚接入」，用户拍板不进名单）。
+  db.upsertCustomer({ id: 'crm-a4', name: '新客户' });
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a4', now).created.includes('ones_inactivity'));
+
+  // ⑤ 负面公开动态触发（含新增关键词：罚款/收入下降）；正向不触发。
+  db.upsertCustomer({ id: 'crm-a5', name: '舆情客户' });
+  db.addEvidence({ id: 'ev-fine', customerId: 'crm-a5', kind: 'web_signal', label: '因数据违规被罚款 50 万', detail: '[sentiment] 监管处罚', occurredAt: '2026-08-20', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/fine' });
+  db.addEvidence({ id: 'ev-rev', customerId: 'crm-a5', kind: 'web_signal', label: '季度收入下降 12%', detail: '财报', occurredAt: '2026-08-21', confidence: 0.6, sourceSystem: 'web' });
+  const fifth = evaluateCustomerAlerts(db, 'crm-a5', now);
+  assert.ok(fifth.created.includes('negative_public_signal'));
+  const negative = db.activeAlert('crm-a5', 'negative_public_signal');
+  assert.equal(negative?.details.negativeCount, 2);
+  assert.match(negative!.reasons.join('\n'), /罚款/);
+  assert.match(negative!.reasons.join('\n'), /收入下降/);
+  db.upsertCustomer({ id: 'crm-a6', name: '正面客户' });
+  db.addEvidence({ id: 'ev-pos', customerId: 'crm-a6', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资 2 亿', occurredAt: '2026-08-20', confidence: 0.6, sourceSystem: 'web' });
+  assert.ok(!evaluateCustomerAlerts(db, 'crm-a6', now).created.includes('negative_public_signal'));
+}));
+
+test('workbench: alert lifecycle — auto resolve on new activity, manual resolve, re-fire suppression', () => withDb((db) => {
+  const t0 = new Date('2026-09-02T04:00:00Z');
+  db.upsertCustomer({ id: 'crm-l1', name: '生命周期' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-1', '2026-06-01 10:00:00', '2026-06-15 09:00:00'));
+
+  // ① 沉默 → 建单。
+  evaluateCustomerAlerts(db, 'crm-l1', t0);
+  const first = db.activeAlert('crm-l1', 'ones_inactivity');
+  assert.ok(first);
+
+  // ② 恢复活动 → 自动解除（resolvedBy=system + 说明）。
+  db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-2', '2026-08-30 10:00:00', '2026-08-30 10:00:00'));
+  const afterActivity = evaluateCustomerAlerts(db, 'crm-l1', t0);
+  assert.ok(afterActivity.autoResolved.includes('ones_inactivity'));
+  assert.equal(db.activeAlert('crm-l1', 'ones_inactivity'), null);
+  const auto = db.latestResolvedAlert('crm-l1', 'ones_inactivity');
+  assert.equal(auto?.resolvedBy, 'system');
+  assert.match(auto?.resolutionNote ?? '', /自动解除/);
+
+  // ③ 新活动后又沉默 30 天 → 重报（活动时间晚于已消除快照）。
+  const t1 = new Date('2026-10-05T04:00:00Z');
+  const refired = evaluateCustomerAlerts(db, 'crm-l1', t1);
+  assert.ok(refired.created.includes('ones_inactivity'));
+  const second = db.activeAlert('crm-l1', 'ones_inactivity');
+  assert.ok(second && second.id !== first!.id);
+
+  // ④ 人工消除（消除原因落库；重复消除返回 null = API 409 语义）。
+  assert.ok(db.resolveAlert(second!.id, 'csm', '已上门回访，客户预算冻结属正常周期'));
+  assert.equal(db.resolveAlert(second!.id, 'csm', '重复操作'), null);
+
+  // ⑤ 情况无新变化 → 抑制不重报。
+  const suppressed = evaluateCustomerAlerts(db, 'crm-l1', t1);
+  assert.ok(suppressed.suppressed.includes('ones_inactivity'));
+  assert.equal(db.activeAlert('crm-l1', 'ones_inactivity'), null);
+
+  // ⑥ 再度出现新活动并重新沉默 → 允许重报（新一轮沉默周期）。
+  db.upsertSourceEvent(onesWorkItemFixture('crm-l1', 'sg-3', '2026-10-20 10:00:00', '2026-10-20 10:00:00'));
+  const t2 = new Date('2026-11-25T04:00:00Z');
+  const refiredAgain = evaluateCustomerAlerts(db, 'crm-l1', t2);
+  assert.ok(refiredAgain.created.includes('ones_inactivity'));
+}));
+
+test('workbench: negative signal alert — re-fire only on new evidence, auto resolve out of window', () => withDb((db) => {
+  const t0 = new Date('2026-09-02T04:00:00Z');
+  db.upsertCustomer({ id: 'crm-n1', name: '舆情客户' });
+  db.addEvidence({ id: 'ev-1', customerId: 'crm-n1', kind: 'web_signal', label: '被处罚', detail: '', occurredAt: '2026-08-20', confidence: 0.6, sourceSystem: 'web' });
+  evaluateCustomerAlerts(db, 'crm-n1', t0);
+  const first = db.activeAlert('crm-n1', 'negative_public_signal');
+  assert.ok(first);
+  assert.deepEqual(first!.details.negativeEvidenceIds, ['ev-1']);
+
+  // 人工消除后同一证据集不重报。
+  db.resolveAlert(first!.id, 'csm', '已核实为同名公司新闻');
+  const suppressed = evaluateCustomerAlerts(db, 'crm-n1', t0);
+  assert.ok(suppressed.suppressed.includes('negative_public_signal'));
+
+  // 新负面证据出现 → 重报，快照更新为并集。
+  db.addEvidence({ id: 'ev-2', customerId: 'crm-n1', kind: 'web_signal', label: '新增投诉', detail: '', occurredAt: '2026-09-01', confidence: 0.6, sourceSystem: 'web' });
+  const refired = evaluateCustomerAlerts(db, 'crm-n1', t0);
+  assert.ok(refired.created.includes('negative_public_signal'));
+  const second = db.activeAlert('crm-n1', 'negative_public_signal');
+  assert.deepEqual([...(second!.details.negativeEvidenceIds as string[])].sort(), ['ev-1', 'ev-2']);
+
+  // 证据全部移出 90 天窗口 → 自动解除。
+  const t1 = new Date('2026-12-01T04:00:00Z');
+  const closed = evaluateCustomerAlerts(db, 'crm-n1', t1);
+  assert.ok(closed.autoResolved.includes('negative_public_signal'));
+  assert.equal(db.activeAlert('crm-n1', 'negative_public_signal'), null);
+}));
+
+test('workbench: alert list joins customer names and counts by status', () => withDb((db) => {
+  db.upsertCustomer({ id: 'crm-c1', name: '客户一', shortName: '一一' });
+  db.upsertCustomer({ id: 'crm-c2', name: '客户二' });
+  db.upsertSourceEvent(onesWorkItemFixture('crm-c1', 'sg-1', '2026-06-01 10:00:00', '2026-06-01 10:00:00'));
+  db.upsertSourceEvent(onesWorkItemFixture('crm-c2', 'sg-2', '2026-06-01 10:00:00', '2026-06-01 10:00:00'));
+  evaluateCustomerAlerts(db, 'crm-c1', new Date('2026-09-02T04:00:00Z'));
+  evaluateCustomerAlerts(db, 'crm-c2', new Date('2026-09-02T04:00:00Z'));
+  db.resolveAlert(db.activeAlert('crm-c2', 'ones_inactivity')!.id, 'csm', '已回访');
+
+  const active = db.listAlerts({ status: 'active' });
+  assert.equal(active.length, 1);
+  assert.equal(active[0].customerName, '客户一');
+  assert.equal(db.countAlerts('active'), 1);
+  assert.equal(db.countAlerts('resolved'), 1);
+  const overview = db.overview('crm-c1');
+  assert.equal((overview?.alerts as unknown[]).length, 1, 'overview 携带该客户待处理预警（详情横幅数据源）');
+  assert.equal((db.overview('crm-c2')?.alerts as unknown[]).length, 0, '已消除预警不进 overview');
+}));

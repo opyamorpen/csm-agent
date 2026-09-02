@@ -717,12 +717,12 @@ test('agent nav item shows the sum of hemory pending and draft counts', () => {
 test('sidebar nav order puts Agent on top', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
-  // 显示契约：Agent 恒为侧边栏导航第一项，其余依次为客户组合→本周行动→案例库；
+  // 显示契约：Agent 恒为侧边栏导航第一项，其余依次为客户组合→本周行动→预警→案例库；
   // 默认激活视图仍是客户组合（顺序调整不改变落地页）。
   const nav = html.match(/<nav class="product-nav"[\s\S]*?<\/nav>/)?.[0];
   assert.ok(nav, 'product-nav block was not found');
   const order = [...nav.matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(order, ['agent', 'portfolio', 'actions', 'cases']);
+  assert.deepEqual(order, ['agent', 'portfolio', 'actions', 'alerts', 'cases']);
   assert.match(nav, /class="nav-item active" data-view="portfolio"/);
 });
 
@@ -1695,4 +1695,37 @@ test('opportunity board renders an ordered list of top-5 briefs with per-item so
   assert.match(styles, /\.opportunity-evidence \{/);
   const itemRules = [styles.match(/\.opportunity-item[^{]*\{[^}]*\}/g) ?? []].flat().join('\n');
   assert.doesNotMatch(itemRules, /display:\s*(grid|block)/, 'ol 序号需要 list-item 默认排版');
+});
+
+test('risk watchlist exposes trigger labels, dual tabs and mandatory resolve note', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 显示契约：触发键 → 中文标签，两个触发键都必须有（漏键会渲染裸 key）。
+  const labels = source.match(/const ALERT_TRIGGER_LABEL = \{[\s\S]*?\};/)?.[0];
+  assert.ok(labels, 'ALERT_TRIGGER_LABEL source was not found');
+  assert.match(labels, /ones_inactivity: 'ONES 活动停滞'/);
+  assert.match(labels, /negative_public_signal: '公开负面动态'/);
+
+  // 导航入口 + 待处理/已消除双 tab + 名单容器。
+  assert.match(html, /data-view="alerts">预警 <span id="alertNavCount"/);
+  assert.match(html, /id="alertsView"/);
+  assert.match(html, /data-alert-tab="pending"/);
+  assert.match(html, /data-alert-tab="resolved"/);
+  assert.match(html, /id="alertBoard"/);
+
+  // 消除流：原因/动作必填（空输入重问、取消放弃）+ 走 resolve 端点。
+  const resolveFlow = source.match(/async function resolveAlertAction[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(resolveFlow, 'resolveAlertAction source was not found');
+  assert.match(resolveFlow, /必须填写原因或动作/);
+  assert.match(resolveFlow, /\/api\/alerts\/\$\{encodeURIComponent\(alert\.id\)\}\/resolve/);
+
+  // 名单加载与客户详情横幅数据源。
+  assert.match(source, /async function loadAlerts[\s\S]*?\/api\/alerts\?status=/);
+  assert.match(source, /data\.alerts/);
+
+  // 双主题契约：预警样式只引用主题 token（浅色/深色同名变量）。
+  assert.match(css, /\.alert-banner \{[^\}]*var\(--warn-border\)/);
+  assert.match(css, /\.alert-card \{[^\}]*var\(--panel\)/);
 });

@@ -951,6 +951,18 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .risk-dimension.unknown { background: var(--panel-3); }
 .unknown-line { margin-top: 10px; color: var(--warn-note); font-size: 12px; }
 
+/* 风险预警：全局名单（待处理/已消除）+ 客户详情置顶横幅；双主题全走 token。 */
+.alert-board { display: flex; flex-direction: column; gap: 10px; }
+.alert-banner { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--warn-border); background: var(--warn-bg); border-radius: 10px; padding: 12px 14px; }
+.alert-banner > strong { color: var(--warn-text); font-size: 13px; }
+.alert-card { border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow-xs); }
+.alert-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.alert-head .quiet-command { margin-left: auto; }
+.alert-reasons { margin: 8px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.alert-reasons li { overflow-wrap: anywhere; }
+.alert-resolution { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.alert-resolution-note { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+
 /* 增购机会：有序列表（一句话简述 + 来源行），按可信度取前 5；条目不设 display 防 ol 序号被吞。 */
 .opportunity-list { margin: 0; padding-left: 24px; font-size: 13.5px; }
 .opportunity-item + .opportunity-item { margin-top: 9px; }

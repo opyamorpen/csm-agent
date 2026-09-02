@@ -82,6 +82,12 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'ones-wiki-browse' && item.api.includes('/api/ones-wiki/pages')));
   // 旧进程检测：doctor 挂 /api/version 比对服务端与本地构建。
   assert.ok(capabilities.some((item) => item.workflow === 'diagnostics' && item.api.includes('/api/version')));
+  // 风险预警名单：读列表（三种 status）+ 消除端点，消除必须填写原因/动作。
+  const alertCapability = capabilities.find((item) => item.workflow === 'risk-watchlist');
+  assert.ok(alertCapability, 'risk-watchlist capability missing');
+  assert.ok(alertCapability.api.includes('POST /api/alerts/:id/resolve'));
+  assert.ok(alertCapability.api.includes('/api/alerts?status=resolved'));
+  assert.match(alertCapability.notes ?? '', /必须填写原因\/动作/);
 });
 
 test('CLI provides standard global help and version commands', () => {
@@ -130,10 +136,24 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent sessions archive\|unarchive <会话ID>/);
   assert.match(help.stdout, /csm-agent sessions stop <会话ID>/);
   assert.match(help.stdout, /挂起中的确认草稿按拒绝处理/);
+  // 风险预警名单：列表三种状态 + 消除必须写明原因/动作。
+  assert.match(help.stdout, /csm-agent alerts \[--status active\|resolved\|all\]/);
+  assert.match(help.stdout, /csm-agent alerts resolve <预警ID> --note <原因\/动作>/);
+  assert.match(help.stdout, /消除风险必须写明原因或动作/);
 
   const version = runCli('--version');
   assert.equal(version.status, 0, version.stderr);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
+});
+
+test('alerts resolve requires a note and supports space/equal flag forms', () => {
+  const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  const command = source.match(/async function alertsCommand[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(command, 'alertsCommand source was not found');
+  // --note 走 inlineOptionOf（同时支持 `--note 值` 与 `--note=值`），缺失即报错拦截。
+  assert.match(command, /inlineOptionOf\(values, '--note'\)/);
+  assert.match(command, /消除风险必须填写原因\/动作/);
+  assert.match(command, /\/api\/alerts\/\$\{encodeURIComponent\(id\)\}\/resolve/);
 });
 
 test('draft regenerate waits for the new batch and points to the review step', () => {
