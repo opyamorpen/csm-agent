@@ -4156,7 +4156,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     await waitForJob(db, forced.jobId!);
     assert.equal(db.listCaseDrafts('crm-c1').length, 2, 'force 生成新增草稿而非覆盖');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v10-standard');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v10.1-standard');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
