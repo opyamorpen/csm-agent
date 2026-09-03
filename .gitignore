@@ -21,3 +21,6 @@ public/build-info.js
 
 # Local agent workspace state
 .zcode/
+
+# 架构图模板探针产物（视觉迭代用，不入库）
+scripts/.probe/

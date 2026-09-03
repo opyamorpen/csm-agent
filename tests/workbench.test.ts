@@ -4078,7 +4078,9 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseInternalEvidenceLabel, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
+import { ARCHITECTURE_FIGURE_PALETTE, parseArchitectureGraph, renderArchitectureSvg, type ArchitectureGraph } from '../src/workbench/case-architecture-figure.js';
+import { Resvg } from '@resvg/resvg-js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
 /** 从任一阶段 prompt 尾部的上下文 JSON 中解析 allowed_source_refs/source_catalog（规划/章节/补写共用同一份注入）。 */
@@ -4343,7 +4345,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v10.3-standard');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v11.3-architecture-render');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5134,6 +5136,238 @@ test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowl
   assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">单行文字</text></svg>'), '单行 text 放行');
 });
 
+// ── 架构图（architecture）v11：内容契约解析 + 服务端确定性模板渲染 ──
+
+/** 图 A 真实内容（回归夹具）：OA 系统 3 模块 ↔ ONES 4 模块、3 条流。 */
+const ARCH_GRAPH_OA: ArchitectureGraph = {
+  systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录', '需求收集入口'] }],
+  hubModules: ['用户与组织架构', '流程自动化', '需求管理', '权限管理'],
+  flows: [
+    { from: 'oa', to: 'ones', label: '认证信息回传', steps: [{ text: '统一认证登录，认证信息回传建立账号映射', fields: ['账号ID'] }] },
+    { from: 'oa', to: 'ones', label: '同步用户部门', steps: [{ text: '全量同步用户与部门到组织架构', fields: ['用户ID', '部门ID'] }] },
+    { from: 'oa', to: 'ones', label: '提交需求', steps: [{ text: 'H5 链接直达需求收集入口提交需求' }] },
+  ],
+};
+
+const archGraphOf = (value: unknown): ArchitectureGraph => {
+  const parsed = parseArchitectureGraph(value);
+  assert.ok('graph' in parsed, `graph 应合法（实际错误：${'error' in parsed ? parsed.error : '无'}）`);
+  return (parsed as { graph: ArchitectureGraph }).graph;
+};
+
+const archErrorOf = (value: unknown): string => {
+  const parsed = parseArchitectureGraph(value);
+  assert.ok('error' in parsed, `graph 应判非法（实际通过了：${JSON.stringify(value).slice(0, 120)}）`);
+  return (parsed as { error: string }).error;
+};
+
+test('workbench: parseArchitectureGraph validates content contract (v11)', () => {
+  // 规整：id 归一小写、文本压空白、重复模块静默去重。
+  const graph = archGraphOf({
+    systems: [{ id: ' OA ', name: 'OA 系统', modules: ['单点认证', '单点认证', '通讯录用户目录', '需求收集入口'] }],
+    hubModules: ['用户与组织架构', '流程自动化', '需求管理', '权限管理'],
+    flows: [{ from: 'OA', to: 'ones', label: ' 认证信息回传 ', steps: [{ text: '统一认证登录，回传身份', fields: [' 账号ID '] }] }],
+  });
+  assert.equal(graph.systems[0].id, 'oa', 'id 归一小写');
+  assert.equal(graph.systems[0].modules.length, 3, '重复模块静默去重');
+  assert.equal(graph.flows[0].label, '认证信息回传', 'label 压空白');
+  assert.equal(graph.flows[0].steps[0].fields?.[0], '账号ID', 'field 压空白');
+  // 真实验收回归（中信保首跑 4 连拒根因）：英文混排产品词按显示字宽放行，不按字符个数。
+  const oauthGraph = archGraphOf({ systems: [{ id: 'oa', name: '统一认证平台', modules: ['OAuth2 统一认证', '开放 REST API'] }],
+    hubModules: ['用户与组织架构', 'SAML 单点登录', '需求管理'], flows: [{ from: 'oa', to: 'ones', label: 'OAuth2 认证回传', steps: [{ text: '统一认证登录，回传用户身份', fields: ['账号ID'] }] }] });
+  assert.equal(oauthGraph.systems[0].modules.length, 2, '英文混排模块名按字宽通过');
+  // 违规矩阵（每类返回可读错误，供重试日志）。
+  const base = () => JSON.parse(JSON.stringify(ARCH_GRAPH_OA)) as Record<string, unknown>;
+  assert.match(archErrorOf({ ...base(), systems: [] }), /全空 graph|1~8/, '零系统（素材无对接场景）');
+  assert.match(archErrorOf({ ...base(), systems: Array.from({ length: 9 }, (_, i) => ({ id: `s${i}`, name: `系统${i}`, modules: [] })) }), /1~8/, '系统超上限');
+  assert.match(archErrorOf({ ...base(), systems: [{ id: 'ones', name: 'ONES', modules: [] }] }), /保留 id/, '保留 id 不得作外部系统');
+  assert.match(archErrorOf({ ...base(), systems: [{ id: 'oa', name: 'OA 系统', modules: [] }, { id: 'oa', name: 'OA 二号', modules: [] }] }), /重复/, 'id 重复');
+  assert.match(archErrorOf({ ...base(), systems: [{ id: '数据系统', name: 'OA 系统', modules: [] }] }), /小写字母/, 'id 格式非法');
+  assert.match(archErrorOf({ ...base(), systems: [{ id: 'oa', name: '一二三四五六七八九十壹贰叁', modules: [] }] }), /1~12 字宽/, '系统名超宽（13 汉字 > 12 字宽）');
+  assert.match(archErrorOf({ ...base(), systems: [{ id: 'oa', name: 'OA 系统', modules: ['一二三四五六七八九十壹贰'] }] }), /超过 11 字宽/, '模块名超宽');
+  assert.match(archErrorOf({ ...base(), hubModules: ['需求管理', '权限管理'] }), /3~8/, '枢纽模块不足');
+  assert.match(archErrorOf({ ...base(), flows: [] }), /1~10/, '零流');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ghost', label: '对接', steps: [{ text: '数据' }] }] }), /引用存在的系统 id/, '未知引用');
+  const twoSystems = { ...base(), systems: [{ id: 'oa', name: 'OA 系统', modules: [] }, { id: 'erp', name: 'ERP 系统', modules: [] }] } as Record<string, unknown>;
+  assert.match(archErrorOf({ ...twoSystems, flows: [{ from: 'oa', to: 'erp', label: '直连', steps: [{ text: '数据' }] }] }), /必须有一端是 "ones"/, '外部系统间直连拒绝');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ones', to: 'ones', label: '对接', steps: [] }] }), /steps 至少 1 条|无合法 steps/, '零 step');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ones', label: '一二三四五六七八九十壹贰叁', steps: [{ text: '数据' }] }] }), /label 须为 1~12 字宽/, 'label 超宽');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ones', label: '对接', steps: [{ text: '一'.repeat(37) }] }] }), /1~36 字宽/, 'step 超宽');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ones', label: '对接', steps: [{ text: '数据', fields: ['一'.repeat(15)] }] }] }), /超过 14 字宽/, 'field 超宽');
+  assert.match(archErrorOf({ ...base(), flows: [{ from: 'oa', to: 'ones', label: '对接', steps: [{ text: '数据', fields: ['a', 'b', 'c', 'd', 'e'] }] }] }), /fields 超过 4 个/, 'fields 超限');
+  // 禁区词：textGuard 注入案例正文内部证据检查。
+  assert.ok('graph' in parseArchitectureGraph(ARCH_GRAPH_OA, { textGuard: caseInternalEvidenceLabel }), '干净内容过禁区词');
+  const withCrm = JSON.parse(JSON.stringify(ARCH_GRAPH_OA));
+  withCrm.hubModules[0] = 'CRM 同步';
+  const guarded = parseArchitectureGraph(withCrm, { textGuard: caseInternalEvidenceLabel });
+  assert.ok('error' in guarded && /内部信息/.test(guarded.error), `禁区词命中拒绝（实际：${'error' in guarded ? guarded.error : '通过'}` + '）');
+});
+
+/** 从 SVG 提取全部矩形 [x,y,w,h]（按圆角半径分组，用于几何不变量断言）。 */
+function archRects(svg: string, rx: string): Array<[number, number, number, number]> {
+  return [...svg.matchAll(new RegExp(`<rect x="([\\d.]+)" y="([\\d.]+)" width="([\\d.]+)" height="([\\d.]+)" rx="${rx}"`, 'g'))]
+    .map((m) => [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] as [number, number, number, number]);
+}
+
+const rectsOverlap = (a: [number, number, number, number], b: [number, number, number, number]): boolean =>
+  a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+
+test('workbench: renderArchitectureSvg deterministic template invariants (v11)', () => {
+  const svg = renderArchitectureSvg(ARCH_GRAPH_OA)!;
+  assert.ok(svg, '单系统图渲染成功');
+  const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+  const [width, height] = [Number(dims[1]), Number(dims[2])];
+  assert.ok(width >= 1100 && width <= 1800 && height >= 520 && height <= 920, `画布自适应（${width}×${height}）`);
+  // 所有矩形完整落在画布内。
+  for (const rect of [...archRects(svg, '5'), ...archRects(svg, '6'), ...archRects(svg, '8'), ...archRects(svg, '12'), ...archRects(svg, '14')]) {
+    assert.ok(rect[0] >= 0 && rect[1] >= 0 && rect[0] + rect[2] <= width + 0.6 && rect[1] + rect[3] <= height + 0.6,
+      `矩形 (${rect.join(',')}) 越出画布 ${width}×${height}`);
+  }
+  // 三明治成型：标题牌/实心块（rx=8）与模块卡（rx=5）互不相交（视觉评审踩坑：枢纽下半行 y 传参错误压牌）。
+  for (const plate of archRects(svg, '8')) {
+    for (const cardBox of archRects(svg, '5')) {
+      assert.ok(!rectsOverlap(plate, cardBox), `标题牌 ${plate.join(',')} 与卡片 ${cardBox.join(',')} 重叠`);
+    }
+  }
+  // 走廊注释框（rx=6）不侵入系统容器（rx=12）与枢纽容器（rx=14）。
+  for (const box of archRects(svg, '6')) {
+    for (const container of [...archRects(svg, '12'), ...archRects(svg, '14')]) {
+      assert.ok(!rectsOverlap(box, container), `注释框 ${box.join(',')} 侵入容器 ${container.join(',')}`);
+    }
+  }
+  // 每条流恰一条带箭头连线；线色 = 数据发出方主题色（oa=首位=珊瑚红）。
+  assert.equal((svg.match(/marker-end=/g) ?? []).length, ARCH_GRAPH_OA.flows.length, '连线数=流数且必带箭头');
+  const coral = ARCHITECTURE_FIGURE_PALETTE.externals[0].solid;
+  assert.equal((svg.match(new RegExp(`<path [^>]*stroke="${coral}"`, 'g')) ?? []).length, 3, 'oa 发出流线色=其主题色');
+  assert.equal((svg.match(new RegExp(`rx="6" fill="#FFFFFF" stroke="${coral}"`, 'g')) ?? []).length, 3, '注释框数=流数且描边同色');
+  assert.ok(svg.includes('1、认证信息回传') && svg.includes('3、提交需求'), '编号注释标题存在');
+  assert.ok(svg.includes('>ONES 平台<'), '枢纽标题牌存在');
+  // 模块无重复（视觉评审踩坑：系统上半行 slice 多拿一格导致上下重复出现）。
+  for (const label of [...ARCH_GRAPH_OA.systems[0].modules, ...ARCH_GRAPH_OA.hubModules]) {
+    assert.equal(svg.split(`>${label}<`).length - 1, 1, `模块「${label}」恰好出现一次`);
+  }
+  // 服务端产物仍过消毒（结构/tspan 规则/禁区词）且消毒幂等。
+  const sanitized = sanitizeCaseSvg(svg);
+  assert.ok(sanitized, '渲染产物过 sanitizeCaseSvg');
+  assert.equal(sanitizeCaseSvg(sanitized!), sanitized, '消毒幂等');
+  // 换行质量：ASCII 词不被拆行（视觉评审：账号ID 拆成 账号I / D）、全角左括号行首。
+  const bodyBlocks = [...svg.matchAll(/font-size="12"[^>]*>(.*?)<\/text>/g)].map((m) => m[1]);
+  for (const block of bodyBlocks) {
+    const lines = [...block.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map((m) => m[1]);
+    for (let i = 0; i + 1 < lines.length; i += 1) {
+      assert.ok(!(/[A-Za-z]$/.test(lines[i]) && /^[A-Za-z]/.test(lines[i + 1])),
+        `ASCII 词被拆行：「${lines[i]}」/「${lines[i + 1]}」`);
+    }
+  }
+  assert.ok(bodyBlocks.some((block) => block.includes('（关联字段：')), '关联字段写入注释框');
+  assert.ok(bodyBlocks.flatMap((block) => [...block.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map((m) => m[1]))
+    .filter((line) => line.includes('关联字段')).every((line) => line.startsWith('（')), '（关联字段 整段从行首开始');
+});
+
+test('workbench: renderArchitectureSvg multi-system layout and density fallback (v11)', () => {
+  const graph: ArchitectureGraph = {
+    systems: [
+      { id: 'erp', name: 'ERP 系统', modules: ['物料主数据', '采购订单', '工单管理', '成本核算'] },
+      { id: 'crm', name: 'CRM 系统', modules: ['客户管理', '商机管理', '合同管理', '报价管理'] },
+      { id: 'ehr', name: 'EHR 系统', modules: ['组织架构', '员工档案', '考勤管理'] },
+      { id: 'pdm', name: 'PDM 系统', modules: ['产品文档', '图纸管理', '变更管理'] },
+      { id: 'oa', name: 'OA 系统', modules: ['流程审批', '统一待办', '公告发布'] },
+      { id: 'svn', name: 'SVN 系统', modules: [] },
+      { id: 'bi', name: 'BI 系统', modules: [] },
+    ],
+    hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库'],
+    flows: [
+      { from: 'erp', to: 'ones', label: '物料关联', steps: [{ text: '物料与项目信息关联核算成本', fields: ['项目ID', '物料ID'] }] },
+      { from: 'crm', to: 'ones', label: '客户商机', steps: [{ text: '客户与商机信息关联项目上下文' }] },
+      { from: 'ehr', to: 'ones', label: '组织同步', steps: [{ text: '组织架构与人员全量同步', fields: ['用户ID'] }] },
+      { from: 'pdm', to: 'ones', label: '文档挂接', steps: [{ text: '产品文档与需求任务挂接' }] },
+      { from: 'oa', to: 'ones', label: '审批联动', steps: [{ text: '审批通过自动创建需求与任务' }] },
+      { from: 'ones', to: 'oa', label: '待办推送', steps: [{ text: '任务分配与到期提醒推送统一待办' }] },
+      { from: 'ones', to: 'svn', label: '代码关联', steps: [{ text: '需求任务关联代码提交记录' }] },
+      { from: 'ones', to: 'bi', label: '数据供数', steps: [{ text: '项目效能数据输出 BI 报表', fields: ['项目ID'] }] },
+    ],
+  };
+  const svg = renderArchitectureSvg(graph)!;
+  assert.ok(svg, '七系统图渲染成功');
+  const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+  assert.equal(Number(dims[1]), 1800, '多系统铺满 1800 宽');
+  assert.ok(Number(dims[2]) <= 920, '高度不超上限');
+  // 枢纽容器（rx=14）与所有系统容器（rx=12）/实心系统块（rx=8 且整列宽，排除枢纽与系统标题牌）水平分离。
+  const hub = archRects(svg, '14')[0];
+  for (const container of [...archRects(svg, '12'), ...archRects(svg, '8').filter((rect) => rect[2] > 350)]) {
+    assert.ok(container[0] + container[2] <= hub[0] + 0.6 || container[0] >= hub[0] + hub[2] - 0.6,
+      `容器 ${container.join(',')} 与枢纽 ${hub.join(',')} 水平重叠`);
+  }
+  // 双向流：ONES 发出的线用枢纽蓝。
+  assert.ok(/<path [^>]*stroke="#1665D8"[^>]*marker-end/.test(svg), 'ONES 发出流用枢纽主题色');
+  // 无模块系统 = 实心系统级单块（rx=8、整列宽，区别于窄标题牌）。
+  assert.ok(archRects(svg, '8').some((rect) => rect[2] > 350), 'SVN/BI 画成整列宽实心单块');
+  // 压力规模（8 系统 × 6 模块）在四档密度内仍可渲染——模型按 prompt 上限如实输出不能丢图。
+  const stress: ArchitectureGraph = {
+    systems: Array.from({ length: 8 }, (_, i) => ({ id: `sys${i}`, name: `系统${i}`, modules: ['模块一', '模块二', '模块三', '模块四', '模块五', '模块六'] })),
+    hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库', '流水线', '代码库'],
+    flows: Array.from({ length: 10 }, (_, i) => ({ from: i % 2 ? 'ones' : `sys${i}`, to: i % 2 ? `sys${i}` : 'ones', label: `对接${i}`, steps: [{ text: '数据对接内容' }] })),
+  };
+  assert.ok(renderArchitectureSvg(stress), '压力规模渲染成功（密度降档兜底）');
+});
+
+test('workbench: renderArchitectureSvg corridor boxes never overlap or exceed canvas (v11.2)', () => {
+  // 真实验收回归（中信保二跑）：同一系统多条流的注释框期望位聚集在系统纵向中心附近，
+  // 正向下推溢出画布底部后，旧实现用底部 clamp 无条件回拉 → 框对框完全叠画。
+  const dense: ArchitectureGraph = {
+    systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录', '需求收集入口'] }],
+    hubModules: ['用户与组织架构', '流程自动化', '需求管理', '权限管理'],
+    flows: [
+      { from: 'oa', to: 'ones', label: '认证回传', steps: [{ text: '统一认证登录，认证信息回传建立账号映射' }, { text: '账号映射关系定期校准', fields: ['账号ID'] }] },
+      { from: 'oa', to: 'ones', label: '同步用户组织', steps: [{ text: 'OA 通讯录接口每次返回全量有效人员数据，平台逐轮比对' }, { text: '已不在通讯录的人员账号自动软删除', fields: ['部门', '职位'] }, { text: '历史数据完整保留' }] },
+      { from: 'ones', to: 'oa', label: '输出提单链接', steps: [{ text: '链接指向配置完成的敏态需求表单' }] },
+      { from: 'oa', to: 'ones', label: '提交敏态需求', steps: [{ text: '员工点击 H5 链接进入填报页面完成提交' }] },
+    ],
+  };
+  const svg = renderArchitectureSvg(dense)!;
+  assert.ok(svg, '密集流夹具渲染成功');
+  const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+  const [, height] = [Number(dims[1]), Number(dims[2])];
+  const boxes = archRects(svg, '6');
+  assert.equal(boxes.length, dense.flows.length, '框数=流数');
+  for (const box of boxes) {
+    assert.ok(box[1] + box[3] <= height + 0.6, `框 (${box.join(',')}) 越出画布底部 ${height}`);
+  }
+  for (let a = 0; a < boxes.length; a += 1) {
+    for (let b = a + 1; b < boxes.length; b += 1) {
+      assert.ok(!rectsOverlap(boxes[a], boxes[b]), `注释框 ${a} 与 ${b} 重叠（${boxes[a].join(',')} vs ${boxes[b].join(',')}）`);
+    }
+  }
+  // tspan 续排语义防线：多行正文从第 2 行起必须带 x 回行首——不带 x 会从上一行末尾阶梯续排
+  // 溢出框外（真实验收三连败根因；坐标估算按每行从 text x 起算、对此盲视）。
+  for (const textMatch of svg.matchAll(/<text\b[^>]*>((?:<tspan[\s\S]*?<\/tspan>)+)<\/text>/g)) {
+    const tspans = [...textMatch[1].matchAll(/<tspan\b([^>]*)>/g)].map((m) => m[1]);
+    for (let index = 1; index < tspans.length; index += 1) {
+      assert.ok(/\bx\s*=/.test(tspans[index]), `第 ${index + 1} 个 tspan 缺 x（阶梯续排风险）：${tspans[index]}`);
+    }
+  }
+  // 像素级防线（resvg 实渲 + 扫描框右真空带）：注释框右缘与相邻容器之间的空隙里
+  // 不得出现正文色（#1F2329）文字像素——估算器与渲染语义脱节时这层测试直接报警。
+  // 按 viewBox 宽 1:1 渲染：fitTo 固定 1800 会把窄画布（如 solo 1422）放大，
+  // SVG 坐标系与像素坐标系错位——真空带扫描会把框内文字误判为溢出（本测试首版的假阳性根因）。
+  const rendered = new Resvg(svg, { fitTo: { mode: 'width', value: Number(svg.match(/viewBox="0 0 (\d+) /)![1]) }, font: { loadSystemFonts: true, defaultFontFamily: 'PingFang SC' }, background: 'rgba(255,255,255,1)' }).render();
+  const { width: rw, pixels } = rendered;
+  const hubRect = archRects(svg, '14')[0];
+  const columnRects = archRects(svg, '12');
+  for (const box of boxes) {
+    const right = Math.round(box[0] + box[2]);
+    const gapEnd = hubRect && right < hubRect[0] ? hubRect[0]
+      : (columnRects.filter((rect) => rect[0] > right).sort((a, b) => a[0] - b[0])[0]?.[0] ?? right + 40);
+    for (let x = right + 2; x < gapEnd; x += 1) {
+      for (let y = Math.round(box[1]); y < Math.round(box[1] + box[3]); y += 1) {
+        const i = (y * rw + x) * 4;
+        assert.ok(!(Math.abs(pixels[i] - 31) < 30 && Math.abs(pixels[i + 1] - 35) < 30 && Math.abs(pixels[i + 2] - 41) < 30 && pixels[i + 3] > 128),
+          `注释框右真空带 (${x},${y}) 出现正文色文字像素（框 ${box.join(',')} 右缘外溢出）`);
+      }
+    }
+  }
+});
+
 /** 规划产物附带 figures 骨架（含非法 kind/非法章节组合与合法条目——非法条目须被丢弃）。 */
 function casePlanContentWithFigures(content: any, prompt: string): any {
   const plan = casePlanContent(content, prompt);
@@ -5278,17 +5512,27 @@ test('workbench: milestone figure kind planned for value chapter and validated',
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: figure prompts carry kind-specific rules and ONES capability map (v10)', () => {
+test('workbench: figure prompts carry kind-specific rules and ONES capability map (v11)', () => {
   const base = { customerName: '示例客户', idea: '方案总览', chapterAnchor: '定稿正文', materials: ['[f1] 素材原文'] };
   const architecture = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'architecture' });
-  assert.match(architecture, /绘图规范/, '通用画法规范存在');
+  assert.match(architecture, /系统集成架构图/, '架构图 brief 保留（测试路由短语）');
   assert.match(architecture, /不得虚构环节、模块或数字/, '事实边界原句保留');
-  assert.match(architecture, /系统集成图/, '架构图含集成画法指引');
-  assert.match(architecture, /箭头方向=数据流向/, '连线方向=数据流向');
-  assert.match(architecture, /每条连线必须配一个白底/, '连线标注规则');
-  assert.match(architecture, /端点精度/, '连线端点须落到模块块');
+  assert.match(architecture, /本图不画 SVG/, 'v11：架构图只提取内容、由服务端模板渲染');
+  assert.match(architecture, /只输出 JSON：\{"caption":"\.\.\.","graph":\{\.\.\.\}/, 'graph 内容契约出厂');
+  assert.match(architecture, /from=数据发出方、to=数据接收方/, '流方向语义');
+  assert.match(architecture, /每条流必须有一端是 "ones"/, '流必须触达 ONES（kind 业务契约）');
+  assert.match(architecture, /字宽口径：文本长度按显示字宽计/, '字宽口径说明（真实验收教训：按字符数卡死 OAuth2 类产品词）');
+  assert.match(architecture, /不超过 12 字宽/, '系统名字宽界');
+  assert.match(architecture, /每个不超过 11 字宽/, '模块字宽界');
+  assert.match(architecture, /开放 API、单点登录等集成机制按实际采用可列入/, '集成机制可作枢纽模块');
+  assert.match(architecture, /关联\/对应字段时放进同条 step 的 fields/, '关联字段写法');
+  assert.match(architecture, /超过 8 家只保留主要集成系统/, '外部系统上限与取舍指引');
   assert.match(architecture, /【ONES 产品能力图谱/, '架构图注入能力图谱');
   assert.match(architecture, /不构成交付证据/, '图谱护栏');
+  assert.ok(!architecture.includes('绘图规范'), '架构图不再携带 SVG 绘图规范');
+  assert.ok(!architecture.includes('viewBox'), '架构图不再约束画布/坐标');
+  assert.ok(!architecture.includes('tspan'), '架构图不再携带 SVG 文字排版规则');
+  assert.ok(!architecture.includes('需求场景-产品能力映射图'), '与映射图路由短语互斥');
   const capabilityMap = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'capability_map' });
   assert.match(capabilityMap, /需求场景-产品能力映射图/, '映射图 brief');
   assert.match(capabilityMap, /分层带状板/, '带状板版式（样例范式）');
@@ -5325,8 +5569,15 @@ test('workbench: solution chapter carries capability_map plus architecture when 
         const prompt = input.messages[0].content;
         if (prompt.includes('章节配图')) {
           const isCapability = prompt.includes('需求场景-产品能力映射图');
-          const label = isCapability ? '场景能力映射' : '集成架构';
-          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', label), caption: isCapability ? '映射：需求场景对应产品能力' : '集成：多系统对接 ONES' }) }], stopReason: 'stop' };
+          if (isCapability) {
+            return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '场景能力映射'), caption: '映射：需求场景对应产品能力' }) }], stopReason: 'stop' };
+          }
+          // v11：架构图模型只供内容 graph，SVG 由服务端模板渲染。
+          return { content: [{ type: 'text', text: JSON.stringify({ caption: '集成：多系统对接 ONES', graph: {
+            systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录', '需求收集入口'] }],
+            hubModules: ['用户与组织架构', '流程自动化', '需求管理', '权限管理'],
+            flows: [{ from: 'oa', to: 'ones', label: '认证信息回传', steps: [{ text: '统一认证登录，回传用户身份' }] }],
+          } }) }], stopReason: 'stop' };
         }
         if (prompt.includes('规划客户成功案例草稿的章节结构')) {
           const base = casePlanContent(CASE_CONTENT, prompt);
@@ -5349,6 +5600,11 @@ test('workbench: solution chapter carries capability_map plus architecture when 
     const figures = (draft.fields as any).figures ?? [];
     assert.equal(figures.length, 2, '解决方案章两图共存（映射+架构）');
     assert.ok(figures.every((figure: any) => figure.section === 'solution' && figure.svg.includes('viewBox')), '两图均挂解决方案章且为消毒后 SVG');
+    const architectureFigure = figures.find((figure: any) => figure.kind === 'architecture');
+    assert.ok(architectureFigure, '架构图存在');
+    assert.ok(architectureFigure.svg.includes('ONES 平台'), '架构图为服务端模板渲染产物（graph→SVG）');
+    assert.ok(architectureFigure.svg.includes('1、认证信息回传'), '编号注释框由服务端生成');
+    assert.equal(architectureFigure.caption, '集成：多系统对接 ONES', '图注透传');
     const markdown = renderCaseMarkdown(draft);
     const solutionStart = markdown.indexOf('（三）业务解决方案');
     const valueStart = markdown.indexOf('## 三、方案价值概述');
@@ -5488,7 +5744,12 @@ test('workbench: case model slots release during retry backoff so queued chapter
           }
           events.push('figure:arch');
           await nap(200);
-          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '集成架构'), caption: '集成：多系统对接 ONES' }) }], stopReason: 'stop' };
+          // v11：架构图模型只供内容 graph，SVG 由服务端模板渲染。
+          return { content: [{ type: 'text', text: JSON.stringify({ caption: '集成：多系统对接 ONES', graph: {
+            systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录'] }],
+            hubModules: ['用户与组织架构', '流程自动化', '需求管理'],
+            flows: [{ from: 'oa', to: 'ones', label: '认证信息回传', steps: [{ text: '统一认证登录，回传用户身份' }] }],
+          } }) }], stopReason: 'stop' };
         }
         if (prompt.includes('规划客户成功案例草稿的章节结构')) {
           events.push('plan');

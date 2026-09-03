@@ -12,10 +12,11 @@ import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
+import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
 
-/** v10.3：需求-功能结构图按真实生成质检收紧（平台带「通用平台能力」标签块、清单密度、版面占满、
- * 流程箭头规格、分组头去整排同名、字号下限 14）。提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v10.3-standard';
+/** v11：系统集成架构图改「模型供内容 graph、服务端模板确定性渲染」（版式/配色/走线/注释框
+ * 不再依赖模型执行软约束）。提示词实质变化必须升版本破指纹短路。 */
+export const CASE_GENERATION_VERSION = 'case-v11.3-architecture-render';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1857,9 +1858,10 @@ const CASE_FIGURE_SIMPLE_KIND_RULES = '- 规模：节点总数不超过 10 个�
   + '- 画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）；整体横向布局。';
 
 /**
- * 配图绘图规范·kind 专属条目（v9：架构图集成画法细化——ONES 能力模块化、连线方向+数据标注+端点落模块；
- * 新增 value_map 痛点-方案-价值全景图）。画法对齐手绘示例图：核心平台内部画能力模块清单、连线端点精确到模块、
- * 线色=数据发出方、线上标注框写数据内容；全景图三区不连线、靠编号对位表达映射。
+ * 配图绘图规范·kind 专属条目。v11：architecture 改内容提取契约——模型只输出 graph JSON
+ * （系统/模块/数据流），SVG 由服务端模板确定性渲染（case-architecture-figure.ts），
+ * 版式/配色/走线不再依赖模型；其余 kind 维持模型手绘 + 专属规范。画法对齐手绘示例图：
+ * 核心平台内部画能力模块清单、连线方向+数据标注；全景图三区不连线、靠编号对位表达映射。
  */
 const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   flow_current: CASE_FIGURE_SIMPLE_KIND_RULES,
@@ -1878,15 +1880,13 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
     '- 场景、模块、功能项均须有素材依据，不虚构未提及的需求或未采用的能力。',
   ].join('\n'),
   architecture: [
-    '- 规模：块总数不超过 22、连线不超过 8 条，SVG 约 4~10k 字符即可。',
-    '- 画布 viewBox="0 0 900 540"（可按内容在 700~960 × 460~600 间调整）。',
-    '- 素材中有外部系统向 ONES 接入信息、或从 ONES 抓取数据的对接时，按「系统集成图」画：',
-    '  · 布局：ONES 平台为核心容器置于中部——容器顶部边框上骑一块实心深色「ONES 平台」标题牌（不要把平台名画成与能力模块并排的普通块），标题牌下方按 2~3 行网格（每行 2~3 块）排列本方案涉及的能力模块块（白底块，模块名从下方能力图谱与素材中选取，数量与方案正文涉及的能力相当、通常 3~6 个且不少于 3 个——除非素材确实只支撑更少；模块须按规整网格对齐：同一行块顶对齐、同一列块左对齐，禁止交错或对角散布）；容器高度与宽度贴合内容收拢，内容区应占满画布高度与宽度的 80% 以上、四周留白大致均衡、不得留大片空白；外部系统环绕在核心容器四周，各系统块之间留出空白走廊供连线走线。',
-    '  · 外部系统：素材提到该系统的具体功能/模块时，画「浅色容器 + 实心系统名块 + 若干白底模块块」的组块；素材没提内部模块的系统只画系统级单块；每个系统分配一个专属主题色（容器浅色、系统名块实色）。',
-    '  · 连线：横平竖直的正交折线（只在 90° 转角改向），单向实心箭头，箭头方向=数据流向——外部系统向 ONES 接入信息、以及 ONES 向外部系统供数（外部从 ONES 抓取）都要按素材如实画出方向；每条连线必须带 marker 箭头，两端都无箭头的无方向线段禁止出现；素材未写明方向时按语境选择最可能的流向画单向箭头、并在标注中写明数据发出方；连线与箭头用数据发出方系统的主题色；连线不交叉、不穿过任何容器。',
-    '  · 连线标注：每条连线必须配一个白底、与线同色细边框的圆角小标签框，紧贴所标注的连线放置（不得悬浮在远离连线的空白处，也不得压住任何块或容器的边框），框内写这条对接传输的数据内容（须有素材依据，每行不超过 10 个字）；标注动词方向必须与箭头一致——指向 ONES 用「推送/同步至 ONES」语义（如「推送工单状态」），从 ONES 指出用「输出/供数至外部」语义（如「输出项目进度」）。',
-    '  · 端点精度：连线两端必须落到具体的模块块边缘——ONES 侧箭头指向消费或提供该数据的能力模块块（不得只指平台容器外框），外部系统侧指向相关模块块或系统块边缘。',
-    '- 纯平台落地方案（素材中无外部系统对接）按分层架构画：接入层/平台能力模块层/数据层的分层框线，模块名须与素材及能力图谱一致。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
+    '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6（如「OAuth2 统一认证」约 8 字宽、「开放 REST API」约 7 字宽），不是按字符个数。',
+    '- systems：与本方案有集成关系的外部系统，1~8 家（超过 8 家只保留主要集成系统）；id 用小写英文短标识（如 oa/erp/ehr，不得用保留 id "ones"），name 为系统称谓、用素材原称（不超过 12 字宽）；素材提到该系统具体功能/模块时尽量列满进 modules（密集清单，每家 0~6 个、每个不超过 11 字宽，如「OAuth2 统一认证」），未提内部模块的留空数组；与本方案有 2 条以上数据流（或双向）的系统，素材提及其内部环节（如流水线、构建、工单）时尽量提炼为 2~3 个 modules。',
+    '- hubModules：本方案在 ONES 侧涉及的能力模块 3~8 个（开放 API、单点登录等集成机制按实际采用可列入），命名与下方能力图谱一致、与方案正文涉及的能力相当，尽量列满；每个不超过 11 字宽。',
+    '- flows：系统与 ONES 之间的数据流 1~10 条；from=数据发出方、to=数据接收方——外部系统推送/同步至 ONES 时 from=外部系统 id、to="ones"，ONES 供数/输出至外部系统时 from="ones"、to=外部系统 id；每条流必须有一端是 "ones"（外部系统间直连拆成经 ONES 的两条流或省略）；label 为对接短标签（不超过 12 字宽，动词方向与流向一致，如「推送工单状态」/「输出项目进度」）。',
+    '- steps：这条对接传输的数据内容 1~3 条（每条不超过 36 字宽、须有素材依据），素材提到关联/对应字段时放进同条 step 的 fields（0~4 个、每个不超过 14 字宽）。',
+    '- 系统名、模块、数据项、字段只能来自素材原文与能力图谱，不虚构未交付组件；图内文字不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）。素材实际无外部系统与 ONES 对接时输出 {"systems":[],"hubModules":[],"flows":[]} 全空 graph（系统将放弃本图）。',
   ].join('\n'),
   value_map: [
     '- 规模：痛点卡与价值卡各 3~4 条且数量必须相等，SVG 约 4~10k 字符即可。',
@@ -1898,9 +1898,16 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   ].join('\n'),
 };
 
+/** architecture 内容提取的通用条目（v11：版式由服务端模板渲染，无 SVG 绘图规范）。 */
+const ARCHITECTURE_CONTENT_COMMON_RULES = [
+  '- 思考从简：先在思考里定下系统/模块/流清单就立即开始输出；{"caption","graph"} JSON 是唯一交付物，不要输出 SVG、markdown 或解释文字。',
+  '- graph 中 name/modules/label/steps/fields 均为中文业务短语，id 只用小写英文；caption 是 30 字以内的图注（如「OA 与 ONES 双向集成：单点登录与通讯录同步」）。',
+].join('\n');
+
 /**
  * 配图生成 prompt 的唯一组装出口（生成调用 / 探针脚本 / 单测共用一份实现，防止三处漂移）。
  * capability_map / architecture / value_map 额外注入 ONES 能力图谱（模块命名依据），其余 kind 不注入。
+ * v11：architecture 只提取内容 graph（服务端模板渲染），出厂契约与通用条目按 kind 分支。
  */
 export function buildCaseFigurePrompt(input: {
   customerName: string;
@@ -1914,9 +1921,13 @@ export function buildCaseFigurePrompt(input: {
   const knowledge = input.kind === 'capability_map' || input.kind === 'architecture' || input.kind === 'value_map'
     ? `${ONES_CAPABILITY_MAP}\n（图中 ONES 能力模块的命名须与图谱一致；图谱不构成该客户已交付的证据——是否交付以正文与素材为准。）\n`
     : '';
-  return `为客户「${input.customerName}」的客户成功案例绘制「${input.sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[input.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。只输出 JSON：{"svg":"...","caption":"..."}\n`
-    + `绘图规范：\n`
-    + `${CASE_FIGURE_COMMON_RULES}\n`
+  const isArchitecture = input.kind === 'architecture';
+  const contract = isArchitecture
+    ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","graph":{...}}（graph 结构见本图专属规范）'
+    : '只输出 JSON：{"svg":"...","caption":"..."}';
+  return `为客户「${input.customerName}」的客户成功案例绘制「${input.sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[input.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。${contract}\n`
+    + `${isArchitecture ? '内容规范：' : '绘图规范：'}\n`
+    + `${isArchitecture ? ARCHITECTURE_CONTENT_COMMON_RULES : CASE_FIGURE_COMMON_RULES}\n`
     + `本图专属规范：\n${CASE_FIGURE_KIND_RULES[input.kind]}\n`
     + knowledge
     + `- 本图要表达的内容（来自章节规划）：${input.idea}\n`
@@ -1995,21 +2006,27 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     chapterAnchor: chapterText,
     materials,
   });
+  // v11 架构图内容校验失败时把具体违规附进下一轮 prompt（反馈环）——真实验收教训：
+  // 同错盲重试 4 次只会原样再犯，带上「上一次输出未通过校验：…」模型一次就能修正。
+  let architectureFeedback = '';
   onProgress?.(`配图「${figureKindLabel(figure.kind)}」调用${callSizeText(prompt, FIGURE_MAX_TOKENS)}，引用素材 ${materials.length} 段…`);
   // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
   const MAX_ATTEMPTS = 4;
   const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
   let lastError = '配图生成未返回可解析 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const attemptPrompt = architectureFeedback
+      ? `${prompt}\n\n- 上一次输出未通过内容校验：${architectureFeedback}。请严格按上文规范修正后重新输出完整 JSON。`
+      : prompt;
     // 每次尝试单独取槽：响应到手即放槽，消毒校验与退避睡眠都在槽外——失败重试不再封锁另一路并发。
     const release = await slots.acquire('figure');
     let response: Awaited<ReturnType<typeof completeModelWithProgress>>;
     try {
       response = await completeModelWithProgress(runtime, {
         systemPrompt: CASE_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+        messages: [{ role: 'user', content: attemptPrompt, timestamp: Date.now() }],
         tools: [],
-      }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: FIGURE_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(prompt) });
+      }, onProgress ? (tick) => onProgress(modelProgressText(tick)) : undefined, { maxTokens: FIGURE_MAX_TOKENS, timeoutMs: caseModelTimeoutMs(attemptPrompt) });
     } finally {
       release();
     }
@@ -2021,14 +2038,30 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     const value = cleanJson(extractText(response.content));
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const record = value as Record<string, unknown>;
-      const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
       const caption = typeof record.caption === 'string' ? record.caption.trim().slice(0, 60) : '';
-      const svg = sanitizeCaseSvg(rawSvg);
-      if (svg && caption && !CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(caption))) {
-        return { id: `figure:${hash(`${figure.kind}:${figure.source_refs.join(',')}`).slice(0, 24)}`, section: figure.section,
-          kind: figure.kind, svg, caption, source_refs: figure.source_refs, note: figure.idea };
+      const accepted = (svg: string | null): CaseFigure | null => (svg && caption && !CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(caption))
+        ? { id: `figure:${hash(`${figure.kind}:${figure.source_refs.join(',')}`).slice(0, 24)}`, section: figure.section,
+          kind: figure.kind, svg, caption, source_refs: figure.source_refs, note: figure.idea }
+        : null);
+      if (figure.kind === 'architecture') {
+        // v11：架构图模型只供内容 graph，SVG 由服务端模板确定性渲染（版式/配色/走线不再依赖模型）。
+        const parsed = parseArchitectureGraph(record.graph, { textGuard: caseInternalEvidenceLabel });
+        if ('graph' in parsed) {
+          const rendered = renderArchitectureSvg(parsed.graph);
+          const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
+          if (result) return result;
+          architectureFeedback = rendered ? '' : '内容规模超出画布承载（系统/模块过多），请精选主要系统与模块';
+          lastError = `架构图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限（系统/模块过多）'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        } else {
+          architectureFeedback = parsed.error;
+          lastError = `架构图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        }
+      } else {
+        const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
+        const result = accepted(sanitizeCaseSvg(rawSvg));
+        if (result) return result;
+        lastError = `配图 SVG 消毒或图注校验未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
       }
-      lastError = `配图 SVG 消毒或图注校验未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
     } else {
       lastError = `配图未返回可解析 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
     }
@@ -2417,6 +2450,12 @@ const CASE_INTERNAL_EVIDENCE_PATTERNS: Array<{ pattern: RegExp; label: string }>
   { pattern: /(?<!\d)1[3-9]\d{9}(?!\d)/, label: '手机号码' },
   { pattern: /合同金额|续约金额|客单价|ARR|MRR/i, label: '合同或收入信息' },
 ];
+
+/** 单段文本的内部证据命中（架构图 graph 文本校验等场景复用；返回命中的 label 或 null）。 */
+export function caseInternalEvidenceLabel(text: string): string | null {
+  const hit = CASE_INTERNAL_EVIDENCE_PATTERNS.find(({ pattern }) => pattern.test(text));
+  return hit ? hit.label : null;
+}
 
 export function caseContentWarnings(draft: CaseDraft): string[] {
   return caseTextsContentWarnings(draft.title, draft.fields);
