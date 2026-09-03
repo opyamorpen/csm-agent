@@ -10,6 +10,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { runAgent, AgentSession, AgentAbortedError, type McpGateway } from '../src/agent.js';
 import { confirmWriteTool, type ConfirmDraft } from '../src/tools/confirm.js';
+import { hasUnterminatedTurn } from '../src/server.js';
 
 const WRITE_TOOL_NAME = 'mcp__crm__create_followup';
 
@@ -472,4 +473,18 @@ test('AgentSession: send() 接受文本+图片内容块并原样入上下文（�
   const first = session.context.messages[0] as { role: string; content: unknown };
   assert.equal(first.role, 'user');
   assert.deepEqual(first.content, blocks, '附件内容块须原样入 context（restore 落盘即为此形态）');
+});
+
+test('hasUnterminatedTurn detects restart-interrupted turns in persisted events', () => {
+  const ev = (type: string) => ({ event: { type } });
+
+  // 正常闭合轮次。
+  assert.equal(hasUnterminatedTurn([ev('user'), ev('turn_start'), ev('text'), ev('turn_end')]), false);
+  // 挂在确认卡上的轮次被服务重启打断（requestConfirm 停住期间 busy 恒为 true）：尾部无 turn_end。
+  assert.equal(hasUnterminatedTurn([ev('user'), ev('turn_start'), ev('confirm')]), true);
+  // 前一轮已闭合、末轮悬空。
+  assert.equal(hasUnterminatedTurn([ev('turn_start'), ev('turn_end'), ev('user'), ev('turn_start')]), true);
+  // 中段悬空但末轮已闭合：回放状态机净效应一致，不补帧。
+  assert.equal(hasUnterminatedTurn([ev('turn_start'), ev('confirm'), ev('user'), ev('turn_start'), ev('turn_end')]), false);
+  assert.equal(hasUnterminatedTurn([]), false);
 });

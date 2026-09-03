@@ -153,6 +153,23 @@ function pickNarrativeFields(fields: Record<string, unknown>): Record<string, un
   return picked;
 }
 
+/**
+ * 落盘事件尾部是否存在未闭合轮次（turn_start 之后没有 turn_end）。
+ * 服务重启（构建自愈/崩溃）会丢掉在途轮次——含挂起中的确认卡（requestConfirm 停住期间
+ * 服务端 busy 恒为 true，turn_end 只在轮次真正结束时才发）：悬空的 turn_start 在 SSE 回放时
+ * 会把前端 busy 钉死（发送键卡成「停止」，再点即 409「当前没有进行中的对话」）。
+ * 启动装载时用本函数检测并补一帧 stopped turn_end，回放自洽；stopped 让前端禁用孤儿确认卡。
+ * 中段悬空但末轮已闭合的历史返回 false——补帧只在尾部追加，中段缺失对回放状态机无影响。
+ */
+export function hasUnterminatedTurn(events: Array<{ event: { type?: string } }>): boolean {
+  let inTurn = false;
+  for (const { event } of events) {
+    if (event.type === 'turn_start') inTurn = true;
+    else if (event.type === 'turn_end') inTurn = false;
+  }
+  return inTurn;
+}
+
 /** 审批用权威客户绑定：从工作台库解析出的客户行与派生 ID（ONES confirmed 选项 / 售后工时项）。 */
 export interface DraftCustomerBinding {
   customer: Customer;
@@ -583,6 +600,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     session.agent = agent;
     agent.restore((stored.messages ?? []) as never);
     sessions.set(meta.id, session);
+    // 启动自愈：重启前被中断的轮次补一帧 stopped turn_end（分配 seq 并落盘），
+    // 否则悬空 turn_start 会在 SSE 回放时把前端 busy 钉死成「停止」死路。
+    if (hasUnterminatedTurn(session.events)) broadcast(session, { type: 'turn_end', stopped: true });
   }
 
   return async (req, res) => {

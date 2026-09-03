@@ -215,7 +215,12 @@
   async function api(path, options) {
     const response = await fetch(path, options);
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
+    if (!response.ok) {
+      // 附带 HTTP 状态码：调用方按 status 区分错误类别（如 stop 的 409=服务端已无进行中的轮次）。
+      const error = new Error(body.error || `请求失败 (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
     return body;
   }
 
@@ -886,6 +891,14 @@
   async function switchSession(id) {
     sessionId = id;
     sessionCustomerId = null;
+    // 切会话即换 SSE 频道：旧会话的 turn_end 永远收不到，busy/停止键/思考占位必须就地复位，
+    // 否则上一会话的进行态（含回放出的悬挂 turn_start）会把新会话的 composer 卡成「停止」死路。
+    busy = false;
+    syncChatFab();
+    setSendStopping(false);
+    setThinking(false);
+    endStreaming();
+    inputEl.disabled = false;
     clearMessages();
     connectEvents(id);
     const list = await (await fetch('/api/sessions')).json().then((d) => d.sessions);
@@ -4103,7 +4116,20 @@
       await api(`/api/sessions/${sessionId}/stop`, { method: 'POST' });
     } catch (error) {
       sendEl.disabled = false;
-      // 停止没成（409/网络失败），不留无意义的停止文案。
+      // 409=服务端已无进行中的对话：本地 busy 是悬挂 turn_start 回放/切会话残留的假态，就地治愈
+      // （与 turn_end 的清理幂等）而非弹死错。挂起的确认卡必为孤儿（服务端无轮次可批准），一并禁用。
+      if (error.status === 409) {
+        busy = false;
+        syncChatFab();
+        setThinking(false);
+        endStreaming();
+        setSendStopping(false);
+        inputEl.disabled = false;
+        disablePendingConfirmCards();
+        setIdleStatus();
+        return;
+      }
+      // 停止没成（网络失败等），不留无意义的停止文案。
       setIdleStatus();
       if (busy) await alertDialog(error.message);
     }

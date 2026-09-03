@@ -1433,6 +1433,32 @@ test('stopping banner releases the top-right status when the turn ends', () => {
   assert.match(app, /es\.onopen = \(\) => \{ if \(statusEl\.lastChild\.textContent === '连接中断，正在重连…'\) setIdleStatus\(\); \};/);
 });
 
+test('dangling turn replay cannot brick the composer', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+  // 根因链（真实事故）：服务重启丢掉在途轮次 → 悬空 turn_start 在 SSE 回放把 busy 钉死
+  // → 发送键卡成「停止」，用户点发送被转投 /stop → 409「当前没有进行中的对话」死错弹窗。
+  // 三层防线契约：
+  // ① api() 抛错附带 HTTP 状态码（stop 的 409=服务端已无进行中的轮次，调用方按状态码分流）。
+  const apiHelper = app.match(/async function api\(path, options\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(apiHelper, 'api helper source was not found');
+  assert.match(apiHelper, /error\.status = response\.status;/);
+  // ② stopTurn 409 就地治愈：复位 busy/停止键/思考占位/输入框并禁用孤儿确认卡（服务端无轮次
+  //    可批准，挂起的确认卡必为孤儿），不弹死错；与 turn_end 的清理幂等。
+  const stopper = app.match(/async function stopTurn[\s\S]*?\n  \}\n\n  \/\/ 对话进行中发送按钮是「停止」/)?.[0];
+  assert.ok(stopper, 'stopTurn source was not found');
+  assert.match(stopper, /if \(error\.status === 409\) \{/);
+  assert.match(stopper, /busy = false;\s*\n\s*syncChatFab\(\);\s*\n\s*setThinking\(false\);/);
+  assert.match(stopper, /setSendStopping\(false\);\s*\n\s*inputEl\.disabled = false;/);
+  assert.match(stopper, /disablePendingConfirmCards\(\);\s*\n\s*setIdleStatus\(\);\s*\n\s*return;/);
+  // ③ 切会话即换 SSE 频道：旧会话的 turn_end 永远收不到，轮次 UI 态必须就地复位，
+  //    否则上一会话的进行态（含回放出的悬挂 turn_start）卡死新会话 composer。
+  const switchFn = app.match(/async function switchSession[\s\S]*?\n  \}\n\n  \/\*\* 会话列表点击/)?.[0];
+  assert.ok(switchFn, 'switchSession source was not found');
+  assert.match(switchFn, /busy = false;\s*\n\s*syncChatFab\(\);\s*\n\s*setSendStopping\(false\);/);
+  assert.match(switchFn, /inputEl\.disabled = false;/);
+});
+
 test('composer lives inside the chat column and aligns with the conversation list', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');

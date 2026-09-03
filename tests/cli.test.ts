@@ -366,6 +366,11 @@ test('agent conversation can be stopped from CLI and server auto-rejects pending
   assert.match(server, /session\.abort\?\.abort\(\)/);
   // 停止通知以 assistant 文本事件落盘（分享导出可见），turn_end 恢复会话可用。
   assert.match(server, /（对话已手动停止）/);
+  // 启动自愈契约：服务重启丢掉在途轮次（含挂起中的确认卡）会留下悬空 turn_start，SSE 回放把
+  // 前端 busy 钉死成「停止」死路（再点即 409「当前没有进行中的对话」）；启动装载须检测
+  // 未闭合轮次并补一帧 stopped turn_end（分配 seq 并落盘，孤儿确认卡随之在前端被禁用）。
+  assert.match(server, /export function hasUnterminatedTurn/);
+  assert.match(server, /if \(hasUnterminatedTurn\(session\.events\)\) broadcast\(session, \{ type: 'turn_end', stopped: true \}\);/);
 });
 
 test('customer portfolio display contract exposes the supported sort controls', () => {
