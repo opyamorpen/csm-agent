@@ -3,7 +3,7 @@ import type { Tool } from '@earendil-works/pi-ai';
 
 export const CUSTOMER_DETAIL_TOOL_NAME = 'get_customer_detail';
 
-/** 客户详情页 12 个 tab 的 key，与 `all`（整表拉取，仅用户明确要求时使用）。 */
+/** 客户详情页 13 个 tab 的 key，与 `all`（整表拉取，仅用户明确要求时使用）。 */
 export const CUSTOMER_DETAIL_SECTIONS = [
   'overview',
   'suggestion_feedback',
@@ -12,6 +12,7 @@ export const CUSTOMER_DETAIL_SECTIONS = [
   'customer_manhour',
   'private_cloud_instance',
   'followup',
+  'web_intel',
   'hemory_fragments',
   'cases',
   'weekly_report',
@@ -29,6 +30,7 @@ const SECTION_LABELS: Record<CustomerDetailSection, string> = {
   customer_manhour: '工时（汇总 + 逐条登记明细）',
   private_cloud_instance: '私有云实例',
   followup: 'CRM 跟进记录',
+  web_intel: '公开动态（轮次报告：最近 3 轮逐条明细，新增条目带 is_new 标记）',
   hemory_fragments: 'Hemory 已确认会议片段（含转写摘要）',
   cases: '客户案例（候选 + 草稿摘要）',
   weekly_report: '实施周报（列表 + 最新一期正文）',
@@ -57,13 +59,13 @@ export const customerDetailTool: Tool = {
     '按需读取当前会话所绑定客户的客户详情页数据（本地已同步数据，结果含同步时间）。' +
     'sections 选择需要的板块，与客户详情页 tab 一一对应：' +
     'overview 概览（档案/风险/机会/完成率）、suggestion_feedback 建议、support_ticket 工单、operations_ticket 运维工单、' +
-    'customer_manhour 工时明细、private_cloud_instance 私有云实例、followup 跟进记录、hemory_fragments Hemory 片段、' +
-    'cases 客户案例、weekly_report 实施周报、actions 待办事项、timeline 统一时间线。' +
+    'customer_manhour 工时明细、private_cloud_instance 私有云实例、followup 跟进记录、web_intel 公开动态轮次报告、' +
+    'hemory_fragments Hemory 片段、cases 客户案例、weekly_report 实施周报、actions 待办事项、timeline 统一时间线。' +
     '默认最小选择：每轮只取与本轮问题直接相关的板块，节省 token；仅当用户明确要求「全部/完整信息」时才传 ["all"]。' +
     'limit 仅作用于事件类板块（建议/工单/运维/私有云/跟进/时间线），默认 50，最大 200。',
   parameters: Type.Object({
     sections: Type.Array(Type.String(), {
-      description: '需要的板块 key 列表；["all"] 表示全部 12 个板块（仅用户明确要求全部信息时使用）',
+      description: '需要的板块 key 列表；["all"] 表示全部 13 个板块（仅用户明确要求全部信息时使用）',
       minItems: 1,
     }),
     limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT, description: '事件类板块条数，默认 50' })),
@@ -92,6 +94,8 @@ export interface CustomerDetailToolDeps {
   /** 工时明细（汇总 + 登记行）。 */
   workhours(customerId: string): Promise<Record<string, unknown>>;
   hemoryFragments(customerId: string, limit: number): Array<Record<string, unknown>>;
+  /** 公开动态轮次报告（run 即报告），取最近 3 轮防 token 灌爆。 */
+  webIntelRounds(customerId: string): Array<Record<string, unknown>>;
   /** 案例：候选 + 草稿列表（含 markdown 渲染由各草稿 detail 拼接成本在服务端做）。 */
   cases(customerId: string): Promise<Record<string, unknown>>;
   weeklyReports(customerId: string): Promise<Record<string, unknown>>;
@@ -150,6 +154,9 @@ export async function makeCustomerDetailResult(
     } else if (section === 'hemory_fragments') {
       const fragments = deps.hemoryFragments(customer.id, limit);
       parts.push(block(label, fragments.length ? fragments.map((f) => JSON.stringify(f)).join('\n') : '本地暂无已确认 Hemory 片段。'));
+    } else if (section === 'web_intel') {
+      const rounds = deps.webIntelRounds(customer.id);
+      parts.push(block(label, rounds.length ? JSON.stringify(rounds, null, 2) : '暂无公开动态轮次记录（不代表没有公开信息，可 web_search 实时检索）。'));
     } else if (section === 'cases') {
       parts.push(block(label, JSON.stringify(await deps.cases(customer.id), null, 2)));
     } else if (section === 'weekly_report') {

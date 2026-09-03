@@ -149,6 +149,38 @@ test('webintel: model failure fails the run without persisting anything', () => 
   assert.equal(service.isFresh('crm-fail'), false);
 }));
 
+test('webintel: refresh archives findings into the sync run; repeats keep the report but do not duplicate evidence', () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-round', name: '轮次客户', shortName: '轮次' });
+  const calls = { count: 0 };
+  const service = new WebIntelService(db, fakeRuntime([
+    { label: '完成 B 轮融资', detail: '融资 1 亿元', occurred_at: '2026-08-01', source_url: 'https://news.example.com/r1', category: 'financing' },
+  ], calls), {
+    getApiKey: () => 'tvly-test',
+    getMaxResults: () => 5,
+    getKeylessEnabled: () => true,
+    fetcher: tavilyStub('轮次'),
+  });
+  const customer = db.getCustomer('crm-round') as Customer;
+  const first = await service.refresh(customer, { force: true });
+  assert.equal(first.saved, 1);
+  assert.equal(first.total, 1);
+  // 第二轮（force）命中同一条旧闻：自然键去重不重复落库（saved=0），轮次报告仍完整留痕（total=1、is_new=false）。
+  const second = await service.refresh(customer, { force: true });
+  assert.equal(second.saved, 0);
+  assert.equal(second.total, 1);
+  assert.equal(db.listEvidence('crm-round').filter((item) => item.kind === 'web_signal').length, 1, '同自然键只存一行');
+  const rounds = db.listWebIntelRuns('crm-round');
+  assert.equal(rounds.length, 2, '每轮一条 run（run 即报告）');
+  // 两轮 stub 执行极快、started_at 可能同毫秒，不假设顺序——按 is_new 集合断言。
+  const newFlags = rounds.map((round) => (round.sourceStatus.web_intelligence.findings as Array<{ is_new: boolean }>)[0]?.is_new).sort();
+  assert.deepEqual(newFlags, [false, true], '第一轮新增、第二轮重复命中标记非新增');
+  for (const round of rounds) {
+    const summary = round.sourceStatus.web_intelligence as Record<string, unknown>;
+    assert.equal(summary.total, 1);
+    assert.equal(summary.searched, 8);
+  }
+}));
+
 test('webintel: freshness window is 14 days from the last successful run', () => withDb(async (db) => {
   db.upsertCustomer({ id: 'crm-gate', name: '节流客户' });
   // 手工种一条成功 run，再以「窗口 + 1 天」的时刻判定：过了 14 天门，应可再搜。

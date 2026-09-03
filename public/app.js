@@ -2533,6 +2533,52 @@
     return wrap;
   }
 
+  /** 公开动态轮次报告（run 即报告）：按轮分组的只读列表（最新在前，条目带新增标记与来源链接）。
+   * 检索动作不在此面板——走客户头部「刷新数据 ▾ → 仅刷新公开动态」，完成后重开客户页可见新轮次。 */
+  function buildWebIntelPanel(customerId) {
+    const container = el('div');
+    container.append(el('div', 'workspace-empty', '正在加载公开动态轮次…'));
+    void (async () => {
+      try {
+        const { rounds } = await api(`/api/customers/${encodeURIComponent(customerId)}/web-intel/rounds?limit=5`);
+        container.replaceChildren();
+        if (!rounds.length) {
+          container.append(el('div', 'workspace-empty', '暂无轮次记录：该客户从未检索过（自动轮换每日 20:00–次日 08:00 推进，或用「刷新数据 ▾ → 仅刷新公开动态」立查）'));
+          return;
+        }
+        const list = el('div', 'business-record-list');
+        for (const round of rounds) {
+          const summary = round.sourceStatus?.web_intelligence ?? {};
+          const item = el('article', 'business-record');
+          if (round.status === 'failed') {
+            item.append(el('strong', null, `${formatDateTime(round.startedAt)} · 检索失败`));
+            item.append(el('div', 'cell-sub', round.error || summary.error || '未知原因'));
+            list.append(item);
+            continue;
+          }
+          item.append(el('strong', null, `${formatDateTime(round.startedAt)} · 检索 ${summary.searched ?? 0} 个角度 · 新增 ${summary.count ?? 0} / 命中 ${summary.total ?? 0} 条`));
+          for (const finding of summary.findings || []) {
+            const line = el('div', 'cell-sub web-intel-finding');
+            if (finding.is_new) line.append(el('span', 'web-intel-new', '新增'));
+            const link = el('a', null, finding.label);
+            link.href = finding.source_url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            line.append(link, ` （${finding.occurred_at}）`);
+            item.append(line);
+          }
+          if (!summary.findings?.length) item.append(el('div', 'cell-sub', '本轮无落库动态——未搜到不构成任何信号'));
+          list.append(item);
+        }
+        container.append(list);
+      } catch (error) {
+        container.replaceChildren();
+        container.append(el('div', 'workspace-empty', `公开动态轮次加载失败：${error.message}`));
+      }
+    })();
+    return container;
+  }
+
   function renderFollowups(events) {
     // 跟进记录 = CRM「csm售后客户」对象关联的销售记录（crm_followup），按销售记录创建时间倒序展示。
     const createdAt = (event) => {
@@ -3300,6 +3346,7 @@
     addTab('customer_manhour', '工时', renderWorkhours(timeline, workhoursData), draftCommand(c, 'customer_manhour', timeline, data.identities));
     addTab('private_cloud_instance', '私有云实例', renderBusinessRecords(timeline, 'private_cloud_instance'), draftCommand(c, 'private_cloud_instance', timeline, data.identities));
     addTab('followup', '跟进记录', renderFollowups(timeline), draftCommand(c, 'followup', timeline, data.identities));
+    addTab('web_intel', '公开动态', buildWebIntelPanel(c.id));
     addTab('hemory_fragments', 'Hemory 片段', buildCustomerHemoryPanel(c, hemoryFragmentsData.fragments || []));
     const casePanel = el('div');
     casePanel.append(drafts);

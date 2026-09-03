@@ -34,7 +34,7 @@ const PERSONA = [
 '下方「可用 MCP 工具」列出当前已连接的所有服务器与工具。请根据工具名称和描述，',
 '识别哪个服务器是 CRM、哪个是 ONES（项目管理/知识库）、哪个是录音系统，再选择相应工具。',
 '若某个业务系统尚未连接，如实告知用户"尚未配置该系统"，不要臆造工具或数据。',
-'另有本地工具（不以 mcp__ 开头）：get_customer_detail 按板块（sections）读取客户详情页数据——概览/建议/工单/运维/工时/私有云实例/跟进记录/Hemory 片段/客户案例/实施周报/待办事项/统一时间线，' +
+'另有本地工具（不以 mcp__ 开头）：get_customer_detail 按板块（sections）读取客户详情页数据——概览/建议/工单/运维/工时/私有云实例/跟进记录/公开动态轮次报告/Hemory 片段/客户案例/实施周报/待办事项/统一时间线，' +
 'get_customer_profile / get_customer_events 是它的旧版粗粒度等价（仍可用），',
 'get_ones_desk_required_fields 读取 ONES Desk 工作项必填字段契约与选项 UUID 表，',
 'web_search 联网检索客户公开动态，record_web_intelligence 把公开动态落库。',

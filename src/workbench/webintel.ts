@@ -46,7 +46,10 @@ export interface WebIntelRunResult {
   status: 'succeeded' | 'skipped' | 'failed';
   reason?: string;
   searched: number;
+  /** 本轮新增落库条数（同一条旧闻跨轮命中不重复计）。 */
   saved: number;
+  /** 本轮分类确认的动态总条数（含跨轮重复命中的旧闻）。 */
+  total: number;
   findings: WebIntelFinding[];
 }
 
@@ -116,7 +119,7 @@ export class WebIntelService {
    */
   async refresh(customer: Customer, options: { force?: boolean } = {}): Promise<WebIntelRunResult> {
     if (!options.force && this.isFresh(customer.id)) {
-      return { customerId: customer.id, status: 'skipped', reason: `近 ${WEB_INTEL_REFRESH_DAYS} 天已检索`, searched: 0, saved: 0, findings: [] };
+      return { customerId: customer.id, status: 'skipped', reason: `近 ${WEB_INTEL_REFRESH_DAYS} 天已检索`, searched: 0, saved: 0, total: 0, findings: [] };
     }
     const run = this.db.createSyncRun('web_intelligence', customer.id);
     try {
@@ -142,9 +145,11 @@ export class WebIntelService {
       }
 
       const findings = collected.length ? await this.classifyWithModel(customer, searchName, collected) : [];
-      const saved: string[] = [];
+      // 轮次存档（run 即报告）：is_new 标记本轮新增；同一条旧闻跨轮命中不重复落库（自然键去重），只在轮次报告里留痕。
+      const archived: Array<WebIntelFinding & { is_new: boolean }> = [];
+      let saved = 0;
       for (const finding of findings) {
-        this.db.addEvidence({
+        const { created } = this.db.addEvidenceIdempotent({
           customerId: customer.id,
           kind: 'web_signal',
           label: finding.label,
@@ -154,10 +159,11 @@ export class WebIntelService {
           sourceSystem: 'web',
           sourceUrl: finding.source_url,
         });
-        saved.push(finding.label);
+        if (created) saved += 1;
+        archived.push({ ...finding, is_new: created });
       }
-      this.db.finishSyncRun(run.id, 'succeeded', { web_intelligence: { status: 'succeeded', count: saved.length } });
-      return { customerId: customer.id, status: 'succeeded', searched, saved: saved.length, findings };
+      this.db.finishSyncRun(run.id, 'succeeded', { web_intelligence: { status: 'succeeded', searched, count: saved, total: findings.length, findings: archived } });
+      return { customerId: customer.id, status: 'succeeded', searched, saved, total: findings.length, findings };
     } catch (error) {
       this.db.finishSyncRun(run.id, 'failed', { web_intelligence: { status: 'failed', error: (error as Error).message } }, (error as Error).message);
       throw error;

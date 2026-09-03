@@ -643,6 +643,21 @@ export class WorkbenchDatabase {
           SELECT 1 FROM case_drafts n WHERE n.customer_id = c.customer_id
             AND (n.updated_at > c.updated_at OR (n.updated_at = c.updated_at AND n.id > c.id))))
     `);
+    // 公开动态证据按自然键 (customer, kind, source_url, occurred_at) 收敛：每键只保留最早一行。
+    // 90 天新闻窗 + 两周轮换会反复命中同一条新闻，历史无唯一约束已产生重复行——不去重会持续堆积
+    // 并按行数抬高风险「公开动态」负向档位（0/1/≥2）；清完存量再建唯一索引兜底（幂等，新库无行可清）。
+    this.db.exec(`
+      DELETE FROM evidence WHERE source_url IS NOT NULL AND id NOT IN (
+        SELECT id FROM evidence e WHERE source_url IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM evidence older WHERE older.source_url IS NOT NULL
+            AND older.customer_id = e.customer_id AND older.kind = e.kind
+            AND older.source_url = e.source_url AND older.occurred_at = e.occurred_at
+            AND (older.created_at < e.created_at OR (older.created_at = e.created_at AND older.id < e.id))
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_natural_key
+        ON evidence(customer_id, kind, source_url, occurred_at);
+    `);
     this.repairMiswrittenDraftItems();
   }
 
@@ -1215,6 +1230,17 @@ export class WorkbenchDatabase {
     return id;
   }
 
+  /** 幂等落公开动态证据：同自然键 (customer, kind, source_url, occurred_at) 已存在时返回既有行（created=false）不重复插入。
+   * 同步轮换与 record_web_intelligence 工具共用——90 天新闻窗 + 两周轮换会反复命中同一条旧闻，不去重会堆积并抬风险负向档位。 */
+  addEvidenceIdempotent(input: EvidenceInput): { id: string; created: boolean } {
+    if (input.sourceUrl) {
+      const existing = this.db.prepare('SELECT id FROM evidence WHERE customer_id=? AND kind=? AND source_url=? AND occurred_at=?')
+        .get(input.customerId, input.kind, input.sourceUrl, input.occurredAt) as Row | undefined;
+      if (existing) return { id: String(existing.id), created: false };
+    }
+    return { id: this.addEvidence(input), created: true };
+  }
+
   listEvidence(customerId: string): EvidenceInput[] {
     return (this.db.prepare('SELECT * FROM evidence WHERE customer_id=? ORDER BY occurred_at DESC').all(customerId) as Row[]).map((row) => ({
       id: String(row.id), customerId: String(row.customer_id), sourceEventId: row.source_event_id as string | null,
@@ -1539,8 +1565,18 @@ export class WorkbenchDatabase {
 
   getSyncRun(id: string): SyncRun | undefined {
     const row = this.db.prepare('SELECT * FROM sync_runs WHERE id=?').get(id) as Row | undefined;
-    return row ? { id: String(row.id), scope: String(row.scope), customerId: row.customer_id as string | null, status: String(row.status) as SyncRun['status'],
-      startedAt: String(row.started_at), finishedAt: row.finished_at as string | null, sourceStatus: parseJson(row.source_status_json, {}), error: row.error as string | null } : undefined;
+    return row ? this.syncRunFromRow(row) : undefined;
+  }
+
+  private syncRunFromRow(row: Row): SyncRun {
+    return { id: String(row.id), scope: String(row.scope), customerId: row.customer_id as string | null, status: String(row.status) as SyncRun['status'],
+      startedAt: String(row.started_at), finishedAt: row.finished_at as string | null, sourceStatus: parseJson(row.source_status_json, {}), error: row.error as string | null };
+  }
+
+  /** 该客户最近的公开动态轮次（run 即报告：sourceStatus.web_intelligence.findings 存本轮明细），最新在前。 */
+  listWebIntelRuns(customerId: string, limit = 10): SyncRun[] {
+    return (this.db.prepare("SELECT * FROM sync_runs WHERE scope='web_intelligence' AND customer_id=? ORDER BY started_at DESC LIMIT ?")
+      .all(customerId, limit) as Row[]).map((row) => this.syncRunFromRow(row));
   }
 
   hasSuccessfulSyncScope(scope: string): boolean {

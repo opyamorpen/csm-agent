@@ -434,8 +434,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       getCustomer: boundCustomer,
       // 落库即重算：web_signal 证据直接参与风险「公开动态」维度与增购机会假设，
       // 此前不重算导致 agent 落库后风险/机会视图滞后到下一次同步。
+      // 幂等落库：与同步轮换同一自然键去重，agent 反复检索同一条新闻不堆积重复行。
       addEvidence: (input) => {
-        const id = workbench.db.addEvidence(input);
+        const { id } = workbench.db.addEvidenceIdempotent(input);
         if (input.customerId) workbench.sync.recompute(input.customerId);
         return id;
       },
@@ -464,6 +465,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           workhours: async (id) => workbench.sync.listCustomerWorkhours(id) as unknown as Record<string, unknown>,
           hemoryFragments: (id, limit) => workbench.db.listHemoryFragments({ customerId: id, status: 'confirmed', limit })
             .map((e) => e as unknown as Record<string, unknown>),
+          webIntelRounds: (id) => workbench.db.listWebIntelRuns(id, 3)
+            .map((run) => run as unknown as Record<string, unknown>),
           // 案例：候选 + 草稿列表 + 最新草稿正文 markdown（客户可读的成品形态）。
           cases: async (id) => {
             const drafts = workbench.db.listCaseDrafts(id);
@@ -759,7 +762,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
           return json(res, 202, workbench.sync.refreshCustomer(customerId));
         }
-        // 公开动态检索：强制刷新（忽略 7 天门），检索+落库+重算风险/机会，同步返回结果。
+        // 公开动态检索：强制刷新（忽略 14 天门），检索+落库+重算风险/机会，同步返回结果。
         if (req.method === 'POST' && sub === '/web-intel') {
           const customer = workbench.db.getCustomer(customerId);
           if (!customer) return json(res, 404, { error: 'customer not found' });
@@ -772,6 +775,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           } catch (error) {
             return json(res, 502, { error: (error as Error).message });
           }
+        }
+        // 公开动态轮次报告（run 即报告）：最近 N 轮的检索明细（findings 含 is_new 新增标记），最新在前。
+        if (req.method === 'GET' && sub === '/web-intel/rounds') {
+          if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
+          const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('limit') ?? 10) || 10));
+          return json(res, 200, { rounds: workbench.db.listWebIntelRuns(customerId, limit) });
         }
         // 增购机会重新分析：强制（忽略指纹/时长门），从会议录音片段 + 公开动态证据重新产出假设，
         // 失败保留旧假设；返回最新列表（含 sources）供三端同源展示。
@@ -1685,7 +1694,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   });
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
-  // 公开动态自动轮换：每日 09:00–19:00（上海）每整点 1 个客户、14 天全员轮换一遍（最久未查优先）。
+  // 公开动态自动轮换：每日 20:00–次日 08:00（上海错峰时段、token 更便宜）每小时检索 1 个客户，约两周全员轮换（最久未查优先）。
   const stopWebIntel = scheduleWebIntelSync(sync);
   // 启动恢复：进程内未跑完的 SyncRun 与被重启烧掉额度的分段 job 都是残留脏数据——
   // 前者落 failed 终态，后者重置回 pending 交给 5s 后的 resumePending 重跑。

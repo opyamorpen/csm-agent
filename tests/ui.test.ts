@@ -1323,6 +1323,26 @@ test('customer page exposes web intelligence refresh next to full sync', () => {
   assert.match(server, /runWebIntelForCustomer\(customerId, \{ force: true \}\)/);
 });
 
+test('customer detail has a web intelligence tab showing per-round reports', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  // tab 契约：位于「跟进记录」与「Hemory 片段」之间，键 web_intel 与 get_customer_detail 板块同名。
+  assert.match(source, /addTab\('followup', '跟进记录',[^\n]*\n\s*addTab\('web_intel', '公开动态', buildWebIntelPanel\(c\.id\)\);/);
+  // 数据契约：拉取轮次报告端点（服务端 run 即报告），失败轮与空态都有话术。
+  assert.match(source, /\/web-intel\/rounds\?limit=5/);
+  assert.match(server, /sub === '\/web-intel\/rounds'/);
+  assert.match(source, /暂无轮次记录：该客户从未检索过/);
+  assert.match(source, /本轮无落库动态——未搜到不构成任何信号/);
+  assert.match(source, /检索失败/);
+  // 轮头口径：新增 N / 命中 M（去重后新增与命中总数分列）；条目带新增徽标与来源链接。
+  assert.match(source, /新增 \$\{summary\.count \?\? 0\} \/ 命中 \$\{summary\.total \?\? 0\} 条/);
+  assert.match(source, /el\('span', 'web-intel-new', '新增'\)/);
+  assert.match(source, /link\.target = '_blank';/);
+  // 样式契约：新增徽标是胶囊样式（两主题经 token 取色，不引入硬编码色值）。
+  assert.match(styles, /\.web-intel-new \{[\s\S]*?border-radius: 999px;[\s\S]*?var\(--accent-soft\)[\s\S]*?\}/);
+});
+
 test('customer header folds the three refresh commands into a dropdown menu', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');

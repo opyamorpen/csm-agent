@@ -53,8 +53,8 @@ const CLI_CAPABILITIES = [
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
-  { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', '/api/web-intel/rotation'],
-    notes: '单客户强制检索（忽略 14 天门）；--rotation 手动排空自动轮换队列（日常由每日 09:00–19:00 上海整点自动检索 1 个客户、14 天全员轮换一遍、最久未查优先，失败次日优先重试）' },
+  { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', 'GET /api/customers/:id/web-intel/rounds', '/api/web-intel/rotation'],
+    notes: '单客户强制检索（忽略 14 天门）；--history 查轮次报告（run 即报告：逐条明细带新增标记，同一条旧闻跨轮不重复落库只在报告留痕）；--rotation 手动排空自动轮换队列（夜间窗口每日 20:00–次日 08:00 上海错峰、每小时 1 个客户、约两周全员轮换、最久未查优先，失败次日优先重试）' },
   { command: 'opportunities', workflow: 'opportunity-analysis', access: 'read-write', api: ['GET /api/customers/:id/overview', 'POST /api/customers/:id/opportunities/refresh'],
     notes: '增购机会假设由 LLM 从会议录音片段+公开动态证据分析产出（数量不固定、按可信度排序、展示前 5 条，逐条附来源）；--refresh 强制重新分析（忽略指纹/24h 门），失败保留旧假设' },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
@@ -134,9 +134,11 @@ function help(): void {
   csm-agent webintel <客户ID或名称> [--json]
     （强制检索该客户最近三个月公开动态（8 个角度：融资/中标/产品/高管/组织/舆情/招聘/政策），
      落库后重算续约风险与增购机会；未搜到不构成任何信号，风险维度按 unknown 处理）
+  csm-agent webintel <客户ID或名称> --history [--json]
+    （轮次报告：最近 10 轮逐条明细（★新增标记 + 来源链接）；同一条旧闻跨轮不重复落库、只在报告留痕）
   csm-agent webintel --rotation [--json]
-    （手动排空自动轮换队列：14 天门内跳过、当天已尝试不重复；日常自动轮换为每日 09:00–19:00（上海）
-     每整点检索 1 个客户、约两周轮完全部客户（最久未查优先，失败次日优先重试）；首次全量排空可能耗时 1 小时以上）
+    （手动排空自动轮换队列：14 天门内跳过、当天已尝试不重复；日常自动轮换为每日 20:00–次日 08:00（上海错峰）
+     每小时检索 1 个客户、约两周轮完全部客户（最久未查优先，失败次日优先重试）；首次全量排空可能耗时 1 小时以上）
   csm-agent opportunities <客户ID或名称> [--refresh] [--json]
     （列出增购机会假设：LLM 从会议录音片段+公开动态证据分析，按可信度取前 5 条、
      逐条附信息来源（会议录音/公开动态，可带链接）；--refresh 强制重新分析，失败保留旧假设）
@@ -340,8 +342,8 @@ async function showCustomer(input: string): Promise<void> {
   console.table((overview.identities ?? []).map((item: any) => ({ system: item.system, externalId: item.external_id, label: item.label, status: item.status })));
 }
 
-/** 公开动态检索：单客户强制刷新（忽略 14 天门）；--rotation 手动排空自动轮换队列（验收/补查用）。 */
-async function webintel(input: string, options: { rotation?: boolean } = {}): Promise<void> {
+/** 公开动态检索：单客户强制刷新（忽略 14 天门）；--history 查轮次报告；--rotation 手动排空自动轮换队列。 */
+async function webintel(input: string, options: { rotation?: boolean; history?: boolean } = {}): Promise<void> {
   if (options.rotation) {
     const run = await request<any>('/api/web-intel/rotation', { method: 'POST' });
     // 首次全量排空最坏 149 客户 × ~33s ≈ 80+ 分钟；等终态上限放宽到 90 分钟。
@@ -359,11 +361,34 @@ async function webintel(input: string, options: { rotation?: boolean } = {}): Pr
     return;
   }
   const customer = await resolveCustomer(input);
+  if (options.history) {
+    const { rounds } = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/web-intel/rounds?limit=10`);
+    if (jsonOutput) return print({ customer: { id: customer.id, name: customer.name }, rounds });
+    console.log(`公开动态轮次报告（${customer.name}，最近 ${rounds.length} 轮，最新在前）`);
+    if (!rounds.length) {
+      console.log('  暂无轮次记录：该客户从未检索过（自动轮换每日 20:00–次日 08:00 推进，或 webintel <客户> 立查）');
+      return;
+    }
+    for (const round of rounds) {
+      const summary = round.sourceStatus?.web_intelligence ?? {};
+      const at = String(round.startedAt ?? '').slice(0, 16).replace('T', ' ');
+      if (round.status === 'failed') {
+        console.log(`  ■ ${at} · 失败：${round.error ?? summary.error ?? '未知原因'}`);
+        continue;
+      }
+      console.log(`  ■ ${at} · 检索 ${summary.searched ?? '?'} 个角度 · 新增 ${summary.count ?? 0} / 命中 ${summary.total ?? 0} 条`);
+      for (const finding of summary.findings ?? []) {
+        console.log(`    ${finding.is_new ? '★新增' : '　　'} [${finding.category}] ${finding.label}（${finding.occurred_at}）${finding.source_url}`);
+      }
+      if (!summary.findings?.length) console.log('    （本轮无落库动态——未搜到不构成任何信号）');
+    }
+    return;
+  }
   const result = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/web-intel`, { method: 'POST' });
   if (jsonOutput) return print(result);
   const statusLabel: Record<string, string> = { succeeded: '检索完成', skipped: '跳过', failed: '失败' };
   console.log(`公开动态检索（${customer.name}）：${statusLabel[result.status] ?? result.status}${result.reason ? ` · ${result.reason}` : ''}`);
-  console.log(`检索角度 ${result.searched} 个，落库 ${result.saved} 条`);
+  console.log(`检索角度 ${result.searched} 个，新增落库 ${result.saved} 条（本轮命中 ${result.total ?? result.saved} 条，旧闻不重复落库）`);
   for (const finding of result.findings ?? []) {
     console.log(`  - [${finding.category}] ${finding.label}（${finding.occurred_at}）${finding.source_url}`);
   }
@@ -1634,9 +1659,12 @@ async function main(): Promise<void> {
   if (command === 'customer') return showCustomer(args.join(' '));
   if (command === 'webintel') {
     const rotation = rawArgs.includes('--rotation');
-    const input = args.filter((item) => item !== '--rotation').join(' ').trim();
+    const history = rawArgs.includes('--history');
+    const input = args.filter((item) => item !== '--rotation' && item !== '--history').join(' ').trim();
+    if (rotation && history) throw new Error('--rotation 与 --history 不能同时使用');
     if (rotation && input) throw new Error('--rotation 不接受客户参数（单客户强制检索直接用 webintel <客户ID或名称>）');
-    return webintel(input, { rotation });
+    if (history && !input) throw new Error('--history 需要客户参数：webintel <客户ID或名称> --history');
+    return webintel(input, { rotation, history });
   }
   if (command === 'opportunities') {
     const refresh = rawArgs.includes('--refresh');

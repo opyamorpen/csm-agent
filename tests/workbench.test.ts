@@ -765,16 +765,23 @@ test('workbench: portfolio sync slot is 02:00 Shanghai (not server-local timezon
   assert.equal(nextPortfolioSlot(new Date('2026-08-25T10:30:00Z')).at.toISOString(), '2026-08-25T18:00:00.000Z', '上海 18:30 顺延到明天 02:00');
 });
 
-test('workbench: web intel rotation ticks hourly on Shanghai 09:00–19:00 and roll to next morning', () => {
-  // 上海 08:30 → 当天 09:00（01:00Z）。
-  const first = nextWebIntelTick(new Date('2026-08-25T00:30:00Z'));
-  assert.equal(first.at.toISOString(), '2026-08-25T01:00:00.000Z');
-  assert.equal(first.hour, 9);
-  // 上海 10:30 → 当天 11:00（03:00Z）。
-  assert.equal(nextWebIntelTick(new Date('2026-08-25T02:30:00Z')).at.toISOString(), '2026-08-25T03:00:00.000Z');
-  // 上海 19:30（11:30Z，当日最后整点位已过）与 20:30（12:30Z）都顺延到次日 09:00。
-  assert.equal(nextWebIntelTick(new Date('2026-08-25T11:30:00Z')).at.toISOString(), '2026-08-26T01:00:00.000Z');
-  assert.equal(nextWebIntelTick(new Date('2026-08-25T12:30:00Z')).hour, 9);
+test('workbench: web intel rotation ticks hourly across the Shanghai night window 20:00–08:00', () => {
+  // 上海 19:05（11:05Z，窗口外）→ 当晚 20:00（12:00Z）。
+  const first = nextWebIntelTick(new Date('2026-08-25T11:05:00Z'));
+  assert.equal(first.at.toISOString(), '2026-08-25T12:00:00.000Z');
+  assert.equal(first.hour, 20);
+  // 上海 20:30（12:30Z）→ 21:00（13:00Z）。
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T12:30:00Z')).at.toISOString(), '2026-08-25T13:00:00.000Z');
+  // 上海 23:30（15:30Z）→ 跨午夜取次日 00:00（16:00Z），槽位归属次日的上海日。
+  const midnight = nextWebIntelTick(new Date('2026-08-25T15:30:00Z'));
+  assert.equal(midnight.at.toISOString(), '2026-08-25T16:00:00.000Z');
+  assert.equal(midnight.hour, 0);
+  assert.equal(midnight.date, '2026-08-26');
+  // 上海凌晨 03:00（2026-08-25T19:00Z = 26 日 03:00）→ 04:00（20:00Z）。
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T19:00:00Z')).at.toISOString(), '2026-08-25T20:00:00.000Z');
+  // 上海 07:30（23:30Z）与 08:30（00:30Z，窗口外）都顺延到当晚 20:00。
+  assert.equal(nextWebIntelTick(new Date('2026-08-24T23:30:00Z')).at.toISOString(), '2026-08-25T12:00:00.000Z');
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T00:30:00Z')).hour, 20);
 });
 
 /** 轮换测试注入的公开动态刷新桩：模拟 WebIntelService.refresh 的真实副作用——
@@ -881,6 +888,40 @@ test('workbench: recent Hemory sync scans a rolling 7-day Shanghai window', asyn
     const second = service.refreshHemoryDate('2026-08-25');
     assert.notEqual(second.id, run.id);
     for (let i = 0; i < 50 && db.getSyncRun(second.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: web_signal evidence dedupes by natural key and migrate cleans legacy duplicates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-evidence-dedup-'));
+  let db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-d1', name: '去重客户' });
+    const first = db.addEvidenceIdempotent({ customerId: 'crm-d1', kind: 'web_signal', label: '融资', detail: '[financing] x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://n.example/1' });
+    const again = db.addEvidenceIdempotent({ customerId: 'crm-d1', kind: 'web_signal', label: '融资（另一轮命中）', detail: '[financing] x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://n.example/1' });
+    assert.equal(first.created, true);
+    assert.equal(again.created, false, '同自然键返回既有行不重复插入');
+    assert.equal(again.id, first.id);
+    // 同 URL 不同日期是两条独立证据；无 URL 的输入没有稳定自然键、不去重。
+    db.addEvidenceIdempotent({ customerId: 'crm-d1', kind: 'web_signal', label: '同文不同日', detail: 'x',
+      occurredAt: '2026-08-02', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://n.example/1' });
+    db.addEvidenceIdempotent({ customerId: 'crm-d1', kind: 'fact', label: '无URL', detail: 'x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'crm' });
+    db.addEvidenceIdempotent({ customerId: 'crm-d1', kind: 'fact', label: '无URL 再来', detail: 'x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'crm' });
+    assert.equal(db.listEvidence('crm-d1').length, 4);
+    // 模拟本特性上线前的存量库：无唯一索引时积累的重复行，重开库由 migrate 收敛并补建索引。
+    (db as any).db.exec('DROP INDEX idx_evidence_natural_key');
+    db.addEvidence({ customerId: 'crm-d1', kind: 'web_signal', label: '历史重复一', detail: 'x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://n.example/1' });
+    db.addEvidence({ customerId: 'crm-d1', kind: 'web_signal', label: '历史重复二', detail: 'x',
+      occurredAt: '2026-08-01', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://n.example/1' });
+    db.close();
+    db = new WorkbenchDatabase(dir);
+    const duplicates = db.listEvidence('crm-d1').filter((item) => item.kind === 'web_signal'
+      && item.sourceUrl === 'https://n.example/1' && item.occurredAt === '2026-08-01');
+    assert.equal(duplicates.length, 1, 'migrate 清理存量重复（每自然键保留最早一行）');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -281,7 +281,7 @@ test('tool names are stable contracts', () => {
   assert.equal(CUSTOMER_EVENTS_TOOL_NAME, 'get_customer_events');
 });
 
-// ── get_customer_detail：客户详情页 12 板块的按需抓取工具 ──
+// ── get_customer_detail：客户详情页 13 板块的按需抓取工具 ──
 import {
   CUSTOMER_DETAIL_TOOL_NAME,
   CUSTOMER_DETAIL_SECTIONS,
@@ -305,6 +305,8 @@ function detailDeps(overrides: Partial<CustomerDetailToolDeps> = {}): CustomerDe
     timeline: () => [event('support_ticket', '工单一'), event('suggestion_feedback', '建议一'), event('crm_followup', '跟进一')],
     workhours: async () => ({ issueId: 'issue-1', totalHours: 100, records: [{ owner: { name: 'CSM' }, hours: 2 }] }),
     hemoryFragments: () => [{ id: 'frag-1', title: '沟通片段' }],
+    webIntelRounds: () => [{ id: 'run-1', startedAt: '2026-09-03T12:10:00.000Z', status: 'succeeded',
+      sourceStatus: { web_intelligence: { status: 'succeeded', searched: 8, count: 1, total: 2, findings: [{ label: '完成融资', is_new: true }] } } }],
     cases: async () => ({ caseCandidate: null, caseDrafts: [{ id: 'cd-1' }], latestDraftMarkdown: '## 背景…' }),
     weeklyReports: async () => ({ reports: [{ id: 'wk-1' }], latestMarkdown: '# 周报…' }),
     actions: () => [{ id: 'act-1', title: '行动一' }],
@@ -315,6 +317,7 @@ function detailDeps(overrides: Partial<CustomerDetailToolDeps> = {}): CustomerDe
 test('get_customer_detail: sections 白名单解析 + all 展开', () => {
   assert.deepEqual(resolveSections(['support_ticket', 'support_ticket', 'bad']), ['support_ticket']);
   assert.equal(resolveSections(['all'])?.length, CUSTOMER_DETAIL_SECTIONS.length, 'all 应展开为全部板块');
+  assert.ok(CUSTOMER_DETAIL_SECTIONS.includes('web_intel' as never), '公开动态轮次报告是详情板块之一');
   assert.equal(resolveSections(['bad']), null);
   assert.equal(resolveSections('overview'), null, '非数组无效');
 });
@@ -326,6 +329,14 @@ test('get_customer_detail: 默认最小选择——只取指定板块，且事�
   assert.ok(r.text.includes('工单一'));
   assert.ok(!r.text.includes('建议一'), '未请求的建议板块不应出现');
   assert.ok(!r.text.includes('## 建议'));
+});
+
+test('get_customer_detail: web_intel 板块输出公开动态轮次报告（含新增标记与空态提示）', async () => {
+  const withRounds = await makeCustomerDetailResult(detailDeps(), { sections: ['web_intel'] });
+  assert.ok(withRounds.text.includes('## 公开动态'), '应含板块标题');
+  assert.ok(withRounds.text.includes('"is_new": true'), '轮次 findings 明细带新增标记');
+  const empty = await makeCustomerDetailResult(detailDeps({ webIntelRounds: () => [] }), { sections: ['web_intel'] });
+  assert.ok(empty.text.includes('暂无公开动态轮次记录'), '空态提示不代表没有公开信息');
 });
 
 test('get_customer_detail: overview 剔除 timeline/caseDrafts/actions（由各自板块承担，防重复拉取）', async () => {

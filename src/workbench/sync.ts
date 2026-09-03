@@ -66,9 +66,15 @@ const ONES_TEAM_ID = process.env.ONES_TEAM_ID ?? 'RDjYMhKq';
 /** 自动/手动增量同步扫描的滚动窗口（上海自然日，含今天）。已入库录音靠分段指纹与 upsert 去重。 */
 export const HEMORY_SYNC_WINDOW_DAYS = 7;
 
-/** 公开动态自动轮换的整点位（上海时区）：每整点至多检索 1 个客户（8 次搜索 + 1 次模型调用），
- * 全天打散避免突发触发 keyless 搜索限流；11 位/天 ≈ 149 客户两周轮换一遍。 */
-export const WEB_INTEL_TICK_HOURS: ReadonlyArray<number> = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+/** 公开动态自动轮换的夜间窗口（上海时区，token 错峰更便宜）：20:00 起、次日 08:00 止（END 排他），
+ * 每小时 1 个槽 = 12 槽/天 ≈ 149 客户约 12.4 天轮完（留 Mac 睡眠漏槽余量仍不超两周）；
+ * 每槽只检索 1 个客户（8 次搜索 + 1 次模型调用），对 keyless 搜索限流温和。 */
+export const WEB_INTEL_NIGHT_START_HOUR = 20;
+export const WEB_INTEL_NIGHT_END_HOUR = 8;
+
+function isWebIntelTickHour(hour: number): boolean {
+  return hour >= WEB_INTEL_NIGHT_START_HOUR || hour < WEB_INTEL_NIGHT_END_HOUR;
+}
 
 export const ONES_CSM_SOURCES = [
   { projectId: 'GL3ysesFPdnAQNIU', projectName: 'ONES Desk', issueTypeId: 'A99xMfkg', issueTypeName: '建议和反馈', sourceType: 'suggestion_feedback' },
@@ -1314,15 +1320,22 @@ export function scheduleHemorySync(service: PortfolioSyncService, db: WorkbenchD
   return () => timer && clearTimeout(timer);
 }
 
-/** 公开动态轮换的下一个整点位（上海时区 09:00–19:00）；窗口外顺延到次日 09:00（明天从 now+24h 推导，防槽位翻日界失败）。 */
+/** 公开动态轮换的下一个时槽（上海时区夜间窗口 20:00–次日 08:00，每小时 1 槽）。
+ * 窗口跨午夜：00:00–07:00 的槽属于次日的上海日——枚举今/明/后天的全部窗口槽按时间排序取当前时刻后的第一槽，
+ * 08:00–20:00 窗口外自然顺延到当晚 20:00。 */
 export function nextWebIntelTick(now = new Date()): { at: Date; date: string; hour: number } {
-  const date = shanghaiDateKey(now);
-  for (const hour of WEB_INTEL_TICK_HOURS) {
-    const at = shanghaiSlot(date, hour);
-    if (at > now) return { at, date, hour };
+  const dates = [0, 1, 2].map((offset) => shanghaiDateKey(new Date(now.getTime() + offset * 24 * 3_600_000)));
+  const candidates: Array<{ at: Date; date: string; hour: number }> = [];
+  for (const date of dates) {
+    for (let hour = 0; hour < 24; hour++) {
+      if (!isWebIntelTickHour(hour)) continue;
+      candidates.push({ at: shanghaiSlot(date, hour), date, hour });
+    }
   }
-  const tomorrow = shanghaiDateKey(new Date(now.getTime() + 24 * 3_600_000));
-  return { at: shanghaiSlot(tomorrow, 9), date: tomorrow, hour: 9 };
+  candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
+  const next = candidates.find((slot) => slot.at > now);
+  // 三天枚举必覆盖下一槽，兜底仅为类型完备。
+  return next ?? { at: shanghaiSlot(dates[2], WEB_INTEL_NIGHT_START_HOUR), date: dates[2], hour: WEB_INTEL_NIGHT_START_HOUR };
 }
 
 export function scheduleWebIntelSync(service: PortfolioSyncService): () => void {
