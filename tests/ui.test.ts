@@ -801,8 +801,8 @@ test('draft generation shows a loading banner and polls job status after attribu
   const tracker = source.match(/function trackDraftGeneration\(jobs\) \{[\s\S]*?\n  \}\n\n  function draftTypeLabel/)?.[0];
   assert.ok(tracker, 'trackDraftGeneration source was not found');
   assert.match(tracker, /\/api\/draft-jobs\?ids=/);
-  // 实时进度契约：横幅按任务渲染「客户 · 日期：阶段文案」，阶段优先取服务端 progress（与周报/案例同源）。
-  assert.match(tracker, /job\.progress \|\| \(job\.status === 'running' \? '正在处理' : '排队中'\)/);
+  // 实时进度契约：横幅按任务渲染「客户 · 日期：阶段文案」，阶段取服务端 progress 的末行（滚动多行日志取当前状态）。
+  assert.match(tracker, /progressTail\(job, '正在处理'\)/);
   // 顶栏短摘要（head）+ 横幅完整明细（summary）：长文案不再整体塞进顶栏状态位。
   assert.match(tracker, /const head = `正在生成草稿（\$\{runningJobs\.length\} 个任务\$\{slow\}，已进行 \$\{duration\}）`/);
   assert.match(tracker, /const summary = `\$\{head\}：\$\{lines\.join\('；'\)\}`;/);
@@ -883,8 +883,8 @@ test('customer detail exposes the weekly report tab with generation, failure ret
   // 孤儿 running（服务重启遗留、永不终结）stalled 按终态处理：清进度行与 busyWeek，失败卡引导重新生成。
   assert.match(poller, /if \(job\.stalled\) \{/);
   assert.match(poller, /delete panel\.dataset\.busyWeek[\s\S]*?任务疑似因服务重启中断（未恢复）/);
-  // 进度展示契约：消费服务端下发的 job.progress（阶段/模型输出字数）+ 已进行时长；轮询无 90 次上限（面板存活即跟踪）。
-  assert.match(poller, /job\.progress \|\|/);
+  // 进度展示契约：消费服务端下发的 job.progress 末行（滚动多行日志取当前状态）+ 已进行时长；轮询无 90 次上限（面板存活即跟踪）。
+  assert.match(poller, /progressTail\(job, '模型撰写中'\)/);
   assert.match(poller, /已进行/);
   assert.match(poller, /panel\.isConnected/);
   assert.match(poller, /attempt < 90 \? 2000 : 5000/);
@@ -1382,8 +1382,8 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   const regenHandler = source.match(/regenerate\.onclick = async \(\) => \{[\s\S]*?finally \{ regenerate\.disabled = false; regenerate\.textContent = '重新生成'; \}/)?.[0];
   assert.ok(regenHandler, '重新生成 handler 存在');
   assert.match(regenHandler, /await openCustomer\(draft\.customerId\);\s*\n\s*void loadCases\(\);\s*\n\s*editCase\(outcome\.draft\)/, '重新生成成功先刷新列表再开新稿');
-  // 进度展示契约：案例轮询消费 job.progress（阶段/检索角度/模型输出字数），锚点存活期间无超时放弃。
-  assert.match(pollCase, /job\.progress \|\|/);
+  // 进度展示契约：案例轮询消费 job.progress 末行（滚动多行日志取当前状态：阶段/检索角度/模型输出字数），锚点存活期间无超时放弃。
+  assert.match(pollCase, /progressTail\(job, '正在处理'\)/);
   assert.match(pollCase, /ensureCaseNotice/);
   assert.match(pollCase, /anchor\.isConnected/);
   assert.match(pollCase, /attempt < 90 \? 2000 : 5000/);
@@ -1801,4 +1801,14 @@ test('header stays single-line: status text ellipsizes, brand/buttons never wrap
   const setStatusFn = source.match(/function setStatus\(cls, text\) \{[\s\S]*?\n  \}/)?.[0];
   assert.ok(setStatusFn, 'setStatus source was not found');
   assert.match(setStatusFn, /statusEl\.lastChild\.title = text/);
+});
+
+test('single-line progress consumers take the last line of the rolling case progress log', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // 案例进度列是滚动多行日志（阶段行 + 末尾流式 tick）：单行展示位（草稿横幅/案例通知条/周报通知条）取末行即当前状态。
+  const helper = source.match(/function progressTail\(job, runningText\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(helper, 'progressTail helper was not found');
+  assert.match(helper, /split\('\\n'\)\.filter\(Boolean\)\.pop\(\)/, '末行提取契约');
+  const usages = source.match(/progressTail\(job, '/g) ?? [];
+  assert.equal(usages.length, 3, '三处单行消费位均走 progressTail');
 });

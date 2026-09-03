@@ -902,7 +902,8 @@ async function waitDraftJobs(jobIds: string[], maxAttempts = 300): Promise<any[]
         finished.push(job ?? { id, status: 'unknown' });
       } else if (job) {
         // 进度文案变化才打印：阶段边界/模型输出增长/重试提示逐条落到终端，超时不再黑箱。
-        const line = job.progress || (job.status === 'running' ? '正在处理' : '排队中');
+        // 案例进度列是滚动多行日志（阶段行 + 末尾流式 tick），单行实时状态取最后一行。
+        const line = String(job.progress ?? '').split('\n').filter(Boolean).pop() || (job.status === 'running' ? '正在处理' : '排队中');
         if (lastPrinted.get(id) !== line) {
           lastPrinted.set(id, line);
           process.stdout.write(`\r生成中：${line}${' '.repeat(8)}`);
@@ -1327,7 +1328,7 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
       console.log(`任务 ${job.id}`);
       console.log(`  客户：${nameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''} · 状态 ${job.status} · 尝试 ${job.attempts} 次`);
       if (job.stalled) console.log('  中断：任务疑似因服务重启中断且未恢复，请重新生成重试');
-      if (job.progress) console.log(`  进度：${job.progress}`);
+      if (job.progress) console.log(String(job.progress).split('\n').map((line, index) => (index === 0 ? `  进度：${line}` : `        ${line}`)).join('\n'));
       if (job.error) console.log(`  错误：${job.error}`);
       if (job.note) console.log(`  备注：${job.note}`);
       if (job.fragments?.length) {

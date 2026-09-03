@@ -4078,7 +4078,7 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
 /** 从任一阶段 prompt 尾部的上下文 JSON 中解析 allowed_source_refs/source_catalog（规划/章节/补写共用同一份注入）。 */
@@ -5444,9 +5444,193 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: plan salvage mode drops drifted items on final attempt instead of failing the job', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'csm-case-salvage-'));
+test('workbench: case progress log rolls phase lines and replaces streaming ticks', () => {
+  const written: string[] = [];
+  const report = createCaseProgressLog((text) => written.push(text));
+  report('[0m01s] 阶段一');
+  report('[0m02s] 阶段二');
+  report('[0m03s] 模型撰写中… 已输出 100 字');
+  report('[0m04s] 模型撰写中… 已输出 200 字');
+  let last = written[written.length - 1]!;
+  assert.equal(last.split('\n').length, 3, '阶段行 + 当前流式 tick');
+  assert.match(last.split('\n').at(-1)!, /已输出 200 字/, 'tick 只刷新末行');
+  report('[0m05s] 阶段三');
+  last = written[written.length - 1]!;
+  assert.ok(!last.includes('模型撰写中'), '新阶段行清除流式 tick');
+  for (let i = 0; i < 20; i++) report(`[1m00s] 阶段补充${i}`);
+  last = written[written.length - 1]!;
+  assert.equal(last.split('\n').length, 12, '阶段行滚动保留最近 12 条');
+  assert.ok(last.includes('阶段补充19'), '最早阶段行滚出、最新保留');
+});
+
+test('workbench: case model slots release during retry backoff so queued chapters proceed', async () => {
+  // 场景：解决方案章两图并发，映射图首试失败后退避睡眠（60ms）、架构图慢流 200ms 占另一路——
+  // 旧排程失败图睡眠占槽，排队的价值章要等架构图结束才能开写；新排程退避放槽，价值章在重试前即取到槽。
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-slot-'));
   const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = caseModelRetryDelays.baseMs;
+  caseModelRetryDelays.baseMs = 60;
+  try {
+    seedCaseCustomer(db);
+    const events: string[] = [];
+    const nap = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    let capAttempts = 0;
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('章节配图')) {
+          if (prompt.includes('需求场景-产品能力映射图')) {
+            capAttempts += 1;
+            events.push(`figure:cap#${capAttempts}`);
+            if (capAttempts === 1) { await nap(40); return { stopReason: 'error', errorMessage: 'relay stall', content: [] }; }
+            return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '场景能力映射'), caption: '映射：需求场景对应产品能力' }) }], stopReason: 'stop' };
+          }
+          events.push('figure:arch');
+          await nap(200);
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '集成架构'), caption: '集成：多系统对接 ONES' }) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          events.push('plan');
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          const refs = casePromptContext(prompt).allowed_source_refs as string[];
+          const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.figures = [
+            { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
+            { section: 'solution', kind: 'architecture', idea: '多系统集成架构', source_refs: [factRef] },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('撰写「方案价值概述」章节正文')) events.push('chapter:value');
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    const valueStart = events.indexOf('chapter:value');
+    const capRetry = events.lastIndexOf('figure:cap#2');
+    assert.ok(valueStart > -1 && capRetry > -1, '价值章与映射图重试均发生');
+    assert.ok(events.indexOf('figure:cap#1') < valueStart, '映射图首次尝试先于价值章');
+    assert.ok(valueStart < capRetry, '退避睡眠不占槽：排队的价值章在图重试前取到槽开写');
+    assert.equal(((db.listCaseDrafts('crm-c1')[0].fields as any).figures ?? []).length, 2, '两图最终均落库');
+  } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case figures start per finished chapter instead of waiting for the whole wave', async () => {
+  // 业务现状章即时定稿、业务诉求章慢流 150ms：现状流程图应在诉求章仍在撰写时开画（旧排程等整波 settle）。
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-figearly-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const events: string[] = [];
+    const nap = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('章节配图')) {
+          events.push(prompt.includes('流程现状图') ? 'figure:flow_current' : 'figure:flow_target');
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG, caption: prompt.includes('流程现状图') ? '客户现状：三套系统并行' : '目标：统一平台流转' }) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          const refs = casePromptContext(prompt).allowed_source_refs as string[];
+          const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.figures = [
+            { section: 'status', kind: 'flow_current', idea: '客户现状流程', source_refs: [factRef] },
+            { section: 'demands', kind: 'flow_target', idea: '目标流程', source_refs: [factRef] },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('撰写「业务诉求」章节正文')) {
+          events.push('chapter:demands');
+          await nap(150);
+          events.push('chapter:demands:end');
+          return { content: [{ type: 'text', text: JSON.stringify(caseChapterContent(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    assert.ok(events.indexOf('figure:flow_current') > -1 && events.indexOf('chapter:demands:end') > -1, '流程图与诉求章均完成');
+    assert.ok(events.indexOf('figure:flow_current') < events.indexOf('chapter:demands:end'),
+      '现状章定稿即开画流程图，不等业务诉求章整波完成');
+    assert.equal(((db.listCaseDrafts('crm-c1')[0].fields as any).figures ?? []).length, 2, '两张流程图均落库');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case enrichment runs parallel to remaining figures and reuses generation contextText', async () => {
+  // 场景：6 个正面反馈片段触发覆盖度补写、映射图慢流 300ms——补写应与图并行（旧排程等全部图完成），
+  // 且补写上下文沿用生成阶段 contextText（修复 inputSummary 键名取错的 level-0 全量回退）。
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-enrichpar-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-ep', name: '补写并行客户' });
+    for (let i = 1; i <= 6; i++) {
+      db.upsertSourceEvent({ customerId: 'crm-ep', sourceSystem: 'hemory', sourceType: 'ai_topic_segment', externalId: `ep:t${i}`,
+        title: `正面反馈话题 ${i}`, occurredAt: '2026-03-05T05:00:00Z', attributionStatus: 'confirmed',
+        payload: { recordingId: `ep-r${i}`, speakers: ['客户'], evidence: [
+          { speaker: '客户', text: `客户说这套系统挺好用的，效率提升明显，流程顺畅多了（第${i}次反馈）` }] } });
+    }
+    const events: string[] = [];
+    const prompts: string[] = [];
+    const nap = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const enrichedContent = { ...CASE_CONTENT, value_items: [...CASE_CONTENT.value_items, '客户反馈系统好用且效率显著提升'] };
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        if (prompt.includes('章节配图') && prompt.includes('需求场景-产品能力映射图')) {
+          events.push('figure:cap');
+          await nap(300);
+          events.push('figure:cap:end');
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '场景能力映射'), caption: '映射：需求场景对应产品能力' }) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('补充完善客户成功案例草稿')) {
+          events.push('enrich');
+          return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(enrichedContent, prompt)) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          const refs = casePromptContext(prompt).allowed_source_refs as string[];
+          const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.figures = [{ section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] }];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-ep');
+    await waitForJob(db, result.jobId!);
+    const enrichAt = events.indexOf('enrich');
+    const figureEnd = events.indexOf('figure:cap:end');
+    assert.ok(enrichAt > -1 && figureEnd > -1, '补写与映射图均发生');
+    assert.ok(enrichAt < figureEnd, '补写与剩余配图并行，不等全部图完成才开始');
+    const draft = db.listCaseDrafts('crm-ep')[0];
+    assert.equal(((draft.fields as any).figures ?? []).length, 1, '第一稿配图保留');
+    assert.ok((draft.fields as any).value_items.includes('客户反馈系统好用且效率显著提升'), '采纳补写第二稿正文');
+    assert.equal((draft.fields as any).coverage.enriched, true);
+    const planPrompt = prompts.find((prompt) => prompt.includes('规划客户成功案例草稿的章节结构'))!;
+    const enrichPrompt = prompts.find((prompt) => prompt.includes('未引用素材清单'))!;
+    const contextOf = (prompt: string) => prompt.slice(prompt.indexOf('上下文：'));
+    assert.equal(contextOf(enrichPrompt), contextOf(planPrompt), '补写上下文=生成阶段同一份 contextText');
+    // 滚动进度契约：多行阶段日志 + 调用尺寸观测行落库（事后可还原相位耗时与真实输入规模）。
+    const job = db.getDraftJob(result.jobId!)!;
+    const lines = String(job.progress ?? '').split('\n');
+    assert.ok(lines.length >= 2, 'progress 多行滚动');
+    assert.ok(lines.every((line) => line.trim().length > 0), '无空行');
+    assert.ok(String(job.progress).includes('补充完善调用（输入 ~'), '补写尺寸观测行保留');
+    assert.ok(String(job.progress).includes('配图「需求场景-产品能力映射图」调用'), '配图尺寸观测行保留');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: plan salvage mode drops drifted items on final attempt instead of failing the job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-salvage-'));  const db = new WorkbenchDatabase(dir);
   // 规划三次尝试之间的指数退避（5s/15s）远超 waitForJob 窗口，测试内加速。
   const previousBaseMs = caseModelRetryDelays.baseMs;
   caseModelRetryDelays.baseMs = 1;

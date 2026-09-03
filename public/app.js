@@ -196,6 +196,11 @@
     return Number.isNaN(date.getTime()) ? '未知' : date.toLocaleString('zh-CN', { hour12: false });
   }
 
+  // 生成任务的 progress 现在是滚动多行日志（阶段行 + 末尾流式 tick）；单行展示位只取最后一行即当前状态。
+  function progressTail(job, runningText) {
+    return String(job.progress || '').split('\n').filter(Boolean).pop() || (job.status === 'running' ? runningText : '排队中');
+  }
+
   function formatMoney(value) {
     if (value === null || value === undefined) return '未知';
     return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
@@ -1526,7 +1531,7 @@
         const customerNameOf = (customerId) => (customersCache.find((item) => item.id === customerId) || {}).name || customerId;
         // 每任务一行「客户 · 日期：阶段文案」；阶段优先取服务端 progress，缺失按状态兜底（与周报/案例同款）。
         const lines = runningJobs.map((job) => {
-          const phase = job.progress || (job.status === 'running' ? '正在处理' : '排队中');
+          const phase = progressTail(job, '正在处理');
           const where = `${customerNameOf(job.customerId)}${job.dateKey ? ` · ${job.dateKey}` : ''}`;
           return `${where}：${phase}`;
         });
@@ -2491,7 +2496,7 @@
       }
       if (job.status === 'failed') { if (notice) notice.remove(); return { error: job.error || '未知原因' }; }
       if (job.stalled) { if (notice) notice.remove(); return { error: '任务疑似因服务重启中断（未恢复），请重新生成' }; }
-      if (notice) notice.textContent = `案例生成中…（${job.progress || (job.status === 'running' ? '正在处理' : '排队中')}）`;
+      if (notice) notice.textContent = `案例生成中…（${progressTail(job, '正在处理')}）`;
       await new Promise((resolve) => setTimeout(resolve, attempt < 90 ? 2000 : 5000));
     }
     return { detached: true };
@@ -2664,7 +2669,7 @@
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       const minutes = Math.floor(elapsed / 60);
       const duration = `${minutes}:${String(elapsed % 60).padStart(2, '0')}`;
-      const phase = job.progress || (job.status === 'running' ? '模型撰写中' : '排队中');
+      const phase = progressTail(job, '模型撰写中');
       const slow = elapsed >= 180 ? '，耗时较长，仍在后台执行' : '';
       notice.textContent = `${weekStart.slice(5)} 周报生成中…（${phase}，已进行 ${duration}${slow}）`;
       const stillViewing = weeklyViewWeek(panel) === weekStart;
