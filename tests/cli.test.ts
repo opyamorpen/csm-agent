@@ -29,8 +29,11 @@ test('CLI exposes machine-readable core capability coverage without a running se
   for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
-  // 公开动态检索能力：CLI 命令与强制刷新端点同源。
+  // 公开动态检索能力：CLI 命令与强制刷新端点同源；自动轮换（14 天全员、整点 1 客户）的排空端点同在。
   assert.ok(capabilities.some((item) => item.workflow === 'web-intelligence-refresh' && item.api.includes('/api/customers/:id/web-intel')));
+  const webIntelCapability = capabilities.find((item) => item.workflow === 'web-intelligence-refresh')!;
+  assert.ok(webIntelCapability.api.includes('/api/web-intel/rotation'), 'webintel capability must expose the rotation drain endpoint');
+  assert.match(webIntelCapability.notes ?? '', /14 天全员轮换/);
   // 增购机会 v2：LLM 假设分析能力（读 overview + 强制重新分析端点）与展示口径说明。
   const opportunityCapability = capabilities.find((item) => item.workflow === 'opportunity-analysis');
   assert.ok(opportunityCapability && opportunityCapability.api.includes('POST /api/customers/:id/opportunities/refresh'));
@@ -90,6 +93,12 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.match(alertCapability.notes ?? '', /必须填写原因\/动作/);
 });
 
+test('CLI webintel --rotation rejects customer arguments before any request', () => {
+  const result = runCli('webintel', '--rotation', '某客户');
+  assert.notEqual(result.status, 0, '--rotation 与客户参数同用应报错');
+  assert.match(`${result.stdout}${result.stderr}`, /--rotation 不接受客户参数/);
+});
+
 test('CLI provides standard global help and version commands', () => {
   const help = runCli('help');
   assert.equal(help.status, 0, help.stderr);
@@ -99,6 +108,9 @@ test('CLI provides standard global help and version commands', () => {
   // 增购机会命令：--refresh 强制重新分析与来源标注说明。
   assert.match(help.stdout, /csm-agent opportunities <客户ID或名称> \[--refresh\] \[--json\]/);
   assert.match(help.stdout, /逐条附信息来源/);
+  // 公开动态：单客户强制检索之外，--rotation 手动排空自动轮换队列（14 天全员轮换、整点 1 客户）。
+  assert.match(help.stdout, /csm-agent webintel --rotation \[--json\]/);
+  assert.match(help.stdout, /每整点检索 1 个客户/);
   assert.doesNotMatch(help.stdout, /action accept/);
   assert.match(help.stdout, /csm-agent action complete <待办ID\.\.\.> \[--outcome <实际结果>\]/);
   // 两态模型：批量完成仅未完成生效，已完成跳过。

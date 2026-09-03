@@ -57,7 +57,7 @@ npm test
 npm run dev
 ```
 
-默认地址为 [http://127.0.0.1:3210](http://127.0.0.1:3210)。首次进入后在“设置”中配置 CRM、ONES、Hemory MCP；点击“同步数据”执行首次导入。服务每天 02:00 刷新 CRM/ONES，并在中国时间 13:00、20:00 拉取 Hemory 当天 `00:00` 至执行时刻的完整转写，再等待 Agent 大模型完成话题分段。客户详情支持单客户刷新。
+默认地址为 [http://127.0.0.1:3210](http://127.0.0.1:3210)。首次进入后在“设置”中配置 CRM、ONES、Hemory MCP；点击“同步数据”执行首次导入。服务每天 02:00（上海时区）刷新 CRM/ONES，并在中国时间 13:00、20:00 拉取 Hemory 当天 `00:00` 至执行时刻的完整转写，再等待 Agent 大模型完成话题分段。客户公开动态自动轮换：每天中国时间 09:00–19:00 每个整点检索 1 个客户（8 角度联网搜索 + 1 次模型分类，全天打散避免搜索限流），按「最久未查优先」约两周轮完全部非流失客户——14 天窗口内不重复搜、每天每客户至多尝试 1 次、失败的客户次日最先重试。客户详情支持单客户刷新（公开动态强制立查，不受 14 天门限制）。
 
 ### 构建版本与旧进程检测
 
@@ -89,6 +89,7 @@ csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
 csm-agent customer <CRM客户ID> # 概览含续约风险五维度明细与全量完成率
 csm-agent webintel <CRM客户ID> # 强制检索该客户最近三个月公开动态（8 角度），落库并重算风险/机会
+csm-agent webintel --rotation # 手动排空自动轮换队列（14 天门内跳过、当天已尝试不重复；首次全量排空可能耗时 1 小时以上）
 csm-agent opportunities <CRM客户ID> [--refresh] # 增购机会假设（LLM 从会议录音片段+公开动态分析，按可信度前 5 条、逐条附来源）；--refresh 强制重新分析
 csm-agent timeline <CRM客户ID> support_ticket # 四列工作项，按创建时间倒序
 csm-agent workhours <CRM客户ID> # 总工时和登记明细，按工时日期倒序

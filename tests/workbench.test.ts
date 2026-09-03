@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { assessRisk } from '../src/workbench/risk.js';
-import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
+import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, nextPortfolioSlot, nextWebIntelTick, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskDescription, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption, unknownOnesDeskFieldIds } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
 import { collectOpportunitySignals, OpportunityService, parseOpportunityAnalysis } from '../src/workbench/opportunity.js';
@@ -756,6 +756,104 @@ test('workbench: Shanghai schedule uses 13:00 and current-day full bounds', () =
   assert.equal(bounds.startedAt, '2026-08-24T16:00:00.000Z');
   assert.equal(bounds.endedAt, now.toISOString());
   assert.equal(nextHemorySlot(new Date('2026-08-25T06:00:00Z')).hour, 20);
+});
+
+test('workbench: portfolio sync slot is 02:00 Shanghai (not server-local timezone)', () => {
+  // 上海 01:30 → 当天 02:00；上海 02:30 → 次日 02:00（上海 02:00 = 前一日 18:00Z）。
+  assert.equal(nextPortfolioSlot(new Date('2026-08-25T17:30:00Z')).at.toISOString(), '2026-08-25T18:00:00.000Z');
+  assert.equal(nextPortfolioSlot(new Date('2026-08-25T18:30:00Z')).at.toISOString(), '2026-08-26T18:00:00.000Z');
+  assert.equal(nextPortfolioSlot(new Date('2026-08-25T10:30:00Z')).at.toISOString(), '2026-08-25T18:00:00.000Z', '上海 18:30 顺延到明天 02:00');
+});
+
+test('workbench: web intel rotation ticks hourly on Shanghai 09:00–19:00 and roll to next morning', () => {
+  // 上海 08:30 → 当天 09:00（01:00Z）。
+  const first = nextWebIntelTick(new Date('2026-08-25T00:30:00Z'));
+  assert.equal(first.at.toISOString(), '2026-08-25T01:00:00.000Z');
+  assert.equal(first.hour, 9);
+  // 上海 10:30 → 当天 11:00（03:00Z）。
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T02:30:00Z')).at.toISOString(), '2026-08-25T03:00:00.000Z');
+  // 上海 19:30（11:30Z，当日最后整点位已过）与 20:30（12:30Z）都顺延到次日 09:00。
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T11:30:00Z')).at.toISOString(), '2026-08-26T01:00:00.000Z');
+  assert.equal(nextWebIntelTick(new Date('2026-08-25T12:30:00Z')).hour, 9);
+});
+
+/** 轮换测试注入的公开动态刷新桩：模拟 WebIntelService.refresh 的真实副作用——
+ * 先落一条 web_intelligence SyncRun（latestWebIntelAttemptAt 的排序依据），再按剧本返回。 */
+function webIntelRotationStub(db: WorkbenchDatabase, script: Record<string, 'succeeded' | 'failed'>): {
+  injected: (customer: any, options: { force?: boolean }) => Promise<{ status: string; saved: number }>;
+  attempted: string[];
+} {
+  const attempted: string[] = [];
+  return {
+    attempted,
+    injected: async (customer: any, options: { force?: boolean }) => {
+      attempted.push(`${customer.id}:${options.force === true ? 'force' : 'gated'}`);
+      const run = db.createSyncRun('web_intelligence', customer.id);
+      const outcome = script[customer.id] ?? 'succeeded';
+      if (outcome === 'failed') {
+        db.finishSyncRun(run.id, 'failed', {}, 'stub 失败');
+        return { status: 'failed', saved: 0 };
+      }
+      db.finishSyncRun(run.id, 'succeeded', {});
+      db.addEvidence({ customerId: customer.id, kind: 'web_signal', label: `${customer.name} 完成融资`, detail: '[financing] 融资 1 亿元',
+        occurredAt: '2026-09-01', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/stub' });
+      return { status: 'succeeded', saved: 1 };
+    },
+  };
+}
+
+test('workbench: web intel tick picks least-recently-attempted customer, once per Shanghai day, churn excluded', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-webintel-tick-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-a', name: '客户甲' });
+    db.upsertCustomer({ id: 'crm-b', name: '客户乙' });
+    db.upsertCustomer({ id: 'crm-lost', name: '流失客户', contractStatus: '已流失', explicitNonrenewal: true });
+    const stub = webIntelRotationStub(db, { 'crm-a': 'failed' });
+    const service = new PortfolioSyncService(db, {} as any, async () => [], stub.injected);
+    // tick1：两个候选都从未尝试（attemptedAt 平局）→ id 字典序取 crm-a，剧本让它失败（不新鲜但当天已尝试）。
+    const first = await service.runWebIntelTick();
+    assert.equal(first.customerId, 'crm-a');
+    assert.equal(first.status, 'failed');
+    assert.equal(first.saved, 0);
+    // tick2：crm-a 今天已尝试（失败也算）→ 从未尝试的 crm-b（attemptedAt=0 最古老）优先；流失客户永不入选。
+    const second = await service.runWebIntelTick();
+    assert.equal(second.customerId, 'crm-b');
+    assert.equal(second.status, 'succeeded');
+    assert.equal(second.saved, 1);
+    // tick3：当天全部尝试过 → 空转跳过（失败客户当天不重锤，次日整点最先重试）。
+    const third = await service.runWebIntelTick();
+    assert.equal(third.customerId, null);
+    assert.equal(third.status, 'skipped');
+    assert.deepEqual(stub.attempted, ['crm-a:gated', 'crm-b:gated'], '整点 tick 一律走 14 天门（force=false），流失客户从未被检索');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: web intel rotation drain processes remaining customers once, records summary, and re-drain is idempotent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-webintel-drain-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    db.upsertCustomer({ id: 'crm-x', name: '客户丙' });
+    db.upsertCustomer({ id: 'crm-y', name: '客户丁' });
+    const stub = webIntelRotationStub(db, {});
+    const service = new PortfolioSyncService(db, {} as any, async () => [], stub.injected);
+    const run = service.refreshWebIntelRotation();
+    for (let i = 0; i < 100 && db.getSyncRun(run.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const finished = db.getSyncRun(run.id)!;
+    assert.equal(finished.status, 'succeeded');
+    assert.equal(finished.scope, 'web-intel:rotation');
+    const summary = finished.sourceStatus.web_intelligence as Record<string, unknown>;
+    assert.equal(summary.attempted, 2);
+    assert.equal(summary.saved, 2);
+    assert.equal((summary.customers as Array<{ customerId: string }>).length, 2);
+    assert.equal(db.listEvidence('crm-x').filter((item) => item.kind === 'web_signal').length, 1);
+    // 同日再排空：全部当天已尝试 → 空转成功（attempted 0），不重复检索。
+    const again = service.refreshWebIntelRotation();
+    for (let i = 0; i < 100 && db.getSyncRun(again.id)?.status === 'running'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const againSummary = db.getSyncRun(again.id)!.sourceStatus.web_intelligence as Record<string, unknown>;
+    assert.equal(againSummary.attempted, 0);
+    assert.equal(stub.attempted.length, 2);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: recent Hemory sync scans a rolling 7-day Shanghai window', async () => {

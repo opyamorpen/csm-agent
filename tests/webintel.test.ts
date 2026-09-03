@@ -106,7 +106,7 @@ test('webintel: refresh searches all angles, persists only model-validated findi
   const finding = evidence.find((item) => item.label.includes('融资'))!;
   assert.equal(finding.detail, '[financing] 融资 2 亿元', 'detail 带 category 前缀');
   assert.equal(finding.sourceUrl, 'https://news.example.com/funding');
-  // 7 天新鲜度门：刚成功过，非 force 的再次刷新应跳过。
+  // 14 天新鲜度门：刚成功过，非 force 的再次刷新应跳过。
   assert.equal(service.isFresh('crm-wi'), true);
   const skipped = await service.refresh(customer);
   assert.equal(skipped.status, 'skipped');
@@ -149,9 +149,9 @@ test('webintel: model failure fails the run without persisting anything', () => 
   assert.equal(service.isFresh('crm-fail'), false);
 }));
 
-test('webintel: freshness window is 7 days from the last successful run', () => withDb(async (db) => {
+test('webintel: freshness window is 14 days from the last successful run', () => withDb(async (db) => {
   db.upsertCustomer({ id: 'crm-gate', name: '节流客户' });
-  // 手工种一条 8 天前的成功 run：过了 7 天门，应可再搜。
+  // 手工种一条成功 run，再以「窗口 + 1 天」的时刻判定：过了 14 天门，应可再搜。
   const run = db.createSyncRun('web_intelligence', 'crm-gate');
   db.finishSyncRun(run.id, 'succeeded', {}, undefined);
   const last = db.latestWebIntelSyncAt('crm-gate')!;

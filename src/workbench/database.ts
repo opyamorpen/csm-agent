@@ -1556,6 +1556,15 @@ export class WorkbenchDatabase {
     return Number.isNaN(at.getTime()) ? null : at;
   }
 
+  /** 该客户最近一次公开动态检索尝试的开始时间（含失败）；从未尝试过返回 null。轮换队列按它排序。 */
+  latestWebIntelAttemptAt(customerId: string): Date | null {
+    const row = this.db.prepare("SELECT started_at FROM sync_runs WHERE scope='web_intelligence' AND customer_id=? ORDER BY started_at DESC LIMIT 1")
+      .get(customerId) as Row | undefined;
+    if (!row?.started_at) return null;
+    const at = new Date(String(row.started_at));
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+
   createDraftJob(customerId: string, fingerprint: string, sourceEventIds: string[], kind: DraftJobKind = 'hemory'): DraftGenerationJob {
     const existing = this.db.prepare('SELECT * FROM draft_generation_jobs WHERE fingerprint=?').get(fingerprint) as Row | undefined;
     if (existing) return this.draftJobFromRow(existing);

@@ -7,6 +7,7 @@ import { hemorySegmentationFingerprint } from './hemory.js';
 import type { HemorySegmentationResult } from './hemory.js';
 import { assessRisk } from './risk.js';
 import { normalizeAfterSalesStage, type Customer, type SourceEvent, type SourceEventInput, type SyncRun, type WorkhourRecord } from './types.js';
+import { isWebIntelFresh } from './webintel.js';
 
 const CRM_FIELDS = {
   id: '_id',
@@ -64,6 +65,10 @@ const ONES_TEAM_ID = process.env.ONES_TEAM_ID ?? 'RDjYMhKq';
 
 /** 自动/手动增量同步扫描的滚动窗口（上海自然日，含今天）。已入库录音靠分段指纹与 upsert 去重。 */
 export const HEMORY_SYNC_WINDOW_DAYS = 7;
+
+/** 公开动态自动轮换的整点位（上海时区）：每整点至多检索 1 个客户（8 次搜索 + 1 次模型调用），
+ * 全天打散避免突发触发 keyless 搜索限流；11 位/天 ≈ 149 客户两周轮换一遍。 */
+export const WEB_INTEL_TICK_HOURS: ReadonlyArray<number> = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
 export const ONES_CSM_SOURCES = [
   { projectId: 'GL3ysesFPdnAQNIU', projectName: 'ONES Desk', issueTypeId: 'A99xMfkg', issueTypeName: '建议和反馈', sourceType: 'suggestion_feedback' },
@@ -409,6 +414,7 @@ export class PortfolioSyncService {
   private onesqlGrammarReady?: Promise<void>;
   private hemoryRun?: SyncRun;
   private webIntelRun = new Set<string>();
+  private webIntelRotationRun?: SyncRun;
 
   constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpGateway,
     private readonly segmentRecording: (recording: SourceEvent) => Promise<HemorySegmentationResult>,
@@ -431,6 +437,71 @@ export class PortfolioSyncService {
       return { status: 'failed', saved: 0 };
     } finally {
       this.webIntelRun.delete(customerId);
+    }
+  }
+
+  /** 轮换队列选客户：非流失 ∧ 不在 14 天新鲜度窗口内 ∧ 今天（上海日）还没尝试过（失败也算）；
+   * 按「最近一次尝试时间」升序取队首——从未查过的客户最优先补齐，昨天失败的今天排最前自动重试。
+   * 队列完全由 sync_runs 推导，无内存状态：服务停几小时后未查到的客户仍是最久未尝试，后续整点自然捡起。 */
+  private pickWebIntelRotationCustomer(now = new Date()): Customer | undefined {
+    const today = shanghaiDateKey(now);
+    const candidates = this.db.listCustomers()
+      .filter((customer) => customer.contractStatus !== '已流失' && customer.explicitNonrenewal !== true)
+      .filter((customer) => !isWebIntelFresh(this.db.latestWebIntelSyncAt(customer.id), now))
+      .filter((customer) => {
+        const attempt = this.db.latestWebIntelAttemptAt(customer.id);
+        return !(attempt && shanghaiDateKey(attempt) === today);
+      })
+      .map((customer) => ({ customer, attemptedAt: this.db.latestWebIntelAttemptAt(customer.id)?.getTime() ?? 0 }));
+    if (!candidates.length) return undefined;
+    candidates.sort((left, right) => left.attemptedAt - right.attemptedAt || left.customer.id.localeCompare(right.customer.id));
+    return candidates[0].customer;
+  }
+
+  /** 整点轮换：检索队首 1 个客户（14 天门生效），saved>0 级联重算风险/预警/机会；
+   * 手动排空进行中时让位（共享 webIntelRotationRun 守卫）。 */
+  async runWebIntelTick(now = new Date()): Promise<{ customerId: string | null; status: string; saved: number }> {
+    if (this.webIntelRotationRun && this.db.getSyncRun(this.webIntelRotationRun.id)?.status === 'running') {
+      return { customerId: null, status: 'skipped', saved: 0 };
+    }
+    const customer = this.pickWebIntelRotationCustomer(now);
+    if (!customer) return { customerId: null, status: 'skipped', saved: 0 };
+    const result = await this.runWebIntelForCustomer(customer.id, { force: false });
+    if (result.saved > 0) this.recompute(customer.id);
+    return { customerId: customer.id, status: result.status, saved: result.saved };
+  }
+
+  /** 手动排空轮换队列（CLI/验收用）：串行处理当前全部入选客户。已尝试过的客户当天不重复，
+   * 失败客户当天不重锤、次日整点最先重试；与整点 tick 通过 webIntelRotationRun 互斥。 */
+  refreshWebIntelRotation(): SyncRun {
+    if (this.webIntelRotationRun && this.db.getSyncRun(this.webIntelRotationRun.id)?.status === 'running') return this.webIntelRotationRun;
+    const run = this.db.createSyncRun('web-intel:rotation');
+    this.webIntelRotationRun = run;
+    void this.executeWebIntelRotation(run);
+    return run;
+  }
+
+  private async executeWebIntelRotation(run: SyncRun): Promise<void> {
+    const outcomes: Array<{ customer: string; customerId: string; status: string; saved: number }> = [];
+    try {
+      for (;;) {
+        const customer = this.pickWebIntelRotationCustomer();
+        if (!customer) break;
+        const result = await this.runWebIntelForCustomer(customer.id, { force: false });
+        outcomes.push({ customer: customer.name, customerId: customer.id, status: result.status, saved: result.saved });
+        if (result.saved > 0) this.recompute(customer.id);
+      }
+      const failed = outcomes.filter((outcome) => outcome.status === 'failed');
+      const summary = { status: failed.length ? 'partial' : 'succeeded', attempted: outcomes.length,
+        saved: outcomes.reduce((sum, outcome) => sum + outcome.saved, 0), failed: failed.length, customers: outcomes } as SyncRun['sourceStatus'][string];
+      this.db.finishSyncRun(run.id, failed.length ? 'partial' : 'succeeded', { web_intelligence: summary },
+        failed.length ? failed.map((outcome) => `${outcome.customer}: 检索失败`).join('; ') : undefined);
+    } catch (error) {
+      this.db.finishSyncRun(run.id, 'failed',
+        { web_intelligence: { status: 'failed', error: (error as Error).message, attempted: outcomes.length, customers: outcomes } as SyncRun['sourceStatus'][string] },
+        (error as Error).message);
+    } finally {
+      this.webIntelRotationRun = undefined;
     }
   }
 
@@ -657,12 +728,14 @@ export class PortfolioSyncService {
     } catch (error) {
       statuses.ones = { status: 'failed', error: (error as Error).message };
     }
-    // 公开动态：每客户 7 天新鲜度门（force=false），失败只计 partial 不阻断其他源。
+    // 公开动态：每客户 14 天新鲜度门（force=false），失败只计 partial 不阻断其他源。
+    // 本段在 crm/ones/hemory 的 recompute 之后执行——落了新信号必须逐客户补重算，否则风险/机会要等下次触发才看到。
     try {
       let savedCount = 0;
       for (const customer of this.db.listCustomers()) {
         const result = await this.runWebIntelForCustomer(customer.id, { force: false });
         if (result.status === 'failed') throw new Error(`${customer.name}: 公开动态检索失败`);
+        if (result.saved > 0) this.recompute(customer.id);
         savedCount += result.saved;
       }
       statuses.web_intelligence = { status: 'succeeded', count: savedCount };
@@ -1195,17 +1268,24 @@ export function nextHemorySlot(now = new Date()): { at: Date; date: string; hour
   return { at: shanghaiSlot(tomorrow, 13), date: tomorrow, hour: 13 };
 }
 
+/** 组合同步（CRM+ONES）的每日槽位：上海时区 02:00，与 Hemory/web-intel 调度同口径（不随服务器时区漂移）。
+ * 「明天」从 now+24h 推导——从槽位时刻加固定小时数对 02:00 槽（= 前一日 18:00Z）翻不过上海日界。 */
+export function nextPortfolioSlot(now = new Date()): { at: Date; date: string } {
+  const date = shanghaiDateKey(now);
+  const at = shanghaiSlot(date, 2);
+  if (at > now) return { at, date };
+  const tomorrow = shanghaiDateKey(new Date(now.getTime() + 24 * 3_600_000));
+  return { at: shanghaiSlot(tomorrow, 2), date: tomorrow };
+}
+
 export function schedulePortfolioSync(service: PortfolioSyncService): () => void {
   let timer: NodeJS.Timeout | undefined;
   const schedule = () => {
-    const now = new Date();
-    const next = new Date(now);
-    next.setHours(2, 0, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
+    const next = nextPortfolioSlot();
     timer = setTimeout(() => {
       service.refreshPortfolioSources();
       schedule();
-    }, next.getTime() - now.getTime());
+    }, Math.max(0, next.at.getTime() - Date.now()));
     timer.unref();
   };
   schedule();
@@ -1230,6 +1310,31 @@ export function scheduleHemorySync(service: PortfolioSyncService, db: WorkbenchD
     timer.unref();
   };
   catchUp();
+  schedule();
+  return () => timer && clearTimeout(timer);
+}
+
+/** 公开动态轮换的下一个整点位（上海时区 09:00–19:00）；窗口外顺延到次日 09:00（明天从 now+24h 推导，防槽位翻日界失败）。 */
+export function nextWebIntelTick(now = new Date()): { at: Date; date: string; hour: number } {
+  const date = shanghaiDateKey(now);
+  for (const hour of WEB_INTEL_TICK_HOURS) {
+    const at = shanghaiSlot(date, hour);
+    if (at > now) return { at, date, hour };
+  }
+  const tomorrow = shanghaiDateKey(new Date(now.getTime() + 24 * 3_600_000));
+  return { at: shanghaiSlot(tomorrow, 9), date: tomorrow, hour: 9 };
+}
+
+export function scheduleWebIntelSync(service: PortfolioSyncService): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  const schedule = () => {
+    const next = nextWebIntelTick();
+    timer = setTimeout(() => {
+      void service.runWebIntelTick();
+      schedule();
+    }, Math.max(0, next.at.getTime() - Date.now()));
+    timer.unref();
+  };
   schedule();
   return () => timer && clearTimeout(timer);
 }

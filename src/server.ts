@@ -19,7 +19,7 @@ import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent }
 import { WorkbenchDatabase } from './workbench/database.js';
 import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
-import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync } from './workbench/sync.js';
+import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync } from './workbench/sync.js';
 import { WebIntelService } from './workbench/webintel.js';
 import { OpportunityService } from './workbench/opportunity.js';
 import { RISK_RULE_VERSION } from './workbench/risk.js';
@@ -618,6 +618,11 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
       if (req.method === 'POST' && path === '/api/sync') {
         return json(res, 202, workbench.sync.refreshAll());
+      }
+      // 公开动态轮换手动排空（验收/补查用）：串行处理全部入选客户（14 天门内跳过、当天已尝试不重复）；
+      // 日常由 09:00–19:00 整点 tick 自动推进，本端点与 tick 互斥。
+      if (req.method === 'POST' && path === '/api/web-intel/rotation') {
+        return json(res, 202, workbench.sync.refreshWebIntelRotation());
       }
       if (req.method === 'POST' && path === '/api/hemory/sync') {
         const body = await readBody(req);
@@ -1680,6 +1685,8 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   });
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
+  // 公开动态自动轮换：每日 09:00–19:00（上海）每整点 1 个客户、14 天全员轮换一遍（最久未查优先）。
+  const stopWebIntel = scheduleWebIntelSync(sync);
   // 启动恢复：进程内未跑完的 SyncRun 与被重启烧掉额度的分段 job 都是残留脏数据——
   // 前者落 failed 终态，后者重置回 pending 交给 5s 后的 resumePending 重跑。
   const orphanedRuns = db.failOrphanedSyncRuns();
@@ -1732,6 +1739,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   server.on('close', () => {
     stopPortfolio();
     stopHemory();
+    stopWebIntel();
     clearTimeout(resumeTimer);
     if (staleTimer) clearInterval(staleTimer);
     db.close();

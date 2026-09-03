@@ -22,11 +22,16 @@ export const WEB_INTEL_ANGLES: ReadonlyArray<{ key: string; label: string; query
 /** 合法角度分类（与 record_web_intelligence 工具一致）。 */
 const WEB_INTEL_CATEGORIES = new Set(['financing', 'contract', 'product', 'executive', 'org', 'sentiment', 'hiring', 'policy', 'other']);
 
-/** 全量同步的公开动态新鲜度门（天）：窗口内不重复搜，避免每天 × 全客户 × 8 次搜索。 */
-export const WEB_INTEL_REFRESH_DAYS = 7;
+/** 公开动态新鲜度门（天）：与自动轮换周期对齐（每日整点 1 客户、约两周轮完全员），窗口内不重复搜。 */
+export const WEB_INTEL_REFRESH_DAYS = 14;
 
 /** 每角度取用的最大结果数（进 LLM 分类的候选量）。 */
 const PER_ANGLE_LIMIT = 5;
+
+/** 上次成功检索是否仍在新鲜度窗口内：同步路径的门（WebIntelService.isFresh）与轮换队列的入选判断共用同一口径。 */
+export function isWebIntelFresh(lastSuccessAt: Date | null, now = new Date()): boolean {
+  return lastSuccessAt !== null && now.getTime() - lastSuccessAt.getTime() < WEB_INTEL_REFRESH_DAYS * 86_400_000;
+}
 
 export interface WebIntelFinding {
   label: string;
@@ -100,10 +105,9 @@ export class WebIntelService {
     private readonly deps: WebIntelDeps,
   ) {}
 
-  /** 该客户最近一次成功的公开动态检索是否仍在新鲜度窗口内（7 天门，节流全量同步）。 */
+  /** 该客户最近一次成功的公开动态检索是否仍在新鲜度窗口内（14 天门，节流全量同步）。 */
   isFresh(customerId: string, now = new Date()): boolean {
-    const last = this.db.latestWebIntelSyncAt(customerId);
-    return last !== null && now.getTime() - last.getTime() < WEB_INTEL_REFRESH_DAYS * 86_400_000;
+    return isWebIntelFresh(this.db.latestWebIntelSyncAt(customerId), now);
   }
 
   /**
