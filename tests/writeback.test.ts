@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { validateCustomerBoundDraft, resolveDraftCustomer, applyDraftCustomerOptionBinding, enrichCustomerContext } from '../src/server.js';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import type { ConfirmDraft } from '../src/tools/confirm.js';
-import type { CustomerContext } from '../src/tools/customer.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-writeback-'));
@@ -48,31 +47,29 @@ function deskDraft(overrides: Partial<ConfirmDraft> = {}): ConfirmDraft {
 test('writeback: resolveDraftCustomer resolves identity carried by the draft itself', async () => {
   await withDb(async (db) => {
     seedDeskCustomer(db);
-    // 草稿自带客户名（未绑定会话的贴图/聊天记录提单）：唯一精确匹配即解析成功。
-    const byName = resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '客户甲' } }), null);
+    // 草稿自带客户名：唯一精确匹配即解析成功（会话与客户解耦，草稿自含身份是唯一来源）。
+    const byName = resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '客户甲' } }));
     assert.equal(byName?.customer.id, 'crm-1');
     assert.equal(byName?.onesOptionId, 'option-1');
     // 真实事故形态：customer_id 是模型乱填的非 ID 串（CRM 授权错误拿不到），名称仍可解析。
-    const garbageId = resolveDraftCustomer(db, deskDraft({ fields: { customer_id: '未提供（CRM 查询接口报 NO_LICENSE_QUOTE_ERROR）', customer_name: '客户甲' } }), null);
+    const garbageId = resolveDraftCustomer(db, deskDraft({ fields: { customer_id: '未提供（CRM 查询接口报 NO_LICENSE_QUOTE_ERROR）', customer_name: '客户甲' } }));
     assert.equal(garbageId?.customer.id, 'crm-1');
-    // 草稿无客户信息时回落会话上下文（绑定会话旧路径）。
-    const session: CustomerContext = { customer_name: '客户甲', crm_customer_id: 'crm-1' };
-    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: {} }), session)?.customer.id, 'crm-1');
-    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: {} }), { customer_name: '客户甲' })?.customer.id, 'crm-1');
+    // 草稿无客户信息时返回 null——会话不承载客户状态，没有兜底级。
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: {} })), null);
     // 简称命中给 canonical 客户。
     db.upsertCustomer({ id: 'crm-2', name: '乙全称公司', shortName: '乙简称', renewalDate: null, contractValue: 0 });
-    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '乙简称' } }), null)?.customer.name, '乙全称公司');
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '乙简称' } }))?.customer.name, '乙全称公司');
     // 同名歧义与完全无匹配都返回 null（宁可拒绝也不模糊归属）。
     db.upsertCustomer({ id: 'crm-3', name: '客户甲', renewalDate: null, contractValue: 0 });
-    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '客户甲' } }), null), null);
-    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '不存在的客户' } }), null), null);
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '客户甲' } })), null);
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '不存在的客户' } })), null);
   });
 });
 
 test('writeback: desk approval deterministically binds the resolved customer option', async () => {
   await withDb(async (db) => {
     seedDeskCustomer(db);
-    const binding = resolveDraftCustomer(db, deskDraft(), null)!;
+    const binding = resolveDraftCustomer(db, deskDraft())!;
     // 模型自行搜索的选项 UUID 不可信（相似名误绑风险）：批准前确定性纠正为 confirmed 选项。
     const wrongOption = deskDraft({ target_arguments: { fieldValues: [
       { fieldID: 'JrvswW8P', value: 'similar-but-wrong' },
@@ -95,7 +92,7 @@ test('writeback: desk approval deterministically binds the resolved customer opt
     assert.equal((missing.target_arguments.fieldValues as Array<{ fieldID: string }>).some((v) => v.fieldID === 'JrvswW8P'), true);
     // 无 confirmed 选项的客户：确定性绑定报可操作错误。
     db.upsertCustomer({ id: 'crm-bare', name: '无身份客户', renewalDate: null, contractValue: 0 });
-    const bareBinding = resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '无身份客户' } }), null)!;
+    const bareBinding = resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '无身份客户' } }))!;
     assert.match(applyDraftCustomerOptionBinding(deskDraft(), bareBinding) ?? '', /未解析到已确认的 ONES 客户选项/);
     assert.match(validateCustomerBoundDraft(deskDraft(), null) ?? '', /草稿未携带可唯一解析的客户/);
   });
@@ -104,7 +101,7 @@ test('writeback: desk approval deterministically binds the resolved customer opt
 test('writeback: CRM followup and workhour validate against the resolved customer identity', async () => {
   await withDb(async (db) => {
     seedDeskCustomer(db);
-    const binding = resolveDraftCustomer(db, deskDraft(), null)!;
+    const binding = resolveDraftCustomer(db, deskDraft())!;
     assert.equal(validateCustomerBoundDraft(deskDraft({ target_system: 'crm', record_type: 'followup', target_arguments: { customerId: 'crm-1' } }), binding), null);
     assert.match(validateCustomerBoundDraft(deskDraft({ target_system: 'crm', record_type: 'followup', target_arguments: { customerId: 'crm-2' } }), binding) ?? '', /CRM 回写参数/);
     // 未解析到售后工时项（未同步）时工时校验拒绝，而不是放进 ONES 端才报错。
@@ -112,7 +109,7 @@ test('writeback: CRM followup and workhour validate against the resolved custome
   });
 });
 
-test('writeback: enrichCustomerContext backfills authoritative ids for session convenience', async () => {
+test('writeback: enrichCustomerContext resolves authoritative ids for the stateless identity lookup', async () => {
   await withDb(async (db) => {
     seedDeskCustomer(db);
     const enriched = enrichCustomerContext(db, { customer_name: '客户甲' });

@@ -471,7 +471,11 @@ test('agent CLI exposes attachments and the customer-detail tool; config llm set
   const runner = source.match(/async function runCustomerAgent[\s\S]*?\n}\n\nasync function main/)?.[0];
   assert.ok(runner, 'runCustomerAgent was not found');
   assert.match(runner, /raw\.toString\('base64'\)/);
-  assert.match(runner, /attachments\.length \? \{ message: prompt, attachments \} : \{ message: prompt \}/);
+  // 会话与客户解耦：POST /api/sessions 不带 customerId，客户全称注入消息文本（message）。
+  assert.match(runner, /request<any>\('\/api\/sessions', \{ method: 'POST' \}\)/);
+  assert.match(runner, /（客户：\$\{customer\.name\}）/);
+  assert.match(runner, /attachments\.length \? \{ message, attachments \} : \{ message \}/);
+  assert.doesNotMatch(runner, /customerId: customer\.id/);
 
   // --vision 白名单校验 + 仅随 payload 提交。
   assert.match(source, /--vision 只接受 on\/off/);

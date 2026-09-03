@@ -20,8 +20,8 @@ const DESK_TYPE_LABELS: Record<OnesDeskDraftType, string> = {
 };
 
 export interface OnesDeskToolDeps {
-  /** 当前会话绑定客户的 CRM「使用版本」（公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版）；未绑定时为 null。 */
-  getUsageVersion(): string | null | undefined;
+  /** 按客户全称/简称唯一精确匹配取 CRM「使用版本」（公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版）；未提供或未命中为 null。 */
+  getUsageVersion(customerName?: string): string | null | undefined;
 }
 
 /** Local tool: the authoritative ONES Desk required-field contract (labels + option UUIDs + fallbacks). */
@@ -29,13 +29,14 @@ export const onesDeskFieldsTool: Tool = {
   name: ONES_DESK_FIELDS_TOOL_NAME,
   description:
     '获取 ONES Desk 工作项（建议和反馈/工单/运维工单）除标题/项目/类型/客户信息/描述之外的全部人工必填字段契约：' +
-    '字段 fieldID、完整选项 label→UUID 表、证据不足时的兜底值，以及当前绑定客户按 CRM 使用版本解析出的实例部署类型。' +
+    '字段 fieldID、完整选项 label→UUID 表、证据不足时的兜底值，以及按 customer_name 解析出的实例部署类型（未提供客户时按私有云兜底）。' +
     '新建 ONES 工作项前必须调用本工具：get_issue_fields 会对大选项集（所属模块/所属产品）截断且部分选项 UUID 无效，' +
     '不可用于枚举选项；本工具的选项表是唯一可靠来源。fieldValues 中每个规格字段都必须携带其中一个有效选项 UUID。',
   parameters: Type.Object({
     record_type: Type.Union([Type.Literal('suggestion'), Type.Literal('ticket'), Type.Literal('operations')], {
       description: '工作项类型：suggestion=建议和反馈、ticket=工单、operations=运维工单',
     }),
+    customer_name: Type.Optional(Type.String({ description: '客户全称或简称（唯一精确匹配，用于实例部署类型的 CRM 使用版本判定）' })),
   }),
 };
 
@@ -45,7 +46,7 @@ export function makeOnesDeskFieldsHandler(deps: OnesDeskToolDeps) {
     if (!recordType || !(['suggestion', 'ticket', 'operations'] as const).includes(recordType)) {
       return { text: 'record_type 必须是 suggestion / ticket / operations 之一。', isError: true };
     }
-    const usageVersion = deps.getUsageVersion();
+    const usageVersion = deps.getUsageVersion(typeof args.customer_name === 'string' ? args.customer_name.trim() : undefined);
     const deployment = resolveDeploymentType(usageVersion);
     const specs = ONES_DESK_FIELD_SPECS[recordType as OnesDeskDraftType];
     const fields = specs.map((spec: OnesDeskFieldSpec) => {

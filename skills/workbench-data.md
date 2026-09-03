@@ -9,7 +9,7 @@ description: 从工作台本地数据库读取客户的已同步数据（档案�
 
 ## 什么时候用本地工具
 
-会话绑定客户后（客户详情页发起的对话，或已通过 resolve_customer 锁定身份），回答下列问题**先用本地工具**：
+对话中已明确客户身份后（客户全称/简称已知），回答下列问题**先用本地工具**——会话不绑定客户，每次调用都要带 `customer_name`（或 `customer_id`）参数：
 
 - 主入口是 `get_customer_detail`：按板块（sections）抓取客户详情页数据，与客户页 tab 一一对应——
   `overview` 概览（档案/风险/机会/完成率）、`suggestion_feedback` 建议、`support_ticket` 工单、`operations_ticket` 运维、
@@ -25,7 +25,7 @@ description: 从工作台本地数据库读取客户的已同步数据（档案�
 
 - 工具返回提示数据 stale（超过 36 小时未同步）：先告知用户数据可能滞后，建议用户在客户页点「刷新三套系统」；用户明确要最新数据时再用 MCP 工具实时查询。
 - 需要本地没有的数据（例如某工单的最新评论、CRM 记录的最新字段值）。
-- 会话未绑定客户时，先完成 csm-identity-resolution，再回到本地工具。
+- 会话尚未明确客户是哪一家时，先完成 csm-identity-resolution（resolve_customer 无状态解析出权威标识），再回到本地工具。
 
 ## 硬性规则
 

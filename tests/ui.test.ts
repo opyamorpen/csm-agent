@@ -630,22 +630,18 @@ test('hemory attributed view groups fragments by customer with collapsed folds',
   assert.match(styles, /\.customer-group\[open\] > \.customer-group-title::before \{ transform: rotate\(90deg\)/);
 });
 
-test('ask-agent button creates a customer-bound session instead of reusing the active one', () => {
+test('ask-agent button opens a fresh floating conversation with the customer named in the prefill', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  // 显示契约：「询问 Agent」必须复用/新建绑定当前客户的会话（ensureCustomerSession），
-  // 不得直接把消息发进当前激活会话（曾导致把问题发进绑定别的客户的旧会话）。
+  // 会话与客户完全解耦：入口不再建绑定会话——新会话 + 就地弹悬浮面板，客户身份由预填文本携带
+  //（本地工具/回写草稿按 customer_name 唯一解析），不得把问题发进当前激活的旧会话。
   const ask = source.match(/const ask = el\('button', 'quiet-command', '询问 Agent'\);[\s\S]*?\n    };/)?.[0];
   assert.ok(ask, 'ask agent button source was not found');
-  assert.match(ask, /await ensureCustomerSession\(c\)/);
+  assert.match(ask, /await newSession\(\)/);
+  assert.match(ask, /await openFloatingChat\(\)/);
   assert.match(ask, /最近三个月的公开动态/);
-  const ensure = source.match(/async function ensureCustomerSession[\s\S]*?\n  }\n/)?.[0];
-  assert.ok(ensure, 'ensureCustomerSession source was not found');
-  assert.match(ensure, /sessionCustomerId === customer\.id/);
-  assert.match(ensure, /JSON\.stringify\(\{ customerId: customer\.id \}\)/);
-  // 会话切换要回填绑定客户，供按钮判断是否可复用。
-  const switchFn = source.match(/async function switchSession[\s\S]*?\n  }\n\n  async function newSession/)?.[0];
-  assert.ok(switchFn, 'switchSession source was not found');
-  assert.match(switchFn, /sessionCustomerId = meta\?\.customerId \?\? null/);
+  // 绑定会话机制整体移除：ensureCustomerSession 与 sessionCustomerId 不得复活。
+  assert.doesNotMatch(source, /ensureCustomerSession/);
+  assert.doesNotMatch(source, /sessionCustomerId/);
 });
 
 test('session list supports share, archive and an archived fold with restore', () => {
@@ -785,8 +781,29 @@ test('agent chat opens as a floating dock from anywhere in the workbench', () =>
   assert.match(app, /chatFloatingNew\.onclick = \(\) => void newSession\(\);/);
   assert.match(app, /chatFloatingExpand\.onclick = \(\) => \{ closeFloatingChat\(\); showView\('agent'\); \};/);
   // 悬浮球点击 = 开新会话 + 就地弹面板：每次点击默认新对话（先建会话后弹层，旧会话消息不闪现）；
-  // 「询问 Agent」入口不受影响——它走 ensureCustomerSession 绑定客户会话，语义与悬浮球不同。
+  // 「询问 Agent」入口同口径（新会话+弹面板，另带客户名预填），也不走 showView('agent')。
   assert.match(app, /chatFab\.onclick = \(\) => void \(async \(\) => \{ await newSession\(\); await openFloatingChat\(\); \}\)\(\);/);
+});
+
+test('conversation empty-state affordances removed (quick actions + customer context card)', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 会话与客户解耦的显示面：快捷指令 chips（模板占位符从不智能替换）与客户上下文卡
+  //（绑定语义已删）整簇移除；注释字面量一并清干净防反断言被注释误伤。
+  assert.doesNotMatch(html, /id="quickActions"/);
+  assert.doesNotMatch(html, /data-template/);
+  assert.doesNotMatch(html, /id="customerCard"/);
+  assert.doesNotMatch(html, /cc-empty/);
+  assert.doesNotMatch(html, /先让助手解析客户身份/);
+  assert.doesNotMatch(app, /quickActions/);
+  assert.doesNotMatch(app, /renderCustomerCard/);
+  assert.doesNotMatch(app, /customer_context/);
+  assert.doesNotMatch(css, /\.customer-card/);
+  assert.doesNotMatch(css, /#quickActions/);
+  assert.doesNotMatch(css, /\.chip:hover/);
+  // 全局 .hidden 是 53 处显隐复用的工具类，删样式块时不得误伤。
+  assert.match(css, /\.hidden \{ display: none !important; \}/);
 });
 
 test('sidebar scrollbar only appears on hover inside its own track pad', () => {

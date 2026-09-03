@@ -24,9 +24,17 @@ async function withDb(fn: (db: WorkbenchDatabase) => Promise<void> | void): Prom
   try { await fn(db); } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-function dbHandlers(db: WorkbenchDatabase, customerId: string | null) {
+/** 与服务端接线同口径：按调用参数解析客户（全称/简称唯一精确匹配，或 CRM _id 直取）。 */
+function dbHandlers(db: WorkbenchDatabase) {
   return makeWorkbenchToolHandlers({
-    getCustomer: () => (customerId ? { id: customerId, name: db.getCustomer(customerId)?.name ?? '' } : null),
+    resolveCustomer: (name, id) => {
+      if (id) { const c = db.getCustomer(id); if (c) return { id: c.id, name: c.name }; }
+      if (name) {
+        const matches = db.listCustomers(name).filter((c) => c.name === name || c.shortName === name);
+        if (matches.length === 1) return { id: matches[0].id, name: matches[0].name };
+      }
+      return null;
+    },
     overview: (id) => db.overview(id),
     timeline: (id, limit) => db.listTimeline(id, limit).map((e) => e as unknown as Record<string, unknown>),
   });
@@ -34,17 +42,20 @@ function dbHandlers(db: WorkbenchDatabase, customerId: string | null) {
 
 test('workbench tools: profile returns overview with freshness note', () => withDb(async (db) => {
   db.upsertCustomer({ id: 'crm-1', name: '客户甲', renewalDate: '2026-12-01T00:00:00.000Z', contractValue: 100 });
-  const handlers = dbHandlers(db, 'crm-1');
-  const r = await handlers.profile();
+  const handlers = dbHandlers(db);
+  const r = await handlers.profile({ customer_name: '客户甲' });
   assert.equal(r.isError, undefined);
   assert.ok(r.text.includes('客户工作台档案'));
   assert.ok(r.text.includes('数据新鲜度') || r.text.includes('超过 36 小时'), '应输出新鲜度提示');
   assert.ok(r.text.includes('"name": "客户甲"'));
 }));
 
-test('workbench tools: profile fails with guidance when no customer is bound', () => withDb(async (db) => {
-  const handlers = dbHandlers(db, null);
-  await assert.rejects(handlers.profile(), /未绑定客户/);
+test('workbench tools: profile fails with guidance when the customer cannot be resolved from args', () => withDb(async (db) => {
+  db.upsertCustomer({ id: 'crm-1', name: '客户甲' });
+  const handlers = dbHandlers(db);
+  // 缺参数与名称未命中（会话不绑定客户，身份只能来自调用参数）都要给可读引导。
+  await assert.rejects(handlers.profile({}), /未能唯一解析客户/);
+  await assert.rejects(handlers.profile({ customer_name: '不存在的客户' }), /未能唯一解析客户/);
 }));
 
 test('workbench tools: events returns synced timeline entries', () => withDb(async (db) => {
@@ -53,13 +64,16 @@ test('workbench tools: events returns synced timeline entries', () => withDb(asy
     customerId: 'crm-1', sourceSystem: 'ones', sourceType: 'support_ticket', externalId: 'ticket-1',
     title: '工单一', payload: {}, occurredAt: '2026-08-20T02:00:00.000Z', payloadHash: 'h1',
   } as never);
-  const handlers = dbHandlers(db, 'crm-1');
-  const r = await handlers.events({});
+  const handlers = dbHandlers(db);
+  const r = await handlers.events({ customer_name: '客户甲' });
   assert.ok(r.text.includes('ticket-1'));
-  const filtered = await handlers.events({ sourceType: 'crm_followup' });
+  const filtered = await handlers.events({ customer_name: '客户甲', sourceType: 'crm_followup' });
   assert.ok(filtered.text.includes('没有已同步的'), '按类型过滤无结果时应说明本地没有不代表源系统没有');
-  const filteredHit = await handlers.events({ sourceType: 'support_ticket' });
+  const filteredHit = await handlers.events({ customer_name: '客户甲', sourceType: 'support_ticket' });
   assert.ok(filteredHit.text.includes('ticket-1'));
+  // 简称同样可解析（与 resolve_customer / 草稿解析同口径）。
+  const byShort = await handlers.events({ customer_name: '客户甲' });
+  assert.ok(byShort.text.includes('ticket-1'));
 }));
 
 // HTTP stub: keyed-Tavily responses come back as JSON the tool parses.
@@ -229,10 +243,11 @@ test('keyless ring order rotates across calls', () => {
 test('record_web_intelligence: persists findings as web_signal evidence', () => withDb(async (db) => {
   db.upsertCustomer({ id: 'crm-1', name: '客户甲' });
   const handler = makeRecordWebIntelligenceHandler({
-    getCustomer: () => ({ id: 'crm-1', name: '客户甲' }),
+    resolveCustomer: (name) => (name === '客户甲' ? { id: 'crm-1', name: '客户甲' } : null),
     addEvidence: (input) => db.addEvidence(input),
   });
   const r = await handler({
+    customer_name: '客户甲',
     findings: [
       { label: '完成 B 轮融资', detail: '融资 2 亿元', occurred_at: '2026-08-01', source_url: 'https://news.example.com/1', category: 'financing' },
       { label: '无来源动态', detail: '会被跳过', occurred_at: '2026-08-02', source_url: '', category: 'other' },
@@ -255,10 +270,10 @@ test('record_web_intelligence: rejects empty or incomplete findings', async () =
   try {
     db.upsertCustomer({ id: 'crm-1', name: '客户甲' });
     const handler = makeRecordWebIntelligenceHandler({
-      getCustomer: () => ({ id: 'crm-1', name: '客户甲' }),
+      resolveCustomer: (name) => (name === '客户甲' ? { id: 'crm-1', name: '客户甲' } : null),
       addEvidence: (input) => db.addEvidence(input),
     });
-    const empty = await handler({ findings: [] });
+    const empty = await handler({ customer_name: '客户甲', findings: [] });
     assert.equal(empty.isError, true);
     const incomplete = await handler({ findings: [{ label: '无日期', source_url: 'https://x.example.com' }] });
     assert.equal(incomplete.isError, true);
@@ -269,11 +284,15 @@ test('record_web_intelligence: rejects empty or incomplete findings', async () =
   }
 });
 
-test('record_web_intelligence: requires a bound customer', async () => {
-  const handler = makeRecordWebIntelligenceHandler({ getCustomer: () => null, addEvidence: () => '' });
-  const r = await handler({ findings: [{ label: 'x', occurred_at: '2026-08-01', source_url: 'https://x.example.com' }] });
-  assert.equal(r.isError, true);
-  assert.ok(r.text.includes('未绑定客户'));
+test('record_web_intelligence: requires a deterministically resolvable customer_name', async () => {
+  const handler = makeRecordWebIntelligenceHandler({ resolveCustomer: () => null, addEvidence: () => '' });
+  // 缺 customer_name 与名称未唯一命中都拒绝（落库归属必须确定，会话不兜底）。
+  const missing = await handler({ findings: [{ label: 'x', occurred_at: '2026-08-01', source_url: 'https://x.example.com' }] });
+  assert.equal(missing.isError, true);
+  assert.ok(missing.text.includes('customer_name'));
+  const unmatched = await handler({ customer_name: '不在工作台的客户', findings: [{ label: 'x', occurred_at: '2026-08-01', source_url: 'https://x.example.com' }] });
+  assert.equal(unmatched.isError, true);
+  assert.ok(unmatched.text.includes('未在工作台唯一匹配到客户'));
 });
 
 test('tool names are stable contracts', () => {
@@ -293,7 +312,7 @@ import {
 function detailDeps(overrides: Partial<CustomerDetailToolDeps> = {}): CustomerDetailToolDeps {
   const event = (sourceType: string, title: string) => ({ id: `${sourceType}-1`, sourceType, title, occurredAt: '2026-08-20T02:00:00.000Z' });
   return {
-    getCustomer: () => ({ id: 'crm-1', name: '客户甲' }),
+    resolveCustomer: (name, id) => (name === '客户甲' || id === 'crm-1' ? { id: 'crm-1', name: '客户甲' } : null),
     overview: () => ({
       customer: { id: 'crm-1', name: '客户甲', syncedAt: new Date().toISOString() },
       risk: { score: 42, level: 'yellow' },
@@ -323,7 +342,7 @@ test('get_customer_detail: sections 白名单解析 + all 展开', () => {
 });
 
 test('get_customer_detail: 默认最小选择——只取指定板块，且事件类按类型过滤', async () => {
-  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['support_ticket'] });
+  const r = await makeCustomerDetailResult(detailDeps(), { customer_name: '客户甲', sections: ['support_ticket'] });
   assert.equal(r.isError, undefined);
   assert.ok(r.text.includes('## 工单'), '应含板块标题');
   assert.ok(r.text.includes('工单一'));
@@ -332,15 +351,15 @@ test('get_customer_detail: 默认最小选择——只取指定板块，且事�
 });
 
 test('get_customer_detail: web_intel 板块输出公开动态轮次报告（含新增标记与空态提示）', async () => {
-  const withRounds = await makeCustomerDetailResult(detailDeps(), { sections: ['web_intel'] });
+  const withRounds = await makeCustomerDetailResult(detailDeps(), { customer_name: '客户甲', sections: ['web_intel'] });
   assert.ok(withRounds.text.includes('## 公开动态'), '应含板块标题');
   assert.ok(withRounds.text.includes('"is_new": true'), '轮次 findings 明细带新增标记');
-  const empty = await makeCustomerDetailResult(detailDeps({ webIntelRounds: () => [] }), { sections: ['web_intel'] });
+  const empty = await makeCustomerDetailResult(detailDeps({ webIntelRounds: () => [] }), { customer_name: '客户甲', sections: ['web_intel'] });
   assert.ok(empty.text.includes('暂无公开动态轮次记录'), '空态提示不代表没有公开信息');
 });
 
 test('get_customer_detail: overview 剔除 timeline/caseDrafts/actions（由各自板块承担，防重复拉取）', async () => {
-  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['overview'] });
+  const r = await makeCustomerDetailResult(detailDeps(), { customer_name: '客户甲', sections: ['overview'] });
   assert.ok(r.text.includes('## 概览'));
   assert.ok(r.text.includes('"score": 42'));
   assert.ok(!r.text.includes('概览时间线切片'), 'overview 内嵌时间线应被剔除');
@@ -349,18 +368,22 @@ test('get_customer_detail: overview 剔除 timeline/caseDrafts/actions（由各�
 });
 
 test('get_customer_detail: 工时/周报/案例板块走各自服务层', async () => {
-  const r = await makeCustomerDetailResult(detailDeps(), { sections: ['customer_manhour', 'weekly_report', 'cases', 'actions'] });
+  const r = await makeCustomerDetailResult(detailDeps(), { customer_name: '客户甲', sections: ['customer_manhour', 'weekly_report', 'cases', 'actions'] });
   for (const label of ['## 工时', '## 实施周报', '## 客户案例', '## 待办事项']) assert.ok(r.text.includes(label), `缺少板块 ${label}`);
   assert.ok(r.text.includes('"totalHours": 100'));
   assert.ok(r.text.includes('周报…'));
   assert.ok(r.text.includes('背景…'));
 });
 
-test('get_customer_detail: 未绑定客户返回可读错误，坏 sections 同上', async () => {
-  const unbound = await makeCustomerDetailResult(detailDeps({ getCustomer: () => null }), { sections: ['overview'] });
-  assert.equal(unbound.isError, true);
-  assert.ok(unbound.text.includes('未绑定客户'));
-  const bad = await makeCustomerDetailResult(detailDeps(), { sections: ['bad'] });
+test('get_customer_detail: 客户未解析返回可读错误，坏 sections 同上', async () => {
+  // 缺客户参数与名称未唯一命中（会话不绑定客户，身份只能来自调用参数）都返回同一可读引导。
+  const unresolved = await makeCustomerDetailResult(detailDeps({ resolveCustomer: () => null }), { customer_name: '客户甲', sections: ['overview'] });
+  assert.equal(unresolved.isError, true);
+  assert.ok(unresolved.text.includes('未能唯一解析客户'));
+  const missing = await makeCustomerDetailResult(detailDeps(), { sections: ['overview'] });
+  assert.equal(missing.isError, true);
+  assert.ok(missing.text.includes('未能唯一解析客户'));
+  const bad = await makeCustomerDetailResult(detailDeps(), { customer_name: '客户甲', sections: ['bad'] });
   assert.equal(bad.isError, true);
   assert.ok(bad.text.includes(CUSTOMER_DETAIL_TOOL_NAME));
 });

@@ -12,7 +12,6 @@
   const newSessionBtn = document.getElementById('newSession');
   const recordListEl = document.getElementById('recordList');
   const recordCountEl = document.getElementById('recordCount');
-  const quickActions = document.getElementById('quickActions');
 
   const settingsBtn = document.getElementById('settingsBtn');
   const settingsClose = document.getElementById('settingsClose');
@@ -40,13 +39,6 @@
   const recordModalTitle = document.getElementById('recordModalTitle');
   const recordMeta = document.getElementById('recordMeta');
   const recordFields = document.getElementById('recordFields');
-
-  const customerCard = document.getElementById('customerCard');
-  const ccName = document.getElementById('ccName');
-  const ccHealth = document.getElementById('ccHealth');
-  const ccIdentity = document.getElementById('ccIdentity');
-  const ccFacts = document.getElementById('ccFacts');
-  const ccSummary = document.getElementById('ccSummary');
 
   const workbench = document.getElementById('workbench');
   const chatView = document.getElementById('chat');
@@ -132,7 +124,6 @@
   let customersCache = [];
 
   let sessionId = null;
-  let sessionCustomerId = null;
   let es = null;
   let busy = false;
   let maxSeq = 0;
@@ -519,57 +510,7 @@
 
   // ── chat rendering ─────────────────────────────────────────────
 
-  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); stickToBottom = true; scrollBottomBtn.classList.add('hidden'); }
-
-  function renderCustomerCard(c) {
-    const empty = customerCard.querySelector('.cc-empty');
-    const body = customerCard.querySelector('.cc-body');
-    if (!c || !c.customer_name && !c.crm_customer_id && !c.ones_project && !c.recording_subject_id) {
-      customerCard.classList.add('empty');
-      empty.classList.remove('hidden');
-      body.classList.add('hidden');
-      return;
-    }
-    customerCard.classList.remove('empty');
-    empty.classList.add('hidden');
-    body.classList.remove('hidden');
-
-    ccName.textContent = c.customer_name || c.crm_customer_id || '(未命名客户)';
-
-    const h = c.health;
-    ccHealth.textContent = h ? ('健康度 ' + h) : '';
-    ccHealth.className = 'cc-health' + (h === '绿' ? ' ok' : h === '黄' ? ' warn' : h === '红' ? ' danger' : '');
-
-    ccIdentity.innerHTML = '';
-    const tags = [
-      c.crm_customer_id && ('CRM ' + c.crm_customer_id),
-      c.ones_project && ('ONES ' + c.ones_project),
-      c.recording_subject_id && ('录音 ' + c.recording_subject_id),
-    ].filter(Boolean);
-    for (const t of tags) { const s = el('span', 'tag', t); ccIdentity.appendChild(s); }
-
-    ccFacts.innerHTML = '';
-    const facts = [
-      c.industry && ['行业', c.industry],
-      c.usage_version && ['使用版本', c.usage_version],
-      c.scale && ['规模', c.scale],
-      c.stage && ['阶段', c.stage],
-      c.renewal_status && ['续约', c.renewal_status],
-      c.key_contacts && ['联系人', c.key_contacts],
-    ].filter(Boolean);
-    if (facts.length) {
-      const wrap = document.createElement('span');
-      facts.forEach(([k, v], i) => {
-        if (i) wrap.append(' · ');
-        const b = document.createElement('b'); b.textContent = k + ' ';
-        wrap.append(b, v);
-      });
-      ccFacts.appendChild(wrap);
-    }
-
-    if (c.summary) { ccSummary.classList.remove('hidden'); ccSummary.textContent = c.summary; }
-    else { ccSummary.classList.add('hidden'); }
-  }
+  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; stickToBottom = true; scrollBottomBtn.classList.add('hidden'); }
 
   function addMessage(cls, text) {
     const n = el('div', 'msg ' + cls, text);
@@ -784,7 +725,6 @@
         }
         break;
       case 'confirm': addConfirmCard(e.draft, e.editContract); loadRecords(); break;
-      case 'customer_context': renderCustomerCard(e.context); break;
       case 'turn_end':
         busy = false;
         syncChatFab();
@@ -890,7 +830,6 @@
 
   async function switchSession(id) {
     sessionId = id;
-    sessionCustomerId = null;
     // 切会话即换 SSE 频道：旧会话的 turn_end 永远收不到，busy/停止键/思考占位必须就地复位，
     // 否则上一会话的进行态（含回放出的悬挂 turn_start）会把新会话的 composer 卡成「停止」死路。
     busy = false;
@@ -903,8 +842,6 @@
     connectEvents(id);
     const list = await (await fetch('/api/sessions')).json().then((d) => d.sessions);
     renderSessionList(list);
-    const meta = list.find((s) => s.id === id);
-    sessionCustomerId = meta?.customerId ?? null;
     setIdleStatus();
   }
 
@@ -913,15 +850,6 @@
     await switchSession(id);
     showView('agent');
     await showAgentMode('conversation');
-  }
-
-  /** Ensure the active agent session is bound to this customer; create one if not. */
-  async function ensureCustomerSession(customer) {
-    if (sessionId && sessionCustomerId === customer.id) return;
-    const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
-    await switchSession(created.id);
-    renderCustomerCard(created.customer);
-    loadSessions();
   }
 
   async function newSession() {
@@ -2631,9 +2559,7 @@
       + `客户名称：${customer.name}\nCRM CSM售后客户ID：${customer.id}\nONES客户信息option ID：${option?.external_id || '未解析，禁止回写'}\n目标：${target.target}\n${config}\n\n`
       + `会议证据：\n${excerpts}\n\n`
       + `要求：只使用有证据的事实；缺失信息明确标注并先提问。confirm_write.record_type=${target.recordType}，fields 必须包含 customer_id="${customer.id}" 和 customer_name="${customer.name}"。展示完整业务字段和实际 target_arguments，等待我编辑并确认后再写入。`;
-    const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
-    await switchSession(created.id);
-    renderCustomerCard(created.customer);
+    await newSession();
     showView('agent');
     await showAgentMode('conversation');
     inputEl.value = prompt;
@@ -2683,9 +2609,7 @@
       + `- 修改时输出完整章节字段并调用 confirm_write（target_system=ones, record_type=case）：fields 必须原样保留 case_draft_id="${draft.id}" 和 case_version=${draft.version}，并包含 customer_id="${customer.id}"、customer_name="${customer.name}" 与完整章节字段（${sectionContract}）。\n`
       + `- 保持客户叙事视角与证据纪律：只写有证据的事实，价值与复盘不虚构数字，正文不出现内部系统名、风险评分、工时统计、联系人信息与合同金额。\n`
       + `- 本次会话只修改本地草稿，不得调用任何 CRM/ONES 外部写工具；发布到 ONES Wiki 由我在工作台完成。`;
-    const created = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: customer.id }) });
-    await switchSession(created.id);
-    renderCustomerCard(created.customer);
+    await newSession();
     showView('agent');
     await showAgentMode('conversation');
     inputEl.value = prompt;
@@ -3259,10 +3183,9 @@
     };
     const ask = el('button', 'quiet-command', '询问 Agent');
     ask.onclick = async () => {
-      try {
-        await ensureCustomerSession(c);
-      } catch (error) { await alertDialog(error.message); return; }
-      // 就地弹悬浮对话面板：不离开客户详情页，边看资料边问（openFloatingChat 内部落回对话 tab）。
+      // 会话与客户解耦：新开一个会话并就地弹悬浮对话面板，客户身份由预填文本携带
+      // （本地读工具带 customer_name、回写草稿 fields 写同名同 ID，服务端唯一精确解析）。
+      try { await newSession(); } catch (error) { await alertDialog(error.message); return; }
       await openFloatingChat();
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
@@ -4013,15 +3936,6 @@
   customerSort.onchange = () => { void loadPortfolio(); };
   let searchTimer;
   customerSearch.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadPortfolio, 250); };
-
-  // ── quick actions ──────────────────────────────────────────────
-
-  for (const chip of quickActions.querySelectorAll('.chip')) {
-    chip.addEventListener('click', () => {
-      inputEl.value = chip.dataset.template;
-      inputEl.focus();
-    });
-  }
 
   // ── 附件（「+」按钮 / 拖拽 / 粘贴三路汇入同一条管线；限制与服务端保持一致）──
   const ATTACH_MAX_COUNT = 5;

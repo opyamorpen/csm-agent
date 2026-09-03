@@ -56,7 +56,7 @@ const SECTION_CHAR_CAP = 30000;
 export const customerDetailTool: Tool = {
   name: CUSTOMER_DETAIL_TOOL_NAME,
   description:
-    '按需读取当前会话所绑定客户的客户详情页数据（本地已同步数据，结果含同步时间）。' +
+    '按需读取指定客户的客户详情页数据（本地已同步数据，结果含同步时间）。customer_name/customer_id 指定客户（全称或简称，唯一精确匹配）。' +
     'sections 选择需要的板块，与客户详情页 tab 一一对应：' +
     'overview 概览（档案/风险/机会/完成率）、suggestion_feedback 建议、support_ticket 工单、operations_ticket 运维工单、' +
     'customer_manhour 工时明细、private_cloud_instance 私有云实例、followup 跟进记录、web_intel 公开动态轮次报告、' +
@@ -64,6 +64,8 @@ export const customerDetailTool: Tool = {
     '默认最小选择：每轮只取与本轮问题直接相关的板块，节省 token；仅当用户明确要求「全部/完整信息」时才传 ["all"]。' +
     'limit 仅作用于事件类板块（建议/工单/运维/私有云/跟进/时间线），默认 50，最大 200。',
   parameters: Type.Object({
+    customer_name: Type.Optional(Type.String({ description: '客户全称或简称（与工作台客户唯一精确匹配）' })),
+    customer_id: Type.Optional(Type.String({ description: 'CRM CSM售后客户 _id（已知权威 ID 时优先用它）' })),
     sections: Type.Array(Type.String(), {
       description: '需要的板块 key 列表；["all"] 表示全部 13 个板块（仅用户明确要求全部信息时使用）',
       minItems: 1,
@@ -88,7 +90,8 @@ function cap(text: string): string {
 }
 
 export interface CustomerDetailToolDeps {
-  getCustomer(): { id: string; name: string } | null;
+  /** 按调用参数解析客户（全称/简称唯一精确匹配，或按权威 CRM _id 直取）；未唯一命中返回 null。 */
+  resolveCustomer(name?: string, id?: string): { id: string; name: string } | null;
   overview(customerId: string): Record<string, unknown> | null;
   timeline(customerId: string, limit: number): Array<Record<string, unknown>>;
   /** 工时明细（汇总 + 登记行）。 */
@@ -114,10 +117,13 @@ export async function makeCustomerDetailResult(
   deps: CustomerDetailToolDeps,
   args: Record<string, unknown>,
 ): Promise<{ text: string; isError?: boolean }> {
-  const customer = deps.getCustomer();
+  const customer = deps.resolveCustomer(
+    typeof args.customer_name === 'string' ? args.customer_name.trim() : undefined,
+    typeof args.customer_id === 'string' ? args.customer_id.trim() : undefined,
+  );
   if (!customer) {
     return {
-      text: `${CUSTOMER_DETAIL_TOOL_NAME}: 当前会话未绑定客户。请让用户从客户详情页发起对话，或先提供客户名称完成身份解析（resolve_customer）。`,
+      text: `${CUSTOMER_DETAIL_TOOL_NAME}: 未提供或未能唯一解析客户——请带 customer_name（客户全称/简称，唯一精确匹配；身份未锁定时先完成 csm-identity-resolution）。`,
       isError: true,
     };
   }

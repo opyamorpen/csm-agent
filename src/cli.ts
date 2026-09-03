@@ -237,8 +237,8 @@ function help(): void {
      实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
      --verify 经 get_issue_fields 实时核对选项 UUID 漂移）
   csm-agent agent <客户ID或名称> <指令> [--attach <文件路径> ...]
-    （客户绑定会话；agent 可按需抓取客户详情页各板块 get_customer_detail、
-     本地已同步事件 get_customer_events、
+    （会话不绑定客户——客户全称自动注入指令文本；agent 本地工具按 customer_name 唯一解析取数，
+     可按需抓取客户详情页各板块 get_customer_detail、本地已同步事件 get_customer_events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
      落库 record_web_intelligence；
      --attach 附带本地文件（文本类/Office（docx/xlsx/pptx）/PDF 内容注入上下文，可重复；
@@ -247,7 +247,7 @@ function help(): void {
      建议/工单/运维工单待确认草稿，会话内 [y] 批准 / [e] 编辑后批准即回写 ONES）
   csm-agent sessions [list] [--all] [--json]
   csm-agent sessions show <会话ID> [--json]
-    （导出会话全文：标题、客户绑定、时间范围与完整对话，与网页「分享」同源）
+    （导出会话全文：标题、客户标签（仅存量绑定会话）、时间范围与完整对话，与网页「分享」同源）
   csm-agent sessions archive|unarchive <会话ID>
     （归档后会话从列表隐藏；--all 或网页「已归档」区可查看并恢复）
   csm-agent sessions stop <会话ID>
@@ -260,7 +260,7 @@ function help(): void {
       两台机器各跑一次比对 gitSha 一致，即验证一键安装/升级还原出同一份代码构建）
 
 仓库内可用 npm run cli -- <命令> 获得相同行为。默认连接 ${baseUrl}，可用 CSM_BASE_URL 覆盖。
-所有 Agent 写入仍经过服务端客户绑定和人工批准。`);
+所有 Agent 写入仍要求草稿自含客户身份并经过人工批准（会话本身不绑定客户）。`);
 }
 
 function version(): void {
@@ -1547,12 +1547,10 @@ async function runCustomerAgent(customerInput: string, prompt: string, attachPat
     return { name, mimeType: mimeFromName(name), data: raw.toString('base64') };
   });
   if (attachments.length) console.log(`附件 ${attachments.length} 个：${attachments.map((a) => a.name).join('、')}`);
-  const session = await request<any>('/api/sessions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customerId: customer.id }),
-  });
-  console.log(`Agent 会话 ${session.id}，已绑定 ${session.customer.customer_name} / CRM ${session.customer.crm_customer_id} / ONES option ${session.customer.ones_customer_option_id ?? 'unknown'}`);
+  // 会话与客户解耦：POST 不带 customerId；客户全称注入指令文本，本地工具按 customer_name 唯一解析取数。
+  const session = await request<any>('/api/sessions', { method: 'POST' });
+  console.log(`Agent 会话 ${session.id}（客户：${customer.name}——会话不绑定客户，客户名已随指令发给 agent）`);
+  const message = `（客户：${customer.name}）${prompt ? `\n${prompt}` : ''}`;
   let interrupted = false;
   // Ctrl+C 先通知服务端真正停止本轮（挂起中的确认草稿按拒绝处理），再退出。
   const onSigint = () => {
@@ -1566,7 +1564,7 @@ async function runCustomerAgent(customerInput: string, prompt: string, attachPat
     await request(`/api/sessions/${session.id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(attachments.length ? { message: prompt, attachments } : { message: prompt }),
+      body: JSON.stringify(attachments.length ? { message, attachments } : { message }),
     });
     await stream;
     if (interrupted) process.exitCode = 130;
