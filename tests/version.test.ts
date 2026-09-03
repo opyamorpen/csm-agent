@@ -94,3 +94,31 @@ test('version: stamp-build --out 临时目录只写 dist 戳，不得改写 publ
     assert.equal(after, before, '--out 临时目录运行不得改写 public/build-info.js');
   } finally { rmSync(outDir, { recursive: true, force: true }); }
 });
+
+test('version: 受管安装标记不算 dirty——一键安装的干净克隆构建戳应报 clean', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'csm-version-clean-'));
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const { spawnSync } = await import('node:child_process');
+  const sh = (command: string, cwd: string) => spawnSync('/bin/bash', ['-c', command], { cwd, encoding: 'utf8' });
+  try {
+    // 最小 git 仓库 + 一个提交
+    mkdirSync(join(base, 'src'), { recursive: true });
+    writeFileSync(join(base, 'src', 'a.ts'), 'export {}\n');
+    sh('git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init', base);
+    // install.sh 落下的两个受管安装标记（untracked）
+    writeFileSync(join(base, '.install_method'), 'install.sh\n');
+    writeFileSync(join(base, '.install-layout.json'), '{}\n');
+    const out = join(base, 'stamp-out');
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'stamp-build.mjs'), '--repo', base, '--out', out], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const info = JSON.parse(readFileSync(join(out, 'build-info.json'), 'utf8'));
+    assert.equal(info.dirty, false, '仅有安装标记的工作区应报 clean（指纹不失真）');
+    assert.match(info.buildId, /^([0-9a-f]{12})-clean-/);
+    // 真实源码改动仍然算 dirty
+    writeFileSync(join(base, 'src', 'a.ts'), 'export const x = 1;\n');
+    const dirtyResult = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'stamp-build.mjs'), '--repo', base, '--out', out], { encoding: 'utf8' });
+    assert.equal(dirtyResult.status, 0, dirtyResult.stderr);
+    const dirtyInfo = JSON.parse(readFileSync(join(out, 'build-info.json'), 'utf8'));
+    assert.equal(dirtyInfo.dirty, true);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});

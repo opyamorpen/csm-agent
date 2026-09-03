@@ -165,7 +165,7 @@ clone_or_update() {
     say "$APP_DIR 已存在但不是受管安装，移到 $backup 后全新克隆"
     mv "$APP_DIR" "$backup"
   fi
-  say "克隆仓库到 $APP_DIR（${REPO_URL} @ ${BRANCH}）"
+  say "克隆仓库到 ${APP_DIR}（${REPO_URL} @ ${BRANCH}）"
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$APP_DIR" \
     || die "克隆仓库失败，请检查网络或 --repo/--branch 参数"
 }

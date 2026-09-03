@@ -82,3 +82,10 @@ test('install: 收尾打印安装指纹（gitSha 比对锚点）', () => {
   assert.match(installSh, /rev-parse HEAD/);
   assert.match(installSh, /version --json/);
 });
+
+test('install: 裸 $VAR 后不得紧跟全角字符（set -u 下变量名并入多字节字符即 unbound 崩溃）', () => {
+  // 已知陷阱第二次出现（首次在 50e4b24 原型）：bash 3.2 的 UTF-8 解析会把紧邻的多字节
+  // 字节并进变量名，`$APP_DIR（` 直接 unbound variable 崩溃。全角邻居一律用 ${VAR} 括号形式。
+  const bare = installSh.match(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/g);
+  assert.deepEqual(bare ?? [], [], `存在裸变量后紧跟非 ASCII 字符: ${bare?.join(' ')}`);
+});

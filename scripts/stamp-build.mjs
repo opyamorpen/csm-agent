@@ -19,10 +19,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const scriptDir = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const outArgIndex = args.indexOf('--out');
-const outDir = outArgIndex >= 0 ? resolve(args[outArgIndex + 1] ?? 'dist') : join(repoRoot, 'dist');
+const outDir = outArgIndex >= 0 ? resolve(args[outArgIndex + 1] ?? 'dist') : join(scriptDir, '..', 'dist');
+// --repo <dir> 指定 git 仓库根（默认脚本所在仓库）；单测用它指向临时 git 仓库。
+const repoArgIndex = args.indexOf('--repo');
+const repoRoot = repoArgIndex >= 0 ? resolve(args[repoArgIndex + 1] ?? scriptDir) : resolve(scriptDir, '..');
 const publicDir = join(repoRoot, 'public');
 
 function git(...pieces) {
@@ -33,8 +36,14 @@ function git(...pieces) {
 let gitSha = git('rev-parse', 'HEAD');
 let dirty = false;
 if (gitSha) {
-  try { dirty = execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().length > 0; }
-  catch { dirty = false; }
+  try {
+    // dirty 只看真实源码改动：install.sh 的受管安装标记（untracked）不算脏，
+    // 否则一键安装的干净克隆永远报 dirty，指纹失真。
+    const INSTALL_MARKERS = /^.. (?:\.install_method|\.install-layout\.json)$/;
+    dirty = execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n')
+      .filter((line) => line.trim() && !INSTALL_MARKERS.test(line)).length > 0;
+  } catch { dirty = false; }
 } else {
   gitSha = null;
 }
