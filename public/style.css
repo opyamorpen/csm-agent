@@ -1009,6 +1009,9 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .opportunity-evidence { margin-top: 3px; color: var(--faint); font-size: 12px; overflow-wrap: anywhere; }
 .action-card, .case-card-item { border: 1px solid var(--border); background: var(--panel); padding: 13px; border-radius: 10px; box-shadow: var(--shadow-xs); transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease; }
 .action-card:hover, .case-card-item:hover { box-shadow: var(--shadow-m); transform: translateY(-1px); }
+/* 案例生成中：旧稿整卡置灰（操作按钮逐个 disabled 复用全局 button:disabled），案例全文保持只读，hover 不再上浮。 */
+.case-card-item.case-generating { opacity: .62; }
+.case-card-item.case-generating:hover { box-shadow: var(--shadow-xs); transform: none; }
 .action-card p { margin: 6px 0; color: var(--text-2); }
 /* 案例配图：SVG 落库前经服务端消毒，这里按 viewBox 自适应限宽渲染。 */
 .case-figure { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 10px; }

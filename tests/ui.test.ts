@@ -1495,7 +1495,11 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   const genHandler = source.match(/generate\.onclick = async \(\) => \{[\s\S]*?finally \{ generate\.disabled = false; generate\.textContent = '生成案例'; \}/)?.[0];
   assert.ok(genHandler, '生成案例 handler 存在');
   assert.match(genHandler, /await openCustomer\(customerId\);\s*\n\s*void loadCases\(\);\s*\n\s*editCase\(outcome\.draft\)/, '生成成功先刷新列表再开新稿');
-  const regenHandler = source.match(/regenerate\.onclick = async \(\) => \{[\s\S]*?finally \{ regenerate\.disabled = false; regenerate\.textContent = '重新生成'; \}/)?.[0];
+  // 案例卡重新生成 handler（caseCard 区域内定位，避免误吞草稿箱同名 handler）：
+  // 终态恢复走整卡置灰助手（见灰卡契约测试），不再有单行 finally 字面量可锚。
+  const caseRenderer = source.match(/async function caseCard[\s\S]*?\n  \}\n\n  \/\*\*[\s\S]*?案例全文只读渲染/)?.[0];
+  assert.ok(caseRenderer, 'caseCard renderer was not found');
+  const regenHandler = caseRenderer.match(/regenerate\.onclick = async \(\) => \{[\s\S]*?\n        \};/)?.[0];
   assert.ok(regenHandler, '重新生成 handler 存在');
   assert.match(regenHandler, /await openCustomer\(draft\.customerId\);\s*\n\s*void loadCases\(\);\s*\n\s*editCase\(outcome\.draft\)/, '重新生成成功先刷新列表再开新稿');
   // 进度展示契约：案例轮询消费 job.progress 末行（滚动多行日志取当前状态：阶段/检索角度/模型输出字数），锚点存活期间无超时放弃。
@@ -1816,6 +1820,59 @@ test('case cards show read-only full text with figures embedded at section posit
   const listRule = styles.match(/\.case-doc-list \{[^}]*\}/)?.[0];
   assert.ok(listRule, '.case-doc-list rule was not found');
   assert.doesNotMatch(listRule, /display:\s*(grid|block)/);
+});
+
+test('case cards gray out with all actions disabled while a generation job is active', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 置灰助手：卡片挂 case-generating 态 + 禁用 .row-actions 下全部操作按钮（编辑/精修/重新生成/复制/导出），
+  // 案例全文保持只读可看；恢复时整排按钮重置为可用（渲染时本就全部可用，徽章是 div 不受影响）。
+  const helper = source.match(/function setCaseCardGenerating\(card, generating\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(helper, 'setCaseCardGenerating helper was not found');
+  assert.match(helper, /card\.classList\.toggle\('case-generating', generating\);/);
+  assert.match(helper, /for \(const button of card\.querySelectorAll\('\.row-actions button'\)\) button\.disabled = generating;/);
+
+  // 卡片带客户标识：全局案例库按 data-customer-id 定位生成中客户的旧稿卡。
+  const card = source.match(/async function caseCard[\s\S]*?\n  \}\n\n  \/\*\*[\s\S]*?案例全文只读渲染/)?.[0];
+  assert.ok(card, 'caseCard source was not found');
+  assert.match(card, /if \(draft\.customerId\) card\.dataset\.customerId = draft\.customerId;/);
+  // 重新生成：POST 前即整卡置灰 + 锁住头部主按钮（防并发再起任务，后端无同客户互斥）；
+  // finally 按卡片存活态恢复（成功路径 openCustomer 已重渲染、旧卡脱离 DOM 由恢复流程接管）。
+  assert.match(card, /setCaseCardGenerating\(card, true\);/);
+  assert.match(card, /const generateCommand = customerOverview\.querySelector\('\.case-generate-command'\);/);
+  assert.match(card, /if \(generateCommand\) generateCommand\.disabled = true;/);
+  assert.match(card, /if \(!card\.isConnected\) return;/);
+  assert.match(card, /setCaseCardGenerating\(card, false\);/);
+  assert.match(card, /if \(generateCommand\) generateCommand\.disabled = false;/);
+  assert.doesNotMatch(card, /finally \{ regenerate\.disabled = false;/, '重新生成不得再只恢复按钮自身，必须走整卡置灰助手');
+
+  // 「生成案例」主按钮：非复用、任务真正启动后置灰已有案例卡（含已发布稿），失败恢复。
+  const generateHandler = source.match(/const generate = el\('button', 'primary-command case-generate-command', '生成案例'\);[\s\S]*?\n    \};/)?.[0];
+  assert.ok(generateHandler, 'case generate handler was not found');
+  assert.match(generateHandler, /for \(const item of customerOverview\.querySelectorAll\('\.case-card-item'\)\) setCaseCardGenerating\(item, true\);/);
+  assert.match(generateHandler, /for \(const item of customerOverview\.querySelectorAll\('\.case-card-item'\)\) setCaseCardGenerating\(item, false\);/);
+
+  // 重开客户页恢复：在途 case_report 任务同样置灰旧稿卡 + 锁主按钮，与点击路径同一套契约。
+  const recovery = source.match(/重开客户详情时恢复在途生成任务的进度展示[\s\S]*?\}\)\(\);/)?.[0];
+  assert.ok(recovery, 'case job recovery flow was not found');
+  assert.match(recovery, /for \(const item of customerOverview\.querySelectorAll\('\.case-card-item'\)\) setCaseCardGenerating\(item, true\);/);
+  assert.match(recovery, /generate\.disabled = true;/);
+  assert.match(recovery, /for \(const item of customerOverview\.querySelectorAll\('\.case-card-item'\)\) setCaseCardGenerating\(item, false\);/);
+  assert.match(recovery, /generate\.disabled = false;/);
+
+  // 全局案例库：生成中客户的旧稿卡置灰并就地轮询（进度行在灰卡内），成功刷新列表、失败恢复卡片。
+  const loadCases = source.match(/async function loadCases[\s\S]*?\n  \}\n\n  \/\*\*/)?.[0];
+  assert.ok(loadCases, 'loadCases source was not found');
+  assert.match(loadCases, /\/api\/draft-jobs\?status=active&kind=case_report/);
+  assert.match(loadCases, /\.case-card-item\[data-customer-id="\$\{CSS\.escape\(job\.customerId\)\}"\]/);
+  assert.match(loadCases, /setCaseCardGenerating\(card, true\);/);
+  assert.match(loadCases, /if \(outcome\.draft\) await loadCases\(\);/);
+  assert.match(loadCases, /else if \(outcome\.error && card\.isConnected\) setCaseCardGenerating\(card, false\);/);
+
+  // 置灰样式：整卡半透明（对齐草稿箱 .draft-item-disabled 的 0.62 先例），hover 不再上浮；按钮复用全局 button:disabled。
+  assert.match(styles, /\.case-card-item\.case-generating \{[^}]*opacity: \.62/);
+  assert.match(styles, /\.case-card-item\.case-generating:hover \{[^}]*box-shadow: var\(--shadow-xs\); transform: none/);
 });
 
 test('opportunity board renders an ordered list of top-5 briefs with per-item sources', () => {

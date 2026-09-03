@@ -3118,7 +3118,7 @@
         }),
       },
     ]);
-    const generate = el('button', 'primary-command', '生成案例');
+    const generate = el('button', 'primary-command case-generate-command', '生成案例');
     generate.onclick = async () => {
       try {
         generate.disabled = true;
@@ -3130,8 +3130,13 @@
           editCase(detail.draft);
           return;
         }
+        // 任务真正启动（非复用）：已有案例卡（草稿或已发布）整卡置灰禁用——新稿落库会整体替换旧行。
+        for (const item of customerOverview.querySelectorAll('.case-card-item')) setCaseCardGenerating(item, true);
         const outcome = await pollCaseJob(customerId, result.jobId, result.fingerprint, customerOverview);
-        if (outcome.error) await alertDialog(`案例生成失败：${outcome.error}`);
+        if (outcome.error) {
+          await alertDialog(`案例生成失败：${outcome.error}`);
+          for (const item of customerOverview.querySelectorAll('.case-card-item')) setCaseCardGenerating(item, false);
+        }
         else if (outcome.draft) {
           // 新稿已落库：先重渲染客户页让卡片列表换新（否则关掉编辑弹窗仍停在生成前的旧列表），再打开新稿。
           await openCustomer(customerId);
@@ -3260,8 +3265,15 @@
         const { jobs } = await api(`/api/draft-jobs?customer_id=${encodeURIComponent(customerId)}&status=active`);
         const caseJob = (jobs || []).find((job) => job.kind === 'case_report' && !job.stalled);
         if (caseJob) {
+          // 在途生成期：旧稿整卡置灰禁用 + 锁住「生成案例」主按钮，与点击发起路径同一套展示契约。
+          for (const item of customerOverview.querySelectorAll('.case-card-item')) setCaseCardGenerating(item, true);
+          generate.disabled = true;
           const outcome = await pollCaseJob(customerId, caseJob.id, caseJob.fingerprint, customerOverview);
           if (outcome.draft && activeCustomerId === customerId) await openCustomer(customerId);
+          else if (activeCustomerId === customerId) {
+            for (const item of customerOverview.querySelectorAll('.case-card-item')) setCaseCardGenerating(item, false);
+            generate.disabled = false;
+          }
         }
       } catch { /* 恢复失败不影响页面；任务仍在服务端继续 */ }
     })();
@@ -3473,8 +3485,18 @@
     link.click();
   }
 
+  /**
+   * 案例生成中置灰：卡片挂 case-generating 态并禁用全部操作按钮（编辑/精修/重新生成/复制/导出），
+   * 案例全文保持只读可看；恢复时整排按钮重置为可用是安全的——渲染时本就全部可用，徽章是 div 不受影响。
+   */
+  function setCaseCardGenerating(card, generating) {
+    card.classList.toggle('case-generating', generating);
+    for (const button of card.querySelectorAll('.row-actions button')) button.disabled = generating;
+  }
+
   async function caseCard(draft, customerMode = false, customerId = null) {
     const card = el('article', 'case-card-item');
+    if (draft.customerId) card.dataset.customerId = draft.customerId;
     card.append(el('strong', null, draft.title), el('div', 'cell-sub', `${draft.status === 'published' ? '已发布' : `草稿 v${draft.version}`} · ${formatDateTime(draft.updatedAt)}`));
     const buttons = el('div', 'row-actions');
     let detail = null;
@@ -3503,7 +3525,11 @@
         const regenerate = el('button', 'quiet-command small', '重新生成');
         regenerate.onclick = async () => {
           try {
-            regenerate.disabled = true;
+            // 生成期旧稿整卡置灰禁用（新稿落库会整体替换旧行，编辑/导出随时可能被覆盖）；
+            // 同时锁住头部「生成案例」主按钮，防止并发再起任务（后端无同客户互斥）。
+            setCaseCardGenerating(card, true);
+            const generateCommand = customerOverview.querySelector('.case-generate-command');
+            if (generateCommand) generateCommand.disabled = true;
             regenerate.textContent = '重新生成中…';
             const result = await api(`/api/case-drafts/${encodeURIComponent(draft.id)}/regenerate`, { method: 'POST' });
             const outcome = await pollCaseJob(draft.customerId, result.jobId, result.fingerprint, card);
@@ -3516,7 +3542,14 @@
             }
             // outcome.detached：页面已重渲染，openCustomer 的在途任务恢复轮询会接管进度与刷新。
           } catch (error) { await alertDialog(error.message); }
-          finally { regenerate.disabled = false; regenerate.textContent = '重新生成'; }
+          finally {
+            // 成功路径 openCustomer 已重渲染（旧卡脱离 DOM）由恢复流程接管；失败/异常按存活态恢复。
+            if (!card.isConnected) return;
+            setCaseCardGenerating(card, false);
+            regenerate.textContent = '重新生成';
+            const generateCommand = customerOverview.querySelector('.case-generate-command');
+            if (generateCommand) generateCommand.disabled = false;
+          }
         };
         buttons.append(regenerate);
       }
@@ -3688,6 +3721,27 @@
     caseList.innerHTML = '';
     if (!(data.drafts || []).length) caseList.append(el('div', 'workspace-empty', '暂无案例草稿'));
     for (const draft of data.drafts || []) caseList.append(await caseCard(draft));
+    // 生成中的客户：旧稿卡片置灰禁用并就地轮询（进度行显示在灰卡内），成功后刷新列表、失败恢复卡片。
+    try {
+      const { jobs } = await api('/api/draft-jobs?status=active&kind=case_report');
+      const seen = new Set();
+      for (const job of jobs || []) {
+        if (job.stalled || seen.has(job.customerId)) continue;
+        seen.add(job.customerId);
+        const card = caseList.querySelector(`.case-card-item[data-customer-id="${CSS.escape(job.customerId)}"]`);
+        if (!card) continue;
+        setCaseCardGenerating(card, true);
+        void pollCaseJob(job.customerId, job.id, job.fingerprint, card)
+          .then(async (outcome) => {
+            if (outcome.draft) await loadCases();
+            else if (outcome.error && card.isConnected) setCaseCardGenerating(card, false);
+          })
+          .catch(async (error) => {
+            if (card.isConnected) setCaseCardGenerating(card, false);
+            await alertDialog(error.message);
+          });
+      }
+    } catch { /* 状态查询失败不影响列表展示 */ }
   }
 
   /**
