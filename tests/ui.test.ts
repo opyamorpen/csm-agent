@@ -1360,6 +1360,35 @@ test('agent replies stream as deltas and thinking collapses into a fold', () => 
   assert.match(css, /\.think-block\.open \.think-head::before \{ content: '▾ '; \}/);
 });
 
+test('conversation scroll follows only while pinned to bottom', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  // 贴底跟随状态机：scrollDown 必须有 stickToBottom 守卫，scroll 事件按距底阈值翻转跟随态并联动按钮显隐。
+  const follow = app.match(/let stickToBottom = true;[\s\S]*?scrollBottomBtn\.onclick = \(\) => pinToBottom\(\);/)?.[0];
+  assert.ok(follow, 'stick-to-bottom helpers were not found');
+  assert.match(follow, /const SCROLL_BOTTOM_EDGE = 80;/);
+  assert.match(follow, /panel\.scrollHeight - panel\.scrollTop - panel\.clientHeight <= SCROLL_BOTTOM_EDGE;/);
+  assert.match(follow, /addEventListener\('scroll', \(\) => \{[\s\S]*?stickToBottom = isNearBottom\(\);[\s\S]*?scrollBottomBtn\.classList\.toggle\('hidden', stickToBottom\);[\s\S]*?\}, \{ passive: true \}\);/);
+  assert.match(follow, /function scrollDown\(\) \{\n    if \(!stickToBottom\) return;\n    messagesEl\.parentElement\.scrollTop = messagesEl\.parentElement\.scrollHeight;\n  \}/);
+  assert.match(follow, /function pinToBottom\(\) \{\n    stickToBottom = true;\n    scrollBottomBtn\.classList\.add\('hidden'\);\n    scrollDown\(\);\n  \}/);
+
+  // 显式重新贴底：切会话清空消息回放历史应落底；用户发送新消息应跳到底部跟随新轮次。
+  assert.match(app, /function clearMessages\(\) \{[^\n]*stickToBottom = true;[^\n]*scrollBottomBtn\.classList\.add\('hidden'\); \}/);
+  const submit = app.match(/form\.addEventListener\('submit'[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(submit, 'composer submit handler was not found');
+  assert.match(submit, /busy = true;\n    inputEl\.disabled = true;\n    pinToBottom\(\);\n    setThinking\(true\);/);
+
+  // 回到底部按钮：位于对话滚动容器内 messages 之后，贴底跟随时默认隐藏。
+  assert.match(html, /<div id="messages"><\/div>\n      <button id="scrollBottomBtn" class="scroll-bottom-btn hidden" type="button" title="跳到最新输出">↓ 回到底部<\/button>/);
+  const btn = css.match(/\.scroll-bottom-btn \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(btn, 'scroll-bottom-btn style was not found');
+  assert.match(btn, /position: sticky;\n  bottom: 12px;/);
+  // 双主题契约：组件块内只允许主题 token，不允许硬编码色值。
+  assert.doesNotMatch(btn, /#[0-9a-fA-F]{3,8}\b/);
+});
+
 test('case narrative generation contract: v8 chapter editor, refine entry, single generation path', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');

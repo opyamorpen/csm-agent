@@ -53,6 +53,7 @@
   const footerEl = document.querySelector('footer');
   const agentSessions = document.getElementById('agentSessions');
   const agentConversation = document.getElementById('agentConversation');
+  const scrollBottomBtn = document.getElementById('scrollBottomBtn');
   const hemoryInbox = document.getElementById('hemoryInbox');
   const agentDrafts = document.getElementById('agentDrafts');
   const recordsPanel = document.getElementById('records');
@@ -169,9 +170,33 @@
     agentNavCount.textContent = total || '';
   }
 
+  // 对话只在「贴底」时跟随流式输出：上滑读历史即暂停跟随（隐藏的回到底部按钮浮现），
+  // 手动滚回底部自动恢复跟随；发送消息/切换会话视为明确意图，强制重新贴底。
+  let stickToBottom = true;
+  const SCROLL_BOTTOM_EDGE = 80; // px：距底不超过该值视为贴底
+
+  function isNearBottom() {
+    const panel = messagesEl.parentElement;
+    return panel.scrollHeight - panel.scrollTop - panel.clientHeight <= SCROLL_BOTTOM_EDGE;
+  }
+
+  messagesEl.parentElement.addEventListener('scroll', () => {
+    stickToBottom = isNearBottom();
+    scrollBottomBtn.classList.toggle('hidden', stickToBottom);
+  }, { passive: true });
+
   function scrollDown() {
+    if (!stickToBottom) return;
     messagesEl.parentElement.scrollTop = messagesEl.parentElement.scrollHeight;
   }
+
+  function pinToBottom() {
+    stickToBottom = true;
+    scrollBottomBtn.classList.add('hidden');
+    scrollDown();
+  }
+
+  scrollBottomBtn.onclick = () => pinToBottom();
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -420,7 +445,7 @@
 
   // ── chat rendering ─────────────────────────────────────────────
 
-  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); }
+  function clearMessages() { messagesEl.innerHTML = ''; maxSeq = 0; renderCustomerCard(null); stickToBottom = true; scrollBottomBtn.classList.add('hidden'); }
 
   function renderCustomerCard(c) {
     const empty = customerCard.querySelector('.cc-empty');
@@ -3885,6 +3910,7 @@
     renderAttachmentChips();
     busy = true;
     inputEl.disabled = true;
+    pinToBottom();
     setThinking(true);
     setSendStopping(true);
     try {

@@ -672,6 +672,26 @@ footer {
 .thinking { align-self: flex-start; color: var(--muted); font-size: 13px; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.4; } }
 
+/* 回到底部：上滑暂停跟随后浮现，sticky 钉在对话面板（滚动容器）可视底部；贴底时由 hidden 收起 */
+.scroll-bottom-btn {
+  position: sticky;
+  bottom: 12px;
+  display: block;
+  width: fit-content;
+  margin-left: auto;
+  margin-top: 8px;
+  z-index: 5;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 12.5px;
+  box-shadow: var(--shadow-m);
+  cursor: pointer;
+}
+.scroll-bottom-btn:hover { border-color: var(--accent); color: var(--text); }
+
 /* 思考过程折叠面板（流式 delta 实时填充，完成后折叠成一行摘要） */
 .think-block {
   align-self: stretch;
