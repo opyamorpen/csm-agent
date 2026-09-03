@@ -616,7 +616,7 @@ function todoEditContract(title: string, tool: string | null, args: Record<strin
       { key: 'expectedOutcome', label: '预期成果', type: 'textarea', value: args.expectedOutcome == null ? '' : String(args.expectedOutcome) },
     ],
     locked: [],
-    readonly: [{ label: '目标', value: 'CSM Agent / 待办（确认后创建本工作台行动事项）' }, ...(tool ? [{ label: '目标工具', value: tool }] : [])],
+    readonly: [{ label: '目标', value: 'CSM Agent / 待办（确认后创建本工作台待办）' }, ...(tool ? [{ label: '目标工具', value: tool }] : [])],
   };
 }
 
@@ -835,7 +835,7 @@ async function proposeWithModel(runtime: Runtime, customer: Customer, events: So
     + `所属产品分类指引（按 ONES 产品线，选最接近的一项）：\n${ONES_DESK_CLASSIFICATION_HINTS.product.map((line) => `- ${line}`).join('\n')}\n`;
   const prompt = `为客户当天的全部沟通片段生成结构化草稿。只允许类型 internal_todo、workhour、followup、suggestion、ticket、operations。\n`
     + `followup（沟通记录）必须且只能输出一条：合并当天全部 published=false 的片段；其 fields 必须包含 one_line_summary（一句话总结当天沟通）和 sections 数组——published=false 的每个片段恰好一项 {"evidence_id":"片段id","summary":"该片段的摘要"}。每段 summary 2~4 句，忠于该片段自己的转写，写明该话题的关键结论、决定与后续行动，不得与其他片段的 summary 雷同、不得写成全天综述。sections 必须覆盖全部 published=false 片段，不得遗漏。published=true 的片段已写入 CRM，禁止纳入 followup。\n`
-    + `workhour 不必输出（系统按录音时长自动计算并连带生成）。internal_todo 可以输出多条，每条对应独立的行动；只返回有证据支持的草稿。\n`
+    + `workhour 不必输出（系统按录音时长自动计算并连带生成）。internal_todo 可以输出多条，每条对应独立的待办；只返回有证据支持的草稿。\n`
     + `${onesAsrAliasRule()}ones_required 的所属产品/所属模块按对应的 ONES 产品线归类。\n`
     + `suggestion/ticket/operations 是要写入 ONES 的工作项，宁缺毋滥：必须严格满足以下判定标准，沟通证据不足以判定就不输出该草稿（相关内容仍会保留在沟通记录里）。\n`
     + `- suggestion（建议和反馈）：客户明确表达产品能力不满足——如“现在还满足不了我们的需求”“标品还不支持这个”“这个需求我反馈一下”“希望以后支持/增加某功能”。方案讨论、workaround、客户内部流程、商务与付费话题、对交付节奏的不满都不算。\n`

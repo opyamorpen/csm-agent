@@ -20,7 +20,7 @@ description: 整理某客户的一次或一段时间的客户跟进记录：读 
 3. **综合**：按 `templates/followup.json` 字段组织内容——
    - `key_topics` 从录音摘要 + 工单/需求标题提炼；
    - `customer_requests` 归纳客户明确诉求；
-   - `action_items` 拆出行动项，并尽量标注负责人与截止日期（从对话或工单中找）；
+   - `action_items` 拆出待办项，并尽量标注负责人与截止日期（从对话或工单中找）；
    - `related_ones_items` 关联具体需求/工单编号。
 4. **只写有依据的内容**：缺字段留空或注明"未提供"，**不编造**。
 5. **成稿展示**：把完整字段渲染成可读草稿，调用 `confirm_write`（target_system=crm, record_type=followup）。

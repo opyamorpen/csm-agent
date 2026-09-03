@@ -323,6 +323,10 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(html, /data-action-tab="completed"/);
   assert.match(html, /id="actionTabPending"/);
   assert.match(html, /id="actionTabCompleted"/);
+  // 显示契约：导航与页面标题统一叫「待办」——页面展示全量待办（不限本周），不得再出现「行动」文案。
+  assert.match(html, /data-view="actions">待办 </);
+  assert.ok(!html.includes('本周行动'), '页面展示全量待办，不应再叫「本周行动」');
+  assert.ok(!html.includes('行动'), 'index.html 不应再含「行动」文案');
   assert.match(source, /let activeActionTab = 'pending';/);
   assert.match(source, /actionTabPending\.textContent = pending\.length \? `未完成（\$\{pending\.length\}）` : '未完成';/);
   assert.match(source, /actionTabCompleted\.textContent = completed\.length \? `已完成（\$\{completed\.length\}）` : '已完成';/);
@@ -330,7 +334,7 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(styles, /\.draft-subtab\.active, \.action-subtab\.active \{/);
   // 两态划分 + 客户分组渲染：未完成= status==='new'（后端 due_at 升序），已完成按 updatedAt 倒序；
   // 按 customerId 分桶为 details.customer-group（默认展开、点组标题可折叠，客户名经 customersCache 解析）。
-  const loader = source.match(/async function loadActions[\s\S]*?\n  \}\n\n  \/\/ 本周行动二级 tab/)?.[0];
+  const loader = source.match(/async function loadActions[\s\S]*?\n  \}\n\n  \/\/ 待办二级 tab/)?.[0];
   assert.ok(loader, 'loadActions source was not found');
   assert.match(loader, /actions\.filter\(\(a\) => a\.status === 'new'\)/);
   assert.match(loader, /actions\.filter\(\(a\) => a\.status === 'completed'\)/);
@@ -349,7 +353,7 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   // 已完成 tab 无可勾选卡片，隐藏批量操作条。
   assert.match(loader, /actionBulkBar\.classList\.toggle\('hidden', activeActionTab !== 'pending'\)/);
   // 空态分 tab 文案。
-  assert.match(loader, /'暂无未完成行动' : '暂无已完成行动'/);
+  assert.match(loader, /'暂无未完成待办' : '暂无已完成待办'/);
   // 工具条：全选 + 已选计数 + 批量完成按钮（接受流程整体移除：草稿确认即视为接受）。
   assert.match(html, /id="actionSelectAll"/);
   assert.match(html, /id="actionSelectedCount"/);
@@ -373,9 +377,13 @@ test('weekly actions view exposes two-state tabs, customer grouping and a sticky
   assert.match(source, /actionBoard\.addEventListener\('click'/);
   assert.match(source, /event\.target\.closest\('button, input, label, a'\)/);
   assert.match(source, /check\.checked = !check\.checked;/);
-  // 批量接口与逐项语义：批量完成弹一次共用结果输入（取消中止、留空用默认）。
+  // 完成直达：单项与批量完成均一键完成，不弹确认、不记录实际结果（批量接口仍逐项处理互不影响）。
   assert.match(source, /\/api\/action-items\/bulk-complete/);
-  assert.match(source, /记录实际结果（留空使用默认）/);
+  assert.ok(!source.includes('记录实际结果'), '完成不应再弹「记录实际结果」输入');
+  assert.doesNotMatch(card, /promptDialog/, '单项完成不应弹窗');
+  const bulkHandler = source.match(/actionBulkComplete\.onclick[\s\S]*?\n  \};/)?.[0];
+  assert.ok(bulkHandler, 'bulk complete handler was not found');
+  assert.doesNotMatch(bulkHandler, /promptDialog/, '批量完成不应弹窗');
   // 勾选联动：全选跟随 + 已选 n/m 计数 + 整卡 selected 反馈 + 批量期间按钮禁用。
   assert.match(source, /function updateActionSelection\(\)/);
   assert.match(source, /已选 \$\{selected\}\/\$\{checks\.length\}/);
@@ -1059,7 +1067,7 @@ test('hemory inbox shows consumption badges for fragments written to business sy
   // 显示契约：片段卡片显示「已写入·工单/跟进」消费徽标，类型映射为中文短标签。
   assert.ok(renderer, 'renderHemoryFragmentRow source was not found');
   assert.match(renderer, /Array\.isArray\(fragment\.consumedBy\) && fragment\.consumedBy\.length/);
-  assert.match(renderer, /const typeLabels = \{ internal_todo: '行动', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' \}/);
+  assert.match(renderer, /const typeLabels = \{ internal_todo: '待办', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' \}/);
   assert.match(renderer, /已写入·\$\{label\}/);
 });
 

@@ -139,10 +139,10 @@ function help(): void {
   csm-agent timeline <客户ID或名称> [sourceType] [--json]
   csm-agent workhours <客户ID或名称> [--json]
   csm-agent actions [客户ID或名称] [--json]
-  csm-agent action complete <行动ID...> [--outcome <实际结果>]
+  csm-agent action complete <待办ID...> [--outcome <实际结果>]
     （批量完成：仅未完成状态生效，已完成跳过；单项失败不影响其他项；
-     --outcome 支持空格或 = 传值，缺省记「CSM 在工作台确认完成」）
-  csm-agent action update <行动ID> <JSON>
+     --outcome 支持空格或 = 传值，可选记录实际结果，不填不记录）
+  csm-agent action update <待办ID> <JSON>
   csm-agent alerts [--status active|resolved|all] [--json]
     （风险预警名单：近 30 天无 CRM 跟进记录且无 ONES 工作项新增/更新与新增工时（两侧同时停滞），
      或公开动态检索到该客户负面信息（收入下降/罚款/投诉等）即进入；--status 默认 active，all 含已消除）
@@ -331,7 +331,7 @@ async function showCustomer(input: string): Promise<void> {
   } else {
     console.log('增购机会: 暂无识别到增购信号');
   }
-  console.log(`行动: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
+  console.log(`待办: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
   console.log('身份映射:');
   console.table((overview.identities ?? []).map((item: any) => ({ system: item.system, externalId: item.external_id, label: item.label, status: item.status })));
 }
@@ -520,7 +520,7 @@ async function alertsCommand(subcommand: string, values: string[]): Promise<void
   function printActionBulkResult(label: string, body: unknown): void {
     const items = (body as { items?: Array<Record<string, unknown>> }).items ?? [];
     if (jsonOutput) return print(body);
-    if (items.length) console.table(items.map((item) => ({ 行动ID: item.id, 标题: item.title ?? '', 结果: item.result, 说明: item.error ?? item.reason ?? '' })));
+    if (items.length) console.table(items.map((item) => ({ 待办ID: item.id, 标题: item.title ?? '', 结果: item.result, 说明: item.error ?? item.reason ?? '' })));
     const counts: Record<string, number> = {};
     for (const item of items) counts[item.result as string] = (counts[item.result as string] ?? 0) + 1;
     console.log(`${label}：共 ${items.length} 项` + (items.length ? `（${Object.entries(counts).map(([key, value]) => `${value} ${key}`).join('，')}）` : ''));
@@ -530,7 +530,7 @@ async function alertsCommand(subcommand: string, values: string[]): Promise<void
     if (subcommand === 'list') return showActions(values.join(' ') || undefined);
     if (subcommand === 'complete') {
       const positional = values.filter((value) => !value.startsWith('--'));
-      if (!positional.length) throw new Error('action complete 缺少行动 ID');
+      if (!positional.length) throw new Error('action complete 缺少待办 ID');
       const outcome = inlineOptionOf(values, '--outcome');
       const body: Record<string, unknown> = { ids: positional };
       if (outcome !== undefined) body.outcome = outcome;
@@ -538,7 +538,7 @@ async function alertsCommand(subcommand: string, values: string[]): Promise<void
       return printActionBulkResult('批量完成', result);
     }
     const actionId = values.shift() ?? '';
-    if (!actionId) throw new Error(`action ${subcommand || '(空)'} 缺少行动 ID`);
+    if (!actionId) throw new Error(`action ${subcommand || '(空)'} 缺少待办 ID`);
     if (subcommand === 'update') {
       const body = parseObject(values.join(' '), 'action update');
       return print(await request(`/api/action-items/${encodeURIComponent(actionId)}`, {

@@ -36,7 +36,7 @@
         <nav class="product-nav" aria-label="主导航">
           <button class="nav-item" data-view="agent">Agent <span id="agentNavCount" class="nav-count"></span></button>
           <button class="nav-item active" data-view="portfolio">客户组合</button>
-          <button class="nav-item" data-view="actions">本周行动 <span id="actionNavCount" class="nav-count"></span></button>
+          <button class="nav-item" data-view="actions">待办 <span id="actionNavCount" class="nav-count"></span></button>
           <button class="nav-item" data-view="alerts">风险预警 <span id="alertNavCount" class="nav-count"></span></button>
           <button class="nav-item" data-view="cases">案例库</button>
         </nav>
@@ -72,9 +72,9 @@
       </section>
 
       <section id="actionsView" class="workbench-view hidden">
-        <div class="view-head"><div><h1>本周行动</h1><p>未完成 / 已完成两个分栏，均按客户分组</p></div></div>
+        <div class="view-head"><div><h1>待办</h1><p>未完成 / 已完成两个分栏，均按客户分组</p></div></div>
         <!-- 二级 tab：未完成（可勾选批量完成）与已完成分列；计数由 JS 写进按钮文案。 -->
-        <div class="action-subtabs" role="tablist" aria-label="行动分组">
+        <div class="action-subtabs" role="tablist" aria-label="待办分组">
           <button id="actionTabPending" class="action-subtab active" data-action-tab="pending" type="button">未完成</button>
           <button id="actionTabCompleted" class="action-subtab" data-action-tab="completed" type="button">已完成</button>
         </div>

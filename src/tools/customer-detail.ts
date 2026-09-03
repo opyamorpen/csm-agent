@@ -32,7 +32,7 @@ const SECTION_LABELS: Record<CustomerDetailSection, string> = {
   hemory_fragments: 'Hemory 已确认会议片段（含转写摘要）',
   cases: '客户案例（候选 + 草稿摘要）',
   weekly_report: '实施周报（列表 + 最新一期正文）',
-  actions: '行动事项',
+  actions: '待办事项',
   timeline: '统一时间线（全部事件混合）',
 };
 
@@ -58,7 +58,7 @@ export const customerDetailTool: Tool = {
     'sections 选择需要的板块，与客户详情页 tab 一一对应：' +
     'overview 概览（档案/风险/机会/完成率）、suggestion_feedback 建议、support_ticket 工单、operations_ticket 运维工单、' +
     'customer_manhour 工时明细、private_cloud_instance 私有云实例、followup 跟进记录、hemory_fragments Hemory 片段、' +
-    'cases 客户案例、weekly_report 实施周报、actions 行动事项、timeline 统一时间线。' +
+    'cases 客户案例、weekly_report 实施周报、actions 待办事项、timeline 统一时间线。' +
     '默认最小选择：每轮只取与本轮问题直接相关的板块，节省 token；仅当用户明确要求「全部/完整信息」时才传 ["all"]。' +
     'limit 仅作用于事件类板块（建议/工单/运维/私有云/跟进/时间线），默认 50，最大 200。',
   parameters: Type.Object({
@@ -156,7 +156,7 @@ export async function makeCustomerDetailResult(
       parts.push(block(label, JSON.stringify(await deps.weeklyReports(customer.id), null, 2)));
     } else if (section === 'actions') {
       const actions = deps.actions(customer.id);
-      parts.push(block(label, actions.length ? JSON.stringify(actions, null, 2) : '本地暂无行动事项。'));
+      parts.push(block(label, actions.length ? JSON.stringify(actions, null, 2) : '本地暂无待办事项。'));
     }
   }
   return { text: parts.join('\n\n') };

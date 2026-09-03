@@ -100,7 +100,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /csm-agent opportunities <客户ID或名称> \[--refresh\] \[--json\]/);
   assert.match(help.stdout, /逐条附信息来源/);
   assert.doesNotMatch(help.stdout, /action accept/);
-  assert.match(help.stdout, /csm-agent action complete <行动ID\.\.\.> \[--outcome <实际结果>\]/);
+  assert.match(help.stdout, /csm-agent action complete <待办ID\.\.\.> \[--outcome <实际结果>\]/);
   // 两态模型：批量完成仅未完成生效，已完成跳过。
   assert.match(help.stdout, /仅未完成状态生效，已完成跳过/);
   assert.doesNotMatch(help.stdout, /待处理\/进行中/);

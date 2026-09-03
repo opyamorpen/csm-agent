@@ -339,7 +339,7 @@ test('get_customer_detail: overview 剔除 timeline/caseDrafts/actions（由各�
 
 test('get_customer_detail: 工时/周报/案例板块走各自服务层', async () => {
   const r = await makeCustomerDetailResult(detailDeps(), { sections: ['customer_manhour', 'weekly_report', 'cases', 'actions'] });
-  for (const label of ['## 工时', '## 实施周报', '## 客户案例', '## 行动事项']) assert.ok(r.text.includes(label), `缺少板块 ${label}`);
+  for (const label of ['## 工时', '## 实施周报', '## 客户案例', '## 待办事项']) assert.ok(r.text.includes(label), `缺少板块 ${label}`);
   assert.ok(r.text.includes('"totalHours": 100'));
   assert.ok(r.text.includes('周报…'));
   assert.ok(r.text.includes('背景…'));

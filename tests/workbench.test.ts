@@ -425,12 +425,13 @@ test('workbench: ONES manhour parser normalizes detail records and pagination', 
   assert.equal(page.endCursor, 'next-page');
 });
 
-test('workbench: action completion is persisted with default and explicit outcomes', () => withDb((db) => {
+test('workbench: action completion is persisted without default outcome; explicit outcome recorded', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-4', name: '客户丁' });
   const action = db.createAction({ customerId: 'crm-4', title: '确认续约预算', whyNow: '进入续约窗口' });
   const completed = db.completeAction(action.id);
   assert.equal(completed?.status, 'completed');
-  assert.equal(completed?.outcome, 'CSM 在工作台确认完成');
+  // 完成直达：不传 outcome 只流转状态，不再兜底记「CSM 在工作台确认完成」。
+  assert.equal(completed?.outcome, null);
   const explicit = db.createAction({ customerId: 'crm-4', title: '指定结果', whyNow: '进入续约窗口' });
   db.completeAction(explicit.id, '已同步上线');
   assert.equal(db.getAction(explicit.id)?.outcome, '已同步上线');
@@ -466,7 +467,7 @@ test('workbench: legacy action statuses are collapsed to new on open (two-state 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: bulk complete degrades only failing item and keeps default outcome', () => withDb((db) => {
+test('workbench: bulk complete degrades only failing item; no outcome unless explicit', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-b2', name: '完成客户' });
   const ok = db.createAction({ customerId: 'crm-b2', title: '普通行动', whyNow: '原因' });
   const done = db.createAction({ customerId: 'crm-b2', title: '已完成行动', whyNow: '原因' });
@@ -477,7 +478,7 @@ test('workbench: bulk complete degrades only failing item and keeps default outc
   assert.equal(results[1].reason, '当前状态已完成，仅未完成可完成');
   assert.equal(results[2].title, null);
   assert.equal(db.getAction(ok.id)?.status, 'completed');
-  assert.equal(db.getAction(ok.id)?.outcome, 'CSM 在工作台确认完成');
+  assert.equal(db.getAction(ok.id)?.outcome, null);
   assert.equal(db.getAction(done.id)?.status, 'completed');
   const completed = db.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='complete_action' AND entity_id=?").get(ok.id) as { n: number };
   assert.equal(completed.n, 1);

@@ -1338,7 +1338,7 @@
     head.append(el('strong', null, fragment.payload?.topic || fragment.title), statusBadge);
     // 消费台账徽标：该片段已被哪些类型的已写入草稿消费（如工单已写入），提示再生成不会重复产出该类型。
     if (Array.isArray(fragment.consumedBy) && fragment.consumedBy.length) {
-      const typeLabels = { internal_todo: '行动', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' };
+      const typeLabels = { internal_todo: '待办', workhour: '工时', followup: '跟进', suggestion: '建议', ticket: '工单', operations: '运维' };
       const label = fragment.consumedBy.map((type) => typeLabels[type] ?? type).join('/');
       head.append(badge(`已写入·${label}`, 'muted'));
     }
@@ -2112,7 +2112,7 @@
   async function loadPortfolio() {
     const data = await api(`/api/customers?q=${encodeURIComponent(customerSearch.value.trim())}&sort=${encodeURIComponent(customerSort.value)}`);
     // 组合页只展示当前搜索视图，绝不写回 customersCache——搜索子集覆盖全量缓存曾致
-    // Hemory/行动页客户名 join 不上而回退显示「CRM <十六进制id>」。
+    // Hemory/待办页客户名 join 不上而回退显示「CRM <十六进制id>」。
     const customers = data.customers || [];
     const high = customers.filter((c) => c.health === 'high').length;
     const renewal = customers.filter((c) => c.renewalWithin120Days).length;
@@ -2287,9 +2287,9 @@
     strip.append(statCard({
       label: '待办',
       value: `${open} 项`,
-      sub: !all.length ? '暂无行动事项' : open ? '未完成行动事项' : '全部完成',
+      sub: !all.length ? '暂无待办事项' : open ? '未完成待办事项' : '全部完成',
       subClass: all.length && !open ? 'ok' : '',
-      hint: '明细见「行动事项」tab',
+      hint: '明细见「待办事项」tab',
     }));
 
     const cutoff = Date.now() - 30 * 86400000;
@@ -2564,9 +2564,9 @@
   }
 
   /**
-   * 单条行动卡。selectable（本周行动页）：未完成状态头插勾选框参与批量完成，
-   * 点卡片本体也可切换选中；客户详情行动 tab 不传参，维持纯单条操作。
-   * 状态两态（未完成 new / 已完成 completed），徽章中文化；已完成卡展示实际结果 outcome。
+   * 单条待办卡。selectable（待办页）：未完成状态头插勾选框参与批量完成，
+   * 点卡片本体也可切换选中；客户详情待办 tab 不传参，维持纯单条操作。
+   * 状态两态（未完成 new / 已完成 completed），徽章中文化；已完成卡仅在 outcome 存在时展示实际结果（CLI --outcome 记录）。
    */
   function actionCard(action, customerMode, selectable = false) {
     const card = el('article', 'action-card');
@@ -2585,7 +2585,8 @@
     const edit = el('button', 'quiet-command small', '编辑'); edit.onclick = () => editAction(action); buttons.append(edit);
     if (action.status === 'new') {
       const complete = el('button', 'quiet-command small', '完成');
-      complete.onclick = async () => { const outcome = (await promptDialog('记录实际结果：', '')) ?? ''; await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }) }); customerMode ? openCustomer(action.customerId) : loadActions(); };
+      // 一键直达完成：不弹确认、无需填写结果（CLI --outcome 仍可显式记录）。
+      complete.onclick = async () => { await api(`/api/action-items/${action.id}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); customerMode ? openCustomer(action.customerId) : loadActions(); };
       buttons.append(complete);
     }
     card.append(buttons);
@@ -2603,8 +2604,8 @@
   }
 
   function editAction(action) {
-    openWorkbenchModal('编辑行动事项');
-    const title = inputField('行动内容', action.title);
+    openWorkbenchModal('编辑待办事项');
+    const title = inputField('待办内容', action.title);
     const why = inputField('为什么现在做', action.whyNow, 'textarea');
     const owner = inputField('负责人', action.owner);
     const due = inputField('截止时间', action.dueAt ? new Date(action.dueAt).toISOString().slice(0, 16) : '', 'datetime-local');
@@ -3135,7 +3136,7 @@
       if (hidden > 0) opportunities.append(el('div', 'cell-sub', `另有 ${hidden} 条较低可信度假设未展示`));
     }
     const actions = el('div', 'action-board');
-    if (!(data.actions || []).length) actions.append(el('div', 'workspace-empty', '暂无行动事项'));
+    if (!(data.actions || []).length) actions.append(el('div', 'workspace-empty', '暂无待办事项'));
     for (const action of data.actions || []) actions.append(actionCard(action, true));
 
     const drafts = el('div', 'case-list');
@@ -3182,7 +3183,7 @@
     casePanel.append(drafts);
     addTab('cases', '客户案例', casePanel);
     addTab('weekly_report', '实施周报', buildWeeklyPanel(c));
-    addTab('actions', '行动事项', actions);
+    addTab('actions', '待办事项', actions);
     addTab('timeline', '统一时间线', renderTimeline(timeline));
     customerOverview.append(tabBar, tabBody);
     tabs[0].button.click();
@@ -3201,7 +3202,7 @@
   }
 
   /**
-   * 本周行动双 tab：未完成（status='new'，可勾选批量完成）/ 已完成（status='completed'，最近完成在前）。
+   * 待办页双 tab：未完成（status='new'，可勾选批量完成）/ 已完成（status='completed'，最近完成在前）。
    * 两个 tab 都按客户分组（details.customer-group 默认展开、点组标题可折叠，客户名经 customersCache 解析）；
    * 客户组顺序跟随列表序——未完成 tab 紧急客户（截止时间早）在前，已完成 tab 最近完成的客户在前。
    */
@@ -3221,7 +3222,7 @@
     actionBoard.innerHTML = '';
     const visible = activeActionTab === 'pending' ? pending : completed;
     if (!visible.length) {
-      actionBoard.append(el('div', 'workspace-empty', activeActionTab === 'pending' ? '暂无未完成行动' : '暂无已完成行动'));
+      actionBoard.append(el('div', 'workspace-empty', activeActionTab === 'pending' ? '暂无未完成待办' : '暂无已完成待办'));
     } else {
       const groups = new Map();
       for (const action of visible) groups.set(action.customerId, [...(groups.get(action.customerId) ?? []), action]);
@@ -3239,14 +3240,14 @@
     updateActionSelection();
   }
 
-  // 本周行动二级 tab：未完成 / 已完成 分列；切换后整表重渲染（选中 tab 态跨重渲染保持）。
+  // 待办二级 tab：未完成 / 已完成 分列；切换后整表重渲染（选中 tab 态跨重渲染保持）。
   for (const tab of document.querySelectorAll('.action-subtab')) tab.onclick = () => {
     if (activeActionTab === tab.dataset.actionTab) return;
     activeActionTab = tab.dataset.actionTab;
     void loadActions();
   };
 
-  // ── 本周行动批量操作：勾选联动 + 批量完成（逐项处理，单项失败/跳过不影响其他项）──
+  // ── 待办批量操作：勾选联动 + 批量完成（逐项处理，单项失败/跳过不影响其他项）──
   function selectedActionIds() {
     return [...actionBoard.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.dataset.actionId);
   }
@@ -3274,7 +3275,7 @@
     if (counts.failed) {
       const detail = items.filter((item) => item.result === 'failed')
         .map((item) => `${item.title || item.id}：${item.error || item.reason || '失败'}`).join('\n');
-      void alertDialog(`以下行动处理失败：\n${detail}`);
+      void alertDialog(`以下待办处理失败：\n${detail}`);
     }
   }
 
@@ -3295,19 +3296,17 @@
   };
   actionBulkComplete.onclick = async () => {
     const ids = selectedActionIds();
-    if (!ids.length) return alertDialog('请先选择行动');
-    const outcome = await promptDialog(`完成选中的 ${ids.length} 项行动，记录实际结果（留空使用默认）：`, '');
-    if (outcome === null) return;
+    if (!ids.length) return alertDialog('请先选择待办');
     setActionBulkBusy(true);
     try {
-      const data = await api('/api/action-items/bulk-complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, outcome: outcome.trim() || undefined }) });
+      const data = await api('/api/action-items/bulk-complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
       await loadActions();
       actionBulkSummary('批量完成', data.items || []);
     } catch (error) { await alertDialog(error.message); }
     finally { setActionBulkBusy(false); }
   };
 
-  // ── 风险预警名单：待处理 / 已消除 双 tab；消除必须填写原因/动作（与行动双 tab 同款交互骨架）。──
+  // ── 风险预警名单：待处理 / 已消除 双 tab；消除必须填写原因/动作（与待办双 tab 同款交互骨架）。──
   async function loadAlerts() {
     const data = await api(`/api/alerts?status=${activeAlertTab === 'pending' ? 'active' : 'resolved'}`);
     const alerts = data.alerts || [];

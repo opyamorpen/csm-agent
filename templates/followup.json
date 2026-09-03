@@ -32,12 +32,12 @@
     },
     "action_items": {
       "type": "array",
-      "description": "行动项与负责人",
+      "description": "待办项与负责人",
       "items": {
         "type": "object",
         "required": ["action"],
         "properties": {
-          "action": { "type": "string", "description": "行动内容" },
+          "action": { "type": "string", "description": "待办内容" },
           "owner": { "type": "string", "description": "负责人" },
           "due": { "type": "string", "format": "date", "description": "截止日期" }
         }

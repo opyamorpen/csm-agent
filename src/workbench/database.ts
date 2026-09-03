@@ -629,7 +629,7 @@ export class WorkbenchDatabase {
       WHERE source_system = 'ones'
         AND display_id IS NULL;
     `);
-    // 行动状态收敛两态（未完成 new / 已完成 completed）：历史上 accepted/「接受」流程与 in_progress/snoozed/false_positive
+    // 待办状态收敛两态（未完成 new / 已完成 completed）：历史上 accepted/「接受」流程与 in_progress/snoozed/false_positive
     // 等仅 CLI 可设的旧状态在开库时一律归入未完成；completed 不动，保持周报完成统计口径（幂等，新库无旧状态行）。
     this.db.prepare(`UPDATE action_items SET status='new', updated_at=? WHERE status NOT IN ('new','completed')`).run(nowIso());
     // 预警触发键 ones_inactivity → engagement_inactivity（口径升级为 CRM+ONES 同时停滞）：不迁移则存量 active 行
@@ -1500,7 +1500,8 @@ export class WorkbenchDatabase {
   completeAction(id: string, outcome?: string, actor = 'csm'): ActionItem | null {
     const action = this.getAction(id);
     if (!action) return null;
-    const updated = this.updateAction(id, { status: 'completed', outcome: outcome ?? 'CSM 在工作台确认完成' })!;
+    // 不传 outcome 只流转完成态、不记录实际结果；仅 CLI --outcome 显式传入时落库。
+    const updated = this.updateAction(id, { status: 'completed', outcome: outcome ?? null })!;
     this.audit(actor, 'complete_action', 'action_item', id, { outcome });
     return updated;
   }
@@ -1511,7 +1512,7 @@ export class WorkbenchDatabase {
     for (const id of [...new Set(ids)]) {
       const action = this.getAction(id);
       if (!action) {
-        results.push({ id, title: null, result: 'failed', error: '行动不存在' });
+        results.push({ id, title: null, result: 'failed', error: '待办不存在' });
         continue;
       }
       if (action.status !== 'new') {

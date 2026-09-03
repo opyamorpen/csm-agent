@@ -14,7 +14,7 @@ description: 从工作台本地数据库读取客户的已同步数据（档案�
 - 主入口是 `get_customer_detail`：按板块（sections）抓取客户详情页数据，与客户页 tab 一一对应——
   `overview` 概览（档案/风险/机会/完成率）、`suggestion_feedback` 建议、`support_ticket` 工单、`operations_ticket` 运维、
   `customer_manhour` 工时明细、`private_cloud_instance` 私有云实例、`followup` 跟进记录、`hemory_fragments` 会议片段、
-  `cases` 客户案例、`weekly_report` 实施周报、`actions` 行动事项、`timeline` 统一时间线。
+  `cases` 客户案例、`weekly_report` 实施周报、`actions` 待办事项、`timeline` 统一时间线。
 - **默认最小选择**：每轮只取与本轮问题直接相关的 sections（问工单就只取 `["support_ticket"]`），节省 token；
   仅当用户明确要求「全部信息 / 完整情况」时才传 `["all"]`。
 - 客户现状概览（健康度、续约、合同、风险评分、增购机会）→ `["overview"]`
