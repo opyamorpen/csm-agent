@@ -2090,9 +2090,9 @@
   // 悬浮面板复用 #chat 本体（加 .floating 变 fixed 弹层）：SSE/消息渲染/滚动逻辑全在既有
   // 节点上零改动；显隐条件从「仅 agent 视图」放宽到「agent 视图或悬浮态」（见 showView/showAgentMode）。
 
-  /** 悬浮球态同步：完整 Agent 视图内收起（入口重复）；对话进行中挂 busy 呼吸点。 */
+  /** 悬浮球态同步：完整 Agent 视图或悬浮面板打开时收起（球与面板同 fixed 18px 锚点，不让位会压住面板发送按钮）；对话进行中挂 busy 呼吸点。 */
   function syncChatFab() {
-    chatFab.classList.toggle('hidden', activeView === 'agent');
+    chatFab.classList.toggle('hidden', activeView === 'agent' || chatFloating);
     chatFab.classList.toggle('busy', busy);
   }
 
@@ -2117,7 +2117,7 @@
     syncChatFab();
   }
 
-  chatFab.onclick = () => void openFloatingChat();
+  chatFab.onclick = () => void (async () => { await newSession(); await openFloatingChat(); })();
   chatFloatingClose.onclick = () => closeFloatingChat();
   // 悬浮面板头「新对话」：悬浮态恒在对话 tab，无需再切面板；会话管理（切换/归档等）走完整视图。
   chatFloatingNew.onclick = () => void newSession();

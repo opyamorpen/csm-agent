@@ -693,7 +693,7 @@ footer {
 .scroll-bottom-btn:hover { border-color: var(--accent); color: var(--text); }
 
 /* ── Agent 悬浮球 + 悬浮对话面板 ──
-   悬浮球全局常驻右下角（完整 Agent 视图内由 JS 加 hidden 收起）；
+   悬浮球全局常驻右下角（完整 Agent 视图或悬浮面板打开时由 JS 加 hidden 收起——球与面板同为 fixed 18px 锚点，面板打开时球必须让位，否则压住面板发送按钮）；
    悬浮面板复用 #chat 本体（加 .floating 变 fixed 弹层），SSE/渲染/滚动逻辑零改动。
    z-index 30：压过内容条（8/9）与下拉菜单（12），低于模态（50）与光标涟漪画布（60）。 */
 .chat-fab {

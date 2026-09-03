@@ -732,6 +732,8 @@ test('agent chat opens as a floating dock from anywhere in the workbench', () =>
   // 精简面板只承载对话：打开必须落回对话 tab，否则面板里可能是 Hemory/草稿箱（tab 条已隐藏无法切回）。
   assert.match(opener, /await showAgentMode\('conversation'\)/);
   assert.match(opener, /pinToBottom\(\)/);
+  // 面板打开即收球（openFloatingChat 末尾同步）：球与面板同为 fixed 18px 锚点，不收球会压住面板发送按钮。
+  assert.match(opener, /syncChatFab\(\)/);
   const closer = app.match(/function closeFloatingChat[\s\S]*?\n  \}\n\n  chatFab\.onclick/)?.[0];
   assert.ok(closer, 'closeFloatingChat source was not found');
   assert.match(closer, /chatView\.classList\.remove\('floating'\)/);
@@ -748,10 +750,10 @@ test('agent chat opens as a floating dock from anywhere in the workbench', () =>
   assert.ok(modeSwitch, 'showAgentMode source was not found');
   assert.match(modeSwitch, /footerEl\.classList\.toggle\('hidden', activeView !== 'agent' && !chatFloating \|\| mode !== 'conversation'\)/);
 
-  // 悬浮球态同步：完整 Agent 视图内收起（入口重复）；busy 呼吸点在四个 busy 翻转点同步。
+  // 悬浮球态同步：完整 Agent 视图或悬浮面板打开时收起（球与面板同为 fixed 18px 锚点，不让位会压住面板发送按钮）；busy 呼吸点在四个 busy 翻转点同步。
   const fabSync = app.match(/function syncChatFab\(\) \{[\s\S]*?\n  \}/)?.[0];
   assert.ok(fabSync, 'syncChatFab source was not found');
-  assert.match(fabSync, /chatFab\.classList\.toggle\('hidden', activeView === 'agent'\)/);
+  assert.match(fabSync, /chatFab\.classList\.toggle\('hidden', activeView === 'agent' \|\| chatFloating\)/);
   assert.match(fabSync, /chatFab\.classList\.toggle\('busy', busy\)/);
   assert.match(app, /setSendStopping\(true\); syncChatFab\(\); break;/);
   assert.match(app, /case 'turn_end':\s*\n\s*busy = false;\s*\n\s*syncChatFab\(\);/);
@@ -782,6 +784,9 @@ test('agent chat opens as a floating dock from anywhere in the workbench', () =>
   // 悬浮面板头按钮接线：新对话（面板内直接续聊）、完整视图（收面板转完整 Agent 视图）。
   assert.match(app, /chatFloatingNew\.onclick = \(\) => void newSession\(\);/);
   assert.match(app, /chatFloatingExpand\.onclick = \(\) => \{ closeFloatingChat\(\); showView\('agent'\); \};/);
+  // 悬浮球点击 = 开新会话 + 就地弹面板：每次点击默认新对话（先建会话后弹层，旧会话消息不闪现）；
+  // 「询问 Agent」入口不受影响——它走 ensureCustomerSession 绑定客户会话，语义与悬浮球不同。
+  assert.match(app, /chatFab\.onclick = \(\) => void \(async \(\) => \{ await newSession\(\); await openFloatingChat\(\); \}\)\(\);/);
 });
 
 test('sidebar scrollbar only appears on hover inside its own track pad', () => {
