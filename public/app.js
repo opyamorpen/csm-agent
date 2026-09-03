@@ -328,6 +328,68 @@
     };
   }
 
+  /** 立即执行型 loading：与 withLoading 同语义但不接管 onclick，供菜单项把加载态挂到触发按钮上（菜单已收起，项自身不可见）。 */
+  async function runWithBusy(button, busyText, fn) {
+    if (button.disabled) return;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText;
+    try { return await fn(); }
+    finally { button.disabled = false; button.textContent = original; }
+  }
+
+  // ── 下拉命令菜单（首个此类组件）：启动期一次性注册委托关闭，openCustomer 整页重渲染不累积监听。 ──
+
+  function closeAllCommandMenus() {
+    for (const list of document.querySelectorAll('.command-menu-list')) {
+      list.classList.add('hidden');
+      list.setAttribute('aria-hidden', 'true');
+    }
+    for (const trigger of document.querySelectorAll('.command-menu > button[aria-expanded]')) trigger.setAttribute('aria-expanded', 'false');
+  }
+
+  document.addEventListener('click', (event) => {
+    if (event.target.closest('.command-menu')) return;
+    closeAllCommandMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeAllCommandMenus();
+  });
+
+  /**
+   * 下拉命令菜单：触发按钮 + 右对齐浮层列表。items: [{ label, run }]，
+   * 点项先收起菜单再执行动作；同一时刻只允许一个菜单展开。
+   */
+  function commandMenu(label, items) {
+    const wrap = el('span', 'command-menu');
+    const trigger = el('button', 'quiet-command', label);
+    trigger.type = 'button';
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-expanded', 'false');
+    const list = el('div', 'command-menu-list hidden');
+    list.setAttribute('role', 'menu');
+    list.setAttribute('aria-hidden', 'true');
+    const close = () => { closeAllCommandMenus(); };
+    trigger.onclick = () => {
+      const opening = list.classList.contains('hidden');
+      closeAllCommandMenus();
+      if (opening) {
+        list.classList.remove('hidden');
+        list.setAttribute('aria-hidden', 'false');
+        trigger.setAttribute('aria-expanded', 'true');
+      }
+    };
+    for (const item of items) {
+      const itemButton = el('button', 'command-menu-item', item.label);
+      itemButton.type = 'button';
+      itemButton.setAttribute('role', 'menuitem');
+      itemButton.onclick = async () => { close(); await item.run(); };
+      list.append(itemButton);
+    }
+    wrap.append(trigger, list);
+    return { wrap, trigger, list };
+  }
+
   // ── ONES Wiki 发布位置选择器（空间 → 页面树，懒加载展开；案例发布与周报发布共用） ──
 
   /** 把平面页面列表组装成嵌套 <details> 树；初始只渲染根层，展开时挂子层。 */
@@ -3022,36 +3084,40 @@
     const head = el('div', 'customer-detail-head');
     const title = el('div'); title.append(el('h1', null, c.name), el('p', null, [c.shortName, c.industry, c.csmName && `CSM ${c.csmName}`].filter(Boolean).join(' · ')));
     const commands = el('div', 'row-actions');
-    const refresh = el('button', 'quiet-command', '刷新三套系统');
-    refresh.onclick = async () => { const run = await api(`/api/customers/${encodeURIComponent(customerId)}/refresh`, { method: 'POST' }); await pollSync(run.id); await openCustomer(customerId); };
-    // 公开动态：强制检索（忽略 7 天节流门），落库后服务端已重算风险/机会，整页刷新可见。
-    const webIntel = el('button', 'quiet-command', '刷新公开动态');
-    webIntel.onclick = async () => {
-      try {
-        webIntel.disabled = true;
-        webIntel.textContent = '检索中…';
-        const result = await api(`/api/customers/${encodeURIComponent(customerId)}/web-intel`, { method: 'POST' });
-        await openCustomer(customerId);
-        await alertDialog(result.saved
-          ? `已落库 ${result.saved} 条最近三个月公开动态，续约风险与增购机会已重算。`
-          : `检索了 ${result.searched} 个角度，未找到可落库的最近三个月公开动态（未搜到不构成任何正面或负面信号）。`);
-      } catch (error) { await alertDialog(`公开动态检索失败：${error.message}`); }
-      finally { webIntel.disabled = false; webIntel.textContent = '刷新公开动态'; }
-    };
-    // 增购机会重新分析：强制（忽略指纹/时长门），从会议录音片段+公开动态证据重新产出假设，失败保留旧列表。
-    const reanalyze = el('button', 'quiet-command', '重新分析增购机会');
-    reanalyze.onclick = async () => {
-      try {
-        reanalyze.disabled = true;
-        reanalyze.textContent = '分析中…';
-        const result = await api(`/api/customers/${encodeURIComponent(customerId)}/opportunities/refresh`, { method: 'POST' });
-        await openCustomer(customerId);
-        await alertDialog(result.status === 'succeeded'
-          ? `已重新分析，识别到 ${result.generated} 条增购机会假设（按可信度展示前 5 条）。`
-          : `未重新生成：${result.reason || result.status}（展示仍为最近一次分析结果）。`);
-      } catch (error) { await alertDialog(`增购机会分析失败：${error.message}`); }
-      finally { reanalyze.disabled = false; reanalyze.textContent = '重新分析增购机会'; }
-    };
+    // 三个刷新类操作收进「刷新数据」菜单：首项是母操作（三套系统同步内部已强制跑公开动态并级联重算风险/机会），
+    // 后两项是绕过门控的强制子集（公开动态 7 天节流门 / 机会指纹+时长门）；同步等待型的加载态挂到触发按钮上（菜单已收起）。
+    const refreshMenu = commandMenu('刷新数据', [
+      {
+        label: '同步三套系统（含重算）',
+        run: async () => { const run = await api(`/api/customers/${encodeURIComponent(customerId)}/refresh`, { method: 'POST' }); await pollSync(run.id); await openCustomer(customerId); },
+      },
+      {
+        // 公开动态：强制检索（忽略 7 天节流门），落库后服务端已重算风险/机会，整页刷新可见。
+        label: '仅刷新公开动态',
+        run: () => runWithBusy(refreshMenu.trigger, '检索中…', async () => {
+          try {
+            const result = await api(`/api/customers/${encodeURIComponent(customerId)}/web-intel`, { method: 'POST' });
+            await openCustomer(customerId);
+            await alertDialog(result.saved
+              ? `已落库 ${result.saved} 条最近三个月公开动态，续约风险与增购机会已重算。`
+              : `检索了 ${result.searched} 个角度，未找到可落库的最近三个月公开动态（未搜到不构成任何正面或负面信号）。`);
+          } catch (error) { await alertDialog(`公开动态检索失败：${error.message}`); }
+        }),
+      },
+      {
+        // 增购机会重新分析：强制（忽略指纹/时长门），从会议录音片段+公开动态证据重新产出假设，失败保留旧列表。
+        label: '仅重新分析增购机会',
+        run: () => runWithBusy(refreshMenu.trigger, '分析中…', async () => {
+          try {
+            const result = await api(`/api/customers/${encodeURIComponent(customerId)}/opportunities/refresh`, { method: 'POST' });
+            await openCustomer(customerId);
+            await alertDialog(result.status === 'succeeded'
+              ? `已重新分析，识别到 ${result.generated} 条增购机会假设（按可信度展示前 5 条）。`
+              : `未重新生成：${result.reason || result.status}（展示仍为最近一次分析结果）。`);
+          } catch (error) { await alertDialog(`增购机会分析失败：${error.message}`); }
+        }),
+      },
+    ]);
     const generate = el('button', 'primary-command', '生成案例');
     generate.onclick = async () => {
       try {
@@ -3086,7 +3152,7 @@
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
     };
-    commands.append(refresh, webIntel, reanalyze, generate, ask); head.append(title, commands); customerOverview.append(head);
+    commands.append(refreshMenu.wrap, generate, ask); head.append(title, commands); customerOverview.append(head);
 
     // 预警横幅：该客户存在待处理预警时置顶展示（逐条原因 + 消除），消除后重开客户页。
     if ((data.alerts || []).length) {

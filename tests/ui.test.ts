@@ -1240,12 +1240,47 @@ test('customer overview data section renders count-only stat cards with status-c
 test('customer page exposes web intelligence refresh next to full sync', () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
-  // 展示契约：客户头部命令行有「刷新公开动态」，强制检索后整页刷新；未搜到是 unknown 话术，不是健康信号。
-  assert.match(source, /'刷新公开动态'/);
+  // 展示契约：「刷新数据」菜单里有「仅刷新公开动态」（强制检索后整页刷新；未搜到是 unknown 话术，不是健康信号）。
+  assert.match(source, /'仅刷新公开动态'/);
   assert.match(source, /\/web-intel/, '前端应调用 /web-intel 端点');
   assert.match(source, /未搜到不构成任何正面或负面信号/);
   assert.match(server, /sub === '\/web-intel'/);
   assert.match(server, /runWebIntelForCustomer\(customerId, \{ force: true \}\)/);
+});
+
+test('customer header folds the three refresh commands into a dropdown menu', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const openCustomer = source.match(/async function openCustomer\(customerId\) \{[\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(openCustomer, 'openCustomer 函数存在');
+
+  // 头部收敛为 3 个控件：刷新数据菜单 + 生成案例主按钮 + 询问 Agent；三个刷新操作不再平铺成按钮。
+  assert.match(openCustomer, /commands\.append\(refreshMenu\.wrap, generate, ask\);/);
+  assert.doesNotMatch(openCustomer, /const (refresh|webIntel|reanalyze) = el\('button'/);
+
+  // 菜单恰含三项、顺序固定：母操作（全量同步，内部已含公开动态+级联重算）在前，两个绕门控的强制子集在后。
+  const menu = openCustomer.match(/commandMenu\('刷新数据', \[[\s\S]*?\n    \]\);/)?.[0];
+  assert.ok(menu, '刷新数据菜单存在');
+  const labels = [...menu.matchAll(/label: '([^']+)'/g)].map((m) => m[1]);
+  assert.deepEqual(labels, ['同步三套系统（含重算）', '仅刷新公开动态', '仅重新分析增购机会']);
+  // 三项分别命中对应端点，行为与平铺时代一致。
+  assert.match(menu, /\/refresh`, \{ method: 'POST' \}\); await pollSync\(run\.id\)/);
+  assert.match(menu, /\/web-intel`, \{ method: 'POST' \}/);
+  assert.match(menu, /\/opportunities\/refresh`, \{ method: 'POST' \}/);
+  // 同步等待型操作把加载态挂到触发按钮上（点项即收起菜单，项自身不可见）。
+  assert.match(menu, /runWithBusy\(refreshMenu\.trigger, '检索中…'/);
+  assert.match(menu, /runWithBusy\(refreshMenu\.trigger, '分析中…'/);
+
+  // 组件契约：点项先收起再执行；菜单外点击与 Escape 走启动期一次性委托关闭（重渲染不累积监听）。
+  const component = source.match(/function commandMenu\(label, items\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(component, 'commandMenu 组件存在');
+  assert.match(component, /itemButton\.onclick = async \(\) => \{ close\(\); await item\.run\(\); \};/);
+  assert.match(source, /document\.addEventListener\('click'[\s\S]*?closeAllCommandMenus\(\);/);
+  assert.match(source, /document\.addEventListener\('keydown'[\s\S]*?closeAllCommandMenus\(\)/);
+
+  // 样式契约：浮层右对齐挂在触发按钮下沿；显隐复用全局 .hidden（不另设 display 规则）。
+  assert.match(styles, /\.command-menu-list \{[\s\S]*?position: absolute; right: 0;[\s\S]*?\}/);
+  assert.doesNotMatch(styles, /\.command-menu-list\.hidden/);
 });
 
 test('send button doubles as stop control while a turn is running', () => {
@@ -1809,7 +1844,7 @@ test('opportunity board renders an ordered list of top-5 briefs with per-item so
   // 手动重新分析入口与展示截断提示。
   assert.match(renderer, /另有 \$\{hidden\} 条较低可信度假设未展示/);
   assert.match(source, /\/opportunities\/refresh/, 'POST refresh endpoint is wired');
-  assert.match(source, /'重新分析增购机会'/);
+  assert.match(source, /'仅重新分析增购机会'/);
   // 旧卡片网格类已退役，不得残留。
   assert.doesNotMatch(source, /opportunity-grid|opportunity-card/);
   assert.doesNotMatch(styles, /opportunity-grid|opportunity-card/);

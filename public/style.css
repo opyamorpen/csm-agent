@@ -949,6 +949,21 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .back-command { border: 0; background: transparent; color: var(--accent-deep); padding-left: 0; }
 .back-command:hover { transform: translateY(-1px); }
 .row-actions { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+/* 下拉命令菜单（客户页头部「刷新数据 ▾」）：浮层右对齐挂在触发按钮下沿，z-index 12 压过内容条（8/9）、低于移动端侧栏（15）与弹窗（50）。 */
+.command-menu { position: relative; display: inline-flex; }
+.command-menu > button::after { content: '▾'; margin-left: 6px; font-size: 10px; color: var(--muted); }
+.command-menu-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 12; min-width: 224px;
+  display: flex; flex-direction: column; gap: 2px; padding: 6px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  box-shadow: var(--shadow-m);
+}
+.command-menu-item {
+  min-height: 34px; padding: 7px 10px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--text); text-align: left; cursor: pointer; font: inherit; white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.command-menu-item:hover { background: var(--panel-2); color: var(--accent-deep); }
 .definition-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow-xs); }
 .definition { min-height: 72px; padding: 12px; border-right: 1px solid var(--border-soft); }
 .definition:last-child { border-right: 0; }
