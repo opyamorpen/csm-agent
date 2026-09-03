@@ -7,6 +7,8 @@ import { join, extname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
+import { listBackups, restoreBackup } from './backup.js';
+import { dataDir } from './store.js';
 import { appRoot, isManagedInstall, readInstallLayout } from './managed-install.js';
 import { readBuildInfo } from './version.js';
 import { runUpdate } from './update.js';
@@ -70,6 +72,8 @@ const CLI_CAPABILITIES = [
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
+  { command: 'backup', workflow: 'data-backup', access: 'read-write', api: ['POST /api/backup/run', 'GET /api/backups', 'GET /api/sync-runs/:id'],
+    notes: '每日 04:00（上海）自动全量备份：SQLite VACUUM INTO 在线快照 + 会话 + 附件 + 配置（含密钥）打成单个 tar.gz 归档，保留最近 3 份、更旧自动删除；run 立即触发同一管线；list 列归档（本地可读，服务在线附带最近 run 与下次调度时刻）；restore 为本地离线命令（校验→停服务→现有数据移入 .restore-rollback-* 回滚目录→应用→重启，--db-only 只恢复数据库；~/.mcp-auth OAuth token 不在备份内，恢复后需重新授权）' },
   { command: 'hemory', workflow: 'hemory-attribution', access: 'read-write', api: ['/api/hemory/sync', '/api/hemory/resegment', '/api/hemory/resegment?recordingId=', '/api/hemory/segmentation-jobs', '/api/hemory/fragments', '/api/hemory/fragments?customer_id=', '/api/hemory/fragments/attribution', '/api/hemory/fragments/ignore', '/api/hemory/fragments/regenerate', '/api/hemory/fragments/inherit'], notes: 'assign/regenerate --wait 实时打印生成进度（阶段/模型输出字数/重试提示）；repair 修复重切孪生的归属继承（重切后已处理内容不再重回收件箱）' },
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory', '/api/draft-jobs?status=active&kind=hemory'], notes: 'draft jobs --active 列出进行中任务（含进度与中断标注）' },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-items/:id (PATCH edits 结构化编辑)', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
@@ -232,6 +236,16 @@ function help(): void {
   csm-agent uninstall [--purge] [--yes]
     （卸载：移除 CLI shim、桌面 App 入口、常驻服务与受管目录；
      默认保留 ~/.csm-agent 用户数据，--purge 连同配置/会话/数据库一并删除）
+  csm-agent backup list [--json]
+    （列出备份归档：时间/大小/触发方式/包含内容；服务运行时附带最近备份 run 与下次调度时刻。
+     自动备份每日 04:00（上海时区）全量数据目录——SQLite 在线快照 + 会话 + 附件 + 配置（含密钥）
+     打成单个 tar.gz 归档，磁盘保留最近 3 份、更旧自动删除）
+  csm-agent backup run
+    （立即触发一次备份（与自动备份同一管线），完成后输出归档路径）
+  csm-agent backup restore <归档路径|id|latest> [--db-only] [--yes]
+    （离线恢复：先校验归档完整性，再停止 launchd 服务、把现有数据移入 .restore-rollback-* 目录
+     （回滚 = 移回）后应用归档并重启服务；--db-only 只恢复数据库（会话/附件/配置保持现状）；
+     ~/.mcp-auth OAuth token 不在备份内，恢复后需重新授权）
   csm-agent ones fields [--verify] [--json]
     （ONES Desk 建议/工单/运维工单必填字段契约：选项 UUID 表、兜底值、
      实例部署类型规则（CRM 使用版本=公有云版→公有云，其余→私有云）；
@@ -1426,6 +1440,74 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
   throw new Error('draft 子命令只允许 review/edit/retry/ignore/regenerate/dismiss/jobs');
 }
 
+// ── backup：全量数据备份/恢复（run/list 走服务 API；restore 本地离线，服务必须不在运行） ──
+
+async function backupCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'run') {
+    const start = await request<any>('/api/backup/run', { method: 'POST' });
+    const completed = await waitSync(start.id, 300);
+    const archive = completed.sourceStatus?.backup?.archive;
+    if (archive) console.log(`备份归档: ${archive}`);
+    print(completed);
+    if (completed.status === 'failed') process.exitCode = 2;
+    return;
+  }
+  if (subcommand === 'list') {
+    // 本地读归档目录（服务不在线也能列）；服务可达时附最近 run 与下次调度时刻（service status 同款降级）。
+    const result: Record<string, unknown> = { backups: listBackups(dataDir()) };
+    try {
+      const service = await request<any>('/api/backups');
+      result.lastRun = service.lastRun ?? null;
+      result.nextScheduledAt = service.nextScheduledAt ?? null;
+    } catch {
+      result.service = '不可达（仅本地归档；服务运行时此处附带最近备份 run 与下次调度时刻）';
+    }
+    return print(result);
+  }
+  if (subcommand === 'restore') {
+    const target = values.find((v) => !v.startsWith('--'));
+    if (!target) throw new Error('用法: csm-agent backup restore <归档路径|id|latest> [--db-only] [--yes]');
+    const dbOnly = values.includes('--db-only');
+    const probeAlive = async (): Promise<boolean> => {
+      try {
+        await fetch(`${baseUrl}/api/version`, { signal: AbortSignal.timeout(1500) });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // 恢复前预检：先把「服务在跑」的事实亮给用户（restoreBackup 停服务后会再探活兜底）。
+    if (await probeAlive()) console.log('检测到服务正在运行，恢复过程中将停止并重启 launchd 托管的服务。');
+    if (!values.includes('--yes')) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = (await rl.question(`将用 ${target} 覆盖现有数据（现有数据移入回滚目录${dbOnly ? '，--db-only 只恢复数据库' : ''}）。输入 y 继续: `)).trim().toLowerCase();
+        if (answer !== 'y') throw new Error('已取消恢复');
+      } finally {
+        rl.close();
+      }
+    }
+    const result = await restoreBackup(target, dataDir(), { dbOnly, probeAlive, onStep: (message) => console.log(message) });
+    if (result.serviceRestarted) {
+      process.stdout.write('等待服务重启');
+      for (let attempt = 0; attempt < 30; attempt++) {
+        try {
+          const version = await request<any>('/api/version');
+          console.log(`\n服务已恢复运行（buildId ${version.buildId}）`);
+          break;
+        } catch {
+          process.stdout.write('.');
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+    } else {
+      console.log('服务未由 launchd 托管：数据已恢复，如需启动请运行 csm-agent service install 或 npm run dev。');
+    }
+    return print(result);
+  }
+  throw new Error('backup 子命令只允许 run/list/restore');
+}
+
 async function serviceCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'install') {
     const port = Number(values.shift() ?? process.env.CSM_PORT ?? 3210);
@@ -1724,6 +1806,7 @@ async function main(): Promise<void> {
   if (command === 'drafts') return showDrafts(args);
   if (command === 'draft') return draftCommand(args.shift() ?? '', args);
   if (command === 'service') return serviceCommand(args.shift() ?? 'status', args);
+  if (command === 'backup') return backupCommand(args.shift() ?? '', args);
   if (command === 'update') return runUpdate();
   if (command === 'uninstall') return runUninstall({ purge: rawArgs.includes('--purge'), yes: rawArgs.includes('--yes') });
   if (command === 'sessions') return sessionsCommand(args.shift() ?? 'list', args, rawArgs);

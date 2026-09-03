@@ -67,4 +67,11 @@ test('service: 启动孤儿清扫必须先于调度器挂载（hermory 启动补
     sweep < hermoryScheduler,
     `孤儿清扫（字节偏移 ${sweep}）必须先于调度器挂载（字节偏移 ${hermoryScheduler}）`,
   );
+  // 备份调度同样带启动补跑（scheduleBackup 的 shouldCatchUpBackup 会建 running run），同一契约。
+  const backupScheduler = source.indexOf('scheduleBackup(db');
+  assert.ok(backupScheduler > -1, 'server.ts 应挂载 scheduleBackup');
+  assert.ok(
+    sweep < backupScheduler,
+    `孤儿清扫（字节偏移 ${sweep}）必须先于备份调度挂载（字节偏移 ${backupScheduler}）`,
+  );
 });

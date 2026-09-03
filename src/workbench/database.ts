@@ -1583,6 +1583,12 @@ export class WorkbenchDatabase {
     return !!this.db.prepare("SELECT 1 FROM sync_runs WHERE scope=? AND status='succeeded' LIMIT 1").get(scope);
   }
 
+  /** 最近一次备份 run（scope backup:<上海日期>，任意触发方式）；从未跑过返回 undefined。 */
+  latestBackupRun(): SyncRun | undefined {
+    const row = this.db.prepare("SELECT * FROM sync_runs WHERE scope LIKE 'backup:%' ORDER BY started_at DESC LIMIT 1").get() as Row | undefined;
+    return row ? this.syncRunFromRow(row) : undefined;
+  }
+
   /** 该客户最近一次成功公开动态检索的完成时间；从未成功过返回 null。 */
   latestWebIntelSyncAt(customerId: string): Date | null {
     const row = this.db.prepare("SELECT finished_at FROM sync_runs WHERE scope='web_intelligence' AND customer_id=? AND status='succeeded' AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1")

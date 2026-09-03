@@ -100,6 +100,24 @@ export function uninstallService(): Record<string, unknown> {
   return { installed: false, removed: paths.plist, logsRetained: [paths.stdout, paths.stderr] };
 }
 
+/** 备份恢复用：bootout 数据服务（不动 plist 文件，bootstrap 权威源保留）。未安装返回 false。 */
+export function stopServiceForRestore(): boolean {
+  const paths = servicePaths();
+  if (!existsSync(paths.plist)) return false;
+  launchctl('bootout', `gui/${process.getuid?.() ?? 0}`, paths.plist);
+  return true;
+}
+
+/** 备份恢复用：按既有 plist 重新拉起（bootstrap 已加载时静默、kickstart 兜底保证运行）。未安装返回 false。 */
+export function startServiceAfterRestore(): boolean {
+  const paths = servicePaths();
+  if (!existsSync(paths.plist)) return false;
+  const domain = `gui/${process.getuid?.() ?? 0}`;
+  launchctl('bootstrap', domain, paths.plist);
+  launchctl('kickstart', '-k', `${domain}/${launchAgentLabel()}`);
+  return true;
+}
+
 export function readServiceLogs(lines = 100): Record<string, unknown> {
   const paths = servicePaths();
   const tail = (path: string) => {

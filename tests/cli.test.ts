@@ -47,6 +47,8 @@ test('version --json prints the install fingerprint for cross-machine comparison
   assert.equal(fingerprint.node, process.version);
   const help = runCli('help');
   assert.match(help.stdout, /version \[--json\]/);
+  assert.match(help.stdout, /backup (list|run|restore)/, 'help 应包含备份三命令');
+  assert.match(help.stdout, /--db-only/, 'help 应说明 --db-only 恢复语义');
 });
 
 test('CLI exposes machine-readable core capability coverage without a running server', () => {
@@ -54,9 +56,16 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'backup', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
+  // 数据备份能力：run/list 走服务 API，restore 是本地离线命令（notes 必须说明保留策略与恢复语义）。
+  const backupCapability = capabilities.find((item) => item.workflow === 'data-backup')!;
+  assert.ok(backupCapability.api.includes('POST /api/backup/run'), 'backup capability must expose the manual trigger endpoint');
+  assert.ok(backupCapability.api.includes('GET /api/backups'), 'backup capability must expose the archive listing endpoint');
+  assert.match(backupCapability.notes ?? '', /保留最近 3 份/);
+  assert.match(backupCapability.notes ?? '', /每日 04:00（上海）/);
+  assert.match(backupCapability.notes ?? '', /--db-only/);
   // 公开动态检索能力：CLI 命令与强制刷新端点同源；轮次报告查询与轮换排空端点同在。
   assert.ok(capabilities.some((item) => item.workflow === 'web-intelligence-refresh' && item.api.includes('/api/customers/:id/web-intel')));
   const webIntelCapability = capabilities.find((item) => item.workflow === 'web-intelligence-refresh')!;

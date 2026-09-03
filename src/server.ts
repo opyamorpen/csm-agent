@@ -30,6 +30,7 @@ import { HemorySegmentationService, hemorySegmentationFingerprint } from './work
 import { WeeklyReportService, weekMonday, weekRange } from './workbench/weekly.js';
 import { WikiService } from './workbench/wiki.js';
 import { readBuildInfo, serviceVersionInfo, startStalenessWatch, type BuildInfo } from './version.js';
+import { consumeRestoreMarker, listBackups, nextBackupSlot, scheduleBackup, triggerBackup } from './backup.js';
 import { AttachmentError, classifyAttachment, buildContentBlocks, storeAttachments, getStoredAttachment, removeSessionAttachments, attachmentFilePath, type IncomingAttachment } from './attachments.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -621,6 +622,19 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       // ── build version（旧进程检测的权威端点；404 = 进程早于该机制） ──
       if (req.method === 'GET' && path === '/api/version') {
         return json(res, 200, serviceVersionInfo(loadedBuildInfo, serverStartedAt));
+      }
+
+      // ── 备份（每日 04:00 上海时区自动全量备份，保留最近 3 份；CLI 入口 csm-agent backup）──
+      if (req.method === 'POST' && path === '/api/backup/run') {
+        try {
+          return json(res, 202, triggerBackup(workbench.db, dataDir(), 'manual').run);
+        } catch (error) {
+          return json(res, 409, { error: (error as Error).message });
+        }
+      }
+      if (req.method === 'GET' && path === '/api/backups') {
+        return json(res, 200, { backups: listBackups(dataDir()), lastRun: workbench.db.latestBackupRun() ?? null,
+          nextScheduledAt: nextBackupSlot().at.toISOString() });
       }
 
       // ── customer-centered workbench ──
@@ -1682,10 +1696,15 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   if (orphanedRuns || resetJobs) {
     db.audit('csm', 'recover_interrupted_sync_jobs', 'sync_run', 'startup', { orphanedRuns, resetSegmentationJobs: resetJobs });
   }
+  // 备份恢复标记消费：CLI 离线恢复后落 backup_restore 审计（CLI 不直接写 DB，保持单写者）。
+  consumeRestoreMarker(db, dataDir());
   const stopPortfolio = schedulePortfolioSync(sync);
   const stopHemory = scheduleHemorySync(sync, db);
   // 公开动态自动轮换：每日 20:00–次日 08:00（上海错峰时段、token 更便宜）每小时检索 1 个客户，约两周全员轮换（最久未查优先）。
   const stopWebIntel = scheduleWebIntelSync(sync);
+  // 备份调度（每日 04:00 上海 + 启动补跑）：挂载必须在上方孤儿清扫之后（补跑会建 running run，
+  // 清扫在前是 ca89b9c 事故定下的启动顺序契约）。
+  const stopBackup = scheduleBackup(db, dataDir());
   // 风险模型升级（ruleVersion 变化）后启动即全量重算：纯本地计算，无外部调用，
   // 否则升级部署后库里还压着旧版评分（UI 维度标签对不上 key）。
   for (const customer of db.listCustomers()) {
@@ -1732,6 +1751,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     stopPortfolio();
     stopHemory();
     stopWebIntel();
+    stopBackup();
     clearTimeout(resumeTimer);
     if (staleTimer) clearInterval(staleTimer);
     db.close();

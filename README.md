@@ -126,6 +126,9 @@ csm-agent weekly-report publish <周报ID> <版本> <ONES父页面ID> <preview�
 csm-agent wiki spaces # ONES Wiki 页面组列表（发布位置层级选择器的数据源）
 csm-agent wiki pages --space <页面组ID> [--parent <页面ID>] # 页面树，按 parentID 过滤
 csm-agent sync [CRM客户ID]
+csm-agent backup list # 备份归档列表（时间/大小/触发方式/包含内容）；服务在线附带最近备份 run 与下次调度时刻
+csm-agent backup run # 立即全量备份（与每日 04:00 自动备份同一管线），完成后输出归档路径
+csm-agent backup restore latest # 离线恢复：校验归档→停服务→现有数据移入 .restore-rollback-* 回滚目录→应用→重启服务；--db-only 只恢复数据库
 csm-agent hemory sync [YYYY-MM-DD]
 csm-agent hemory resegment --all | --recording <录音ID> # 全量重切 / 定向重切单条录音（分段失败逃生门）
 csm-agent hemory jobs # 分段任务只读视图：attempts/status/error，排查录音卡最大重试
@@ -219,6 +222,7 @@ ONES_TEAM_ID=RDjYMhKq
 
 客户组合和客户列表默认排除 CRM「售后客户阶段」等于「流失」的客户；流失客户仍保留在数据库中，可通过客户 ID 查看详情和历史记录。`renewal_date` 按合同到期时间升序，`renewal_amount` 按应续约金额降序，缺失值置底。
 - `POST /api/sync`、`POST /api/customers/:id/refresh`、`GET /api/sync-runs/:id`
+- `POST /api/backup/run`（立即触发一次全量备份，返回 sync run 供轮询；备份已在进行中返回 409）、`GET /api/backups`（归档列表 + 最近备份 run + 下次调度时刻）
 - `POST /api/customers/:id/opportunities/refresh`（强制重新分析增购机会：LLM 从会议录音片段+公开动态证据产出假设，数量不固定、按可信度排序；证据变化自动重析（24h 节流）+失败 1h 重试门在服务端，失败保留旧假设；`GET /api/customers/:id/overview` 的 opportunities 逐条附 sources 来源标注）
 - `POST /api/hemory/sync`、`POST /api/hemory/resegment`、`GET /api/hemory/fragments`（支持 `since`/`until` ISO 时刻闭区间过滤，如 `since=2026-08-27T14:00:00+08:00`；`date` 仍为整天过滤，显式时间段同指定日期一样不受待归属 7 天窗口限制；`customer_id` 按客户过滤，配合 `status=confirmed` 查看某客户已归属片段）、`PUT /api/hemory/fragments/attribution`、`PUT /api/hemory/fragments/ignore`、`POST /api/hemory/fragments/regenerate`（按天强制重生成草稿，body `{eventIds}`，返回 `{jobs, days}` 与归属端点同形）、`POST /api/hemory/fragments/inherit`（存量孪生归属继承修复，body `{apply}`，默认 dry-run 返回逐录音修复计划）
 - `GET /api/draft-batches`、`PATCH /api/draft-items/:id`、`POST /api/draft-batches/:id/preview`
@@ -239,6 +243,7 @@ ONES_TEAM_ID=RDjYMhKq
 - `csm-agent hemory resegment --all` 对库内全部录音按当前分段版本全量重切：先 `VACUUM INTO` 备份数据库，逐录音成功即切换新代际（失败的录音保持旧片段，重跑命令收敛），与增量同步互斥。重切换代时，被取代片段的人工归属（确认含客户、忽略）按时间覆盖率自动继承到新片段（覆盖率不足视为真新内容保持待归属）；录音全部片段已处理完且转写相对上次成功分段未实质增长（新增 ≤2 行且结束时刻未后移超 60 秒）时跳过重切（分段 job 落 skipped 状态），转写实质增长则照常重切并继承。存量数据可用 `csm-agent hemory repair [--apply]` 一次性继承修复并回填转写基准（默认 dry-run 只报告）。旧片段停用但保留审计；切换到重新归属完成之间，客户证据与风险「客户声音」维度可能临时降级。超过 7 个上海自然日的录音，其待归属片段需用 `--days=N` 或日期过滤查看。
 - 同一录音晚间出现新增转写时，Agent 基于完整新内容重新分段；只有最新成功的一代片段进入待归属（已处理时段的归属会被自动继承，不会重回收件箱）。旧片段和已写记录保留审计，旧片段关联的未写草稿会标记为失效，已写记录不改动；客户时间线与草稿再生只使用当前活跃代际的片段。已写入草稿的消费台账扩展到重切孪生：同录音时间高度重叠的活跃片段视为同类型已消费，不再被重复提案。
 - 人工 Hemory 归属是唯一归属来源，后续当天全量重拉与同边界重切都不会冲掉 CSM 标记；重新归属会令未写出草稿失效，已写记录只保留审计提示，不自动反向修改 CRM/ONES。
+- **数据备份**：服务每日 04:00（上海时区）自动全量备份，磁盘空间不足时跳过并记失败 run；服务重启错过槽位会在启动时补跑（当日已有成功备份则不重复）。备份内容为数据目录全量——SQLite 在线一致性快照（`VACUUM INTO`，WAL 安全）+ 会话（`sessions/`、`records.json`）+ 附件（`attachments/`）+ 配置（`config/*.user.yaml`、数据目录 `.env`，含密钥），打成单个 `backups/csm-backup-YYYYMMDD-HHMMSS.tar.gz` 归档（0600，含 manifest），磁盘保留最近 3 份、更旧自动删除（dataDir 根下重切前快照 `workbench-backup-*.sqlite` 纳入同一保留策略）。恢复走 `csm-agent backup restore`（离线命令）：先校验归档完整性（`PRAGMA quick_check`）与快照可读，再停止 launchd 服务（停后端口仍响应说明有手动 dev 进程持有数据，中止并不动数据）、把现有数据整体移入 `.restore-rollback-*` 回滚目录后应用归档并重启服务，恢复动作由服务启动时落 `backup_restore` 审计；`--db-only` 只恢复数据库。日志、`~/.mcp-auth` OAuth token、app 代码目录不在备份内（OAuth 恢复后需重新授权；代码由一键安装/升级体系还原）。保留 3 天意味着静默损坏超过 3 天将无法本地回滚，磁盘级灾难的兜底是 macOS Time Machine 等系统级备份。
 - 沟通记录草稿的【话题】分节正文优先取生成模型对该片段的摘要（`sections`，每片段一条、忠于该片段自己的转写），缺失时回退分段器摘要、再回退转写原文；分节绝不重复同一段全天综述。工时草稿描述为当天一句话总结。
 - ONES 工作项草稿宁缺毋滥，须同时满足语义判定与证据信号门控（门控检查证据片段的标题、分段摘要与转写）：**建议和反馈**仅当客户明确表达产品能力不满足（「标品还不支持」「希望支持/增加某功能」类诉求）；**工单**仅当客户明确指认缺陷（「这是个 bug」「不符合预期」类表述）；**运维工单**最谨慎，仅当明确提出运维操作请求（环境重装/数据迁移/配置/证书/服务器等基础设施操作）。方案讨论、workaround、客户内部流程、商务付费话题、泛泛不满一律不建工作项——相关内容保留在沟通记录与待办里。
 - 转写由语音识别生成，产品名 ONES 常被误转为发音相近的词（万死、万斯、万四、vans 等）。草稿、实施周报与交互式 Agent 回写的生成提示词均内置近音词规则：凡上下文指代产品之处一律优先理解为并写作 ONES（引用客户原话时同样订正，ONES 工作项的所属产品/所属模块按对应产品线归类）；仅当上下文明确指向其他事物（如人名）时保留原词。片段收件箱与时间线中的分段摘要不做此订正（改分段摘要需升分段版本全量重切）。

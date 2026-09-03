@@ -417,7 +417,7 @@ export interface SyncRun {
   status: 'running' | 'succeeded' | 'partial' | 'failed';
   startedAt: string;
   finishedAt?: string | null;
-  /** 各源结果；web_intelligence 源额外携带轮次报告字段（run 即报告）。 */
-  sourceStatus: Record<string, { status: string; count?: number; error?: string; searched?: number; total?: number; findings?: unknown[] }>;
+  /** 各源结果；web_intelligence 源额外携带轮次报告字段（run 即报告）；backup 源额外携带归档位置与清理明细。 */
+  sourceStatus: Record<string, { status: string; count?: number; error?: string; searched?: number; total?: number; findings?: unknown[]; archive?: string; trigger?: string; pruned?: string[] }>;
   error?: string | null;
 }

@@ -1260,7 +1260,7 @@ export function shanghaiDayBounds(date: string, now = new Date()): { startedAt: 
   return { startedAt: start.toISOString(), endedAt: end.toISOString() };
 }
 
-function shanghaiSlot(date: string, hour: number): Date {
+export function shanghaiSlot(date: string, hour: number): Date {
   return new Date(`${date}T${String(hour).padStart(2, '0')}:00:00+08:00`);
 }
 
