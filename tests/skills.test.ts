@@ -16,7 +16,8 @@ test('skill contract: 从贴图/粘贴聊天记录提 ONES 工作项的工作流
   assert.ok(writeback.includes('缺陷指认 → ticket（工单）'), '缺少 bug→ticket 路由');
   assert.ok(writeback.includes('→ suggestion（建议类型=新需求）'), '缺少 需求→suggestion 路由');
   assert.ok(writeback.includes('→ operations（运维工单）'), '缺少 运维→operations 路由');
-  assert.ok(writeback.includes('类型有歧义或会话未绑定客户时先问用户，不猜'), '缺少歧义先问规则');
+  assert.ok(writeback.includes('客户名唯一明确时直接写入草稿 fields.customer_name，无需先绑定会话'), '缺少草稿自含客户身份规则');
+  assert.ok(writeback.includes('识别不出、同名歧义或类型有歧义时先问用户，不猜'), '缺少歧义先问规则');
   // 证据纪律与兜底
   assert.ok(writeback.includes('截图只描述所见事实'), '缺少截图证据纪律');
   assert.ok(writeback.includes('摘录关键原文并注明说话人'), '缺少聊天记录摘录规则');
@@ -30,6 +31,7 @@ test('skill contract: 从贴图/粘贴聊天记录提 ONES 工作项的工作流
   // 自动优先与多条处理
   assert.ok(writeback.includes('不连环追问'), '缺少自动优先规则');
   assert.ok(writeback.includes('逐条 `confirm_write` 依次确认'), '缺少多条依次确认规则');
+  assert.ok(writeback.includes('被用户拒绝后不得原样重新提交相同参数'), '缺少拒后重提禁令');
 });
 
 test('persona contract: 贴图/聊天记录提单路由', () => {

@@ -44,6 +44,7 @@ export const resolveCustomerTool: Tool = {
   description:
     '把已解析的客户身份与上下文以结构化形式提交，用于在界面上展示客户上下文卡。' +
     '可在读取到新信息后再次调用以增量更新（只覆盖非空字段）。' +
+    '只需提交 customer_name（或 crm_customer_id）：系统按工作台客户唯一精确匹配自动补全 crm_customer_id、ones_customer_option_id、customer_manhour_issue_id、usage_version，未唯一匹配时仅记录名称。' +
     '字段：customer_name 客户名称、crm_customer_id、ones_project、ones_customer_option_id、customer_manhour_issue_id、recording_subject_id、' +
     'industry 行业、usage_version 使用版本（公有云版/私有部署按年订阅版/私有部署一次性授权版）、scale 规模、stage 当前阶段、health 健康度(红/黄/绿)、' +
     'renewal_status 续约状态、key_contacts 关键联系人、summary 最近跟进摘要。',

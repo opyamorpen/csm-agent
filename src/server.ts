@@ -153,27 +153,90 @@ function pickNarrativeFields(fields: Record<string, unknown>): Record<string, un
   return picked;
 }
 
-/** 批准校验用的客户绑定 ID 当前值（从工作台库按绑定客户重解析；缺失项回退会话上下文）。 */
-export type BoundCustomerIds = Partial<Pick<CustomerContext, 'ones_customer_option_id' | 'customer_manhour_issue_id'>>;
+/** 审批用权威客户绑定：从工作台库解析出的客户行与派生 ID（ONES confirmed 选项 / 售后工时项）。 */
+export interface DraftCustomerBinding {
+  customer: Customer;
+  onesOptionId?: string;
+  manhourIssueId?: string;
+}
 
-export function validateCustomerBoundDraft(
-  draft: ConfirmDraft,
-  customer: CustomerContext | null,
-  resolveCurrentIds?: (customer: CustomerContext) => BoundCustomerIds,
-): string | null {
-  if (!customer?.crm_customer_id || !customer.customer_name) return '当前 Agent 会话未绑定 CRM 售后客户，不能批准回写';
-  const draftCustomerId = draft.fields.customer_id ?? draft.fields.crm_customer_id;
-  if (draftCustomerId !== customer.crm_customer_id || draft.fields.customer_name !== customer.customer_name) {
-    return '草稿中的 CRM 客户 ID/客户名称与当前客户不一致';
+function bindingOfCustomer(db: WorkbenchDatabase, customer: Customer): DraftCustomerBinding {
+  const option = resolveOnesOption(db, customer);
+  const manhour = db.findCustomerManhourIssue(customer.id);
+  return { customer, onesOptionId: option?.id, manhourIssueId: manhour?.externalId };
+}
+
+/** CRM _id 直取（模型乱填的非 ID 串自然落空）；否则按名称在工作台唯一精确匹配（全称或售后客户简称），歧义/无匹配返回 undefined。 */
+function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): Customer | undefined {
+  const id = typeof context.crm_customer_id === 'string' ? context.crm_customer_id.trim() : '';
+  if (id) {
+    const byId = db.getCustomer(id);
+    if (byId) return byId;
   }
-  // 会话上下文可能早于身份解析/售后工时项绑定创建（或已过期）：校验用工作台库当前值兜底，不回写 session.customer。
-  const current = resolveCurrentIds?.(customer) ?? {};
-  const onesOptionId = current.ones_customer_option_id || customer.ones_customer_option_id;
-  const manhourIssueId = current.customer_manhour_issue_id || customer.customer_manhour_issue_id;
+  const name = typeof context.customer_name === 'string' ? context.customer_name.trim() : '';
+  if (name) {
+    const matches = db.listCustomers(name).filter((c) => c.name === name || c.shortName === name);
+    if (matches.length === 1) return matches[0];
+  }
+  return undefined;
+}
+
+/**
+ * 三级解析草稿客户：fields.customer_id 库内直取 → fields.customer_name 唯一精确匹配 → 会话上下文兜底。
+ * 外部写的客户身份以草稿/会话携带的信息为准（贴图/聊天记录提单：客户名就在贴入内容里），
+ * 不再要求会话创建时预绑定客户——「这次写入」必须绑定客户，对话本身不需要。
+ */
+export function resolveDraftCustomer(db: WorkbenchDatabase, draft: ConfirmDraft, sessionCustomer: CustomerContext | null): DraftCustomerBinding | null {
+  const byDraft = uniqueCustomerByContext(db, {
+    crm_customer_id: typeof draft.fields?.customer_id === 'string' ? draft.fields.customer_id : undefined,
+    customer_name: typeof draft.fields?.customer_name === 'string' ? draft.fields.customer_name : undefined,
+  });
+  if (byDraft) return bindingOfCustomer(db, byDraft);
+  const bySession = uniqueCustomerByContext(db, {
+    crm_customer_id: sessionCustomer?.crm_customer_id,
+    customer_name: sessionCustomer?.customer_name,
+  });
+  return bySession ? bindingOfCustomer(db, bySession) : null;
+}
+
+/** ONES Desk 批准时确定性绑定客户选项：模型自行搜索的选项仅参考，以解析客户 confirmed 选项为准（与部署类型覆盖同一哲学）。返回错误串或 null（已就地规范化）。 */
+export function applyDraftCustomerOptionBinding(draft: ConfirmDraft, binding: DraftCustomerBinding): string | null {
+  if (draft.target_system !== 'ones') return null;
+  if (!(draft.record_type === 'suggestion' || draft.record_type === 'ticket' || draft.record_type === 'operations')) return null;
+  const customerFieldId = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
+  if (!binding.onesOptionId) return `客户「${binding.customer.name}」未解析到已确认的 ONES 客户选项（请刷新客户同步后重试）`;
+  const fieldValues = Array.isArray(draft.target_arguments.fieldValues) ? draft.target_arguments.fieldValues as Array<Record<string, unknown>> : [];
+  draft.target_arguments.fieldValues = [
+    ...fieldValues.filter((item) => !(isRecord(item) && item.fieldID === customerFieldId)),
+    { fieldID: customerFieldId, value: binding.onesOptionId },
+  ];
+  return null;
+}
+
+/** 客户上下文便捷补全（resolve_customer / 批准后回填会话）：唯一命中工作台客户时补全 CRM _id、ONES 选项、售后工时项与使用版本。 */
+export function enrichCustomerContext(db: WorkbenchDatabase, context: CustomerContext | null): CustomerContext | null {
+  const customer = uniqueCustomerByContext(db, { crm_customer_id: context?.crm_customer_id, customer_name: context?.customer_name });
+  if (!customer) return null;
+  const binding = bindingOfCustomer(db, customer);
+  return {
+    ...context,
+    customer_name: customer.name,
+    crm_customer_id: customer.id,
+    ...(binding.onesOptionId ? { ones_customer_option_id: binding.onesOptionId } : {}),
+    ...(binding.manhourIssueId ? { customer_manhour_issue_id: binding.manhourIssueId } : {}),
+    ...(customer.usageVersion ? { usage_version: customer.usageVersion } : {}),
+  } as CustomerContext;
+}
+
+export function validateCustomerBoundDraft(draft: ConfirmDraft, binding: DraftCustomerBinding | null): string | null {
+  if (!binding) {
+    return '草稿未携带可唯一解析的客户（fields.customer_id 或 customer_name 须与工作台客户唯一精确匹配），请确认客户名称后重新 confirm_write';
+  }
+  const { customer, onesOptionId, manhourIssueId } = binding;
   if (draft.target_system === 'crm') {
-    return containsExactValue(draft.target_arguments, customer.crm_customer_id)
+    return containsExactValue(draft.target_arguments, customer.id)
       ? null
-      : 'CRM 回写参数未绑定当前 CSM 售后客户 ID';
+      : `CRM 回写参数未绑定当前 CSM 售后客户 ID（${customer.id}）`;
   }
   if (draft.target_system !== 'ones') return 'target_system 只允许 crm 或 ones';
   if (draft.record_type === 'case' || draft.record_type === 'profile') return null;
@@ -184,8 +247,8 @@ export function validateCustomerBoundDraft(
   }
   const fieldValues = Array.isArray(draft.target_arguments.fieldValues) ? draft.target_arguments.fieldValues : [];
   const customerFieldId = process.env.ONES_CUSTOMER_FIELD_ID ?? 'JrvswW8P';
-  const binding = fieldValues.find((item) => isRecord(item) && item.fieldID === customerFieldId);
-  return binding && onesOptionId && containsExactValue(binding.value, onesOptionId)
+  const bindingEntry = fieldValues.find((item) => isRecord(item) && item.fieldID === customerFieldId);
+  return bindingEntry && onesOptionId && containsExactValue(bindingEntry.value, onesOptionId)
     ? null
     : `ONES 回写参数必须在 fieldValues 中绑定 ${customerFieldId}=${onesOptionId ?? '(未解析，请刷新客户同步后重试)'}`;
 }
@@ -333,16 +396,6 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
     return report;
   }
 
-  // 批准门的当前值兜底：会话上下文里的 ONES 客户选项/售后工时项 ID 可能早于身份解析或绑定创建，
-  // 按绑定客户从工作台库重解析（与 Hemory 自动草稿同一权威来源），只用于校验、不回写会话上下文。
-  function resolveBoundCustomerIds(customer: CustomerContext): BoundCustomerIds {
-    if (!customer.crm_customer_id) return {};
-    const bound = workbench.db.getCustomer(customer.crm_customer_id);
-    const option = bound ? resolveOnesOption(workbench.db, bound) : undefined;
-    const manhour = workbench.db.findCustomerManhourIssue(customer.crm_customer_id);
-    return { ones_customer_option_id: option?.id, customer_manhour_issue_id: manhour?.externalId };
-  }
-
   function makeAgent(session: Session): AgentSession {
     // Local workbench/web tools resolve the bound customer from the session's
     // context (falls back to lookup by name until the model confirms identity).
@@ -439,9 +492,17 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             return { text: '未提供有效字段，客户上下文未更新。' };
           }
           session.customer = mergeCustomerContext(session.customer, next);
+          // 提交客户名/ID 后按工作台唯一精确匹配自动补全 CRM _id、ONES 客户选项、售后工时项与使用版本：
+          // 未绑定会话里的读工具、外部写参数与部署类型判定都依赖这些权威标识。
+          session.customer = enrichCustomerContext(workbench.db, session.customer) ?? session.customer;
           session.updatedAt = Date.now();
           emit({ type: 'customer_context', context: session.customer });
-          return { text: `已记录客户上下文: ${session.customer.customer_name ?? '(未命名)'}` };
+          return {
+            text: session.customer.crm_customer_id
+              ? `已绑定客户：${session.customer.customer_name}（CRM _id=${session.customer.crm_customer_id}` +
+                `${session.customer.ones_customer_option_id ? `，ONES option=${session.customer.ones_customer_option_id}` : '，ONES option 未解析（confirmed 身份缺失，回写 ONES 前需刷新客户同步）'}）`
+              : `已记录客户上下文: ${session.customer.customer_name ?? '(未命名)'}（未在工作台唯一匹配到客户，暂不能用于回写）`,
+          };
         },
       },
     });
@@ -1360,21 +1421,26 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
                     session.lastRecordId = rec.id;
                     // 确认卡附带结构化编辑契约：有契约的类型（工单/建议/工时/跟进/待办/私有云实例）
                     // 渲染中文表单，无契约（case/profile 等）前端回退原始 JSON 编辑。
+                    // confirm 事件在这里下发后必须 return，不得再走末尾的通用广播——
+                    // 双下发会让前端按事件渲染出两张同题确认卡、审计记录也翻倍（真实事故）。
                     broadcast(session, { ...e, editContract: confirmDraftEditContract(e.draft, session.customer?.usage_version) } as unknown as DisplayEvent);
-                  } else if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {                    const t = runtime.mcp.resolve(e.name);
-                    if (t && runtime.mcp.isWrite(t.server, t.rawName) && session.lastRecordId) {
-                      const rec = store.records.find((r) => r.id === session.lastRecordId && r.status === 'approved');
-                      if (rec) {
-                        rec.status = 'written';
-                        rec.result = typeof e.result === 'string' ? e.result.slice(0, 500) : undefined;
-                        rec.updatedAt = Date.now();
-                        store.persistRecords();
-                        session.lastRecordId = null;
+                  } else {
+                    if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
+                      const t = runtime.mcp.resolve(e.name);
+                      if (t && runtime.mcp.isWrite(t.server, t.rawName) && session.lastRecordId) {
+                        const rec = store.records.find((r) => r.id === session.lastRecordId && r.status === 'approved');
+                        if (rec) {
+                          rec.status = 'written';
+                          rec.result = typeof e.result === 'string' ? e.result.slice(0, 500) : undefined;
+                          rec.updatedAt = Date.now();
+                          store.persistRecords();
+                          session.lastRecordId = null;
+                        }
                       }
                     }
+                    if (e.type === 'done' && e.usage) turnUsage = e.usage;
+                    broadcast(session, e as unknown as DisplayEvent);
                   }
-                  if (e.type === 'done' && e.usage) turnUsage = e.usage;
-                  broadcast(session, e as unknown as DisplayEvent);
                 },
                 requestConfirm: (draft) =>
                   new Promise<boolean | ConfirmDraft>((resolve) => {
@@ -1427,6 +1493,15 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           const ok = body.approve === true;
           let approvedDraft: ConfirmDraft | null = null;
           if (ok) {
+            // 客户身份以草稿自含为准（不要求会话预绑定）：先按挂起草稿解析并把解析结果回填会话上下文，
+            // 结构化编辑契约（部署类型锁定等）与后续校验都能用上权威的使用版本。
+            const pendingBinding = resolveDraftCustomer(workbench.db, session.pending.draft, session.customer);
+            if (pendingBinding && session.customer?.crm_customer_id !== pendingBinding.customer.id) {
+              session.customer = enrichCustomerContext(workbench.db, mergeCustomerContext(session.customer, {
+                crm_customer_id: pendingBinding.customer.id, customer_name: pendingBinding.customer.name,
+              })) ?? mergeCustomerContext(session.customer, { crm_customer_id: pendingBinding.customer.id, customer_name: pendingBinding.customer.name });
+              broadcast(session, { type: 'customer_context', context: session.customer });
+            }
             // 结构化编辑分支：客户端只提交字段键→新值，服务端按类型契约合并；合并失败（未知选项等）报 400。
             if (isRecord(body.edits)) {
               const merged = applyConfirmDraftEdits(session.pending.draft, body.edits, session.customer?.usage_version);
@@ -1450,7 +1525,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               if (expectedVersion !== caseDraft.version) {
                 return json(res, 400, { error: `案例草稿版本已变化（当前 v${caseDraft.version}），请重新发起精修` });
               }
-              const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer, resolveBoundCustomerIds);
+              const bindingError = validateCustomerBoundDraft(approvedDraft, resolveDraftCustomer(workbench.db, approvedDraft, session.customer));
               if (bindingError) return json(res, 400, { error: bindingError });
               const updated = workbench.cases.update(caseDraft.id, caseDraft.version, approvedDraft.title || caseDraft.title,
                 pickNarrativeFields(approvedDraft.fields));
@@ -1480,7 +1555,20 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {
               return json(res, 400, { error: '目标工具不是已连接的写工具' });
             }
-            const bindingError = validateCustomerBoundDraft(approvedDraft, session.customer, resolveBoundCustomerIds);
+            // 客户身份以（可能编辑过的）草稿为准做最终解析与校验；ONES Desk 的客户字段在批准前
+            // 确定性绑定为解析客户的 confirmed 选项（模型自行搜索的选项仅参考），批准 hash 绑定规范化后参数。
+            const binding = resolveDraftCustomer(workbench.db, approvedDraft, session.customer);
+            const rawName = typeof approvedDraft.fields?.customer_name === 'string' ? approvedDraft.fields.customer_name.trim() : '';
+            if (binding && rawName && rawName !== binding.customer.name && rawName !== binding.customer.shortName) {
+              return json(res, 400, { error: '草稿中的客户 ID 与客户名称指向不同客户，请修正后重新提交' });
+            }
+            const optionError = binding ? applyDraftCustomerOptionBinding(approvedDraft, binding) : null;
+            if (optionError) return json(res, 400, { error: optionError });
+            if (binding) {
+              approvedDraft.fields.customer_id = binding.customer.id;
+              approvedDraft.fields.customer_name = binding.customer.name;
+            }
+            const bindingError = validateCustomerBoundDraft(approvedDraft, binding);
             if (bindingError) return json(res, 400, { error: bindingError });
             // ONES 工作项批准门：规格表字段（所属产品/所属模块/实例部署类型等）必须齐备，批准即写入，
             // 缺失会到 ONES 端才报错。agent 无法从 get_issue_fields 自行枚举选项（大选项集截断），必须用本地工具补齐。
@@ -1499,9 +1587,11 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             if (unknownFields.length) {
               return json(res, 400, { error: `ONES 工作项 fieldValues 含未知字段: ${unknownFields.join('、')}（只允许规格字段、客户信息 JrvswW8P 与描述字段 field016），请移除后重新 confirm_write` });
             }
-            // 实例部署类型以 CRM 使用版本为唯一依据（公有云版→公有云，其余→私有云），与 Hemory 自动草稿同一规则。
+            // 实例部署类型以 CRM 使用版本为唯一依据（公有云版→公有云，其余→私有云），与 Hemory 自动草稿同一规则；
+            // 使用版本优先取解析客户（工作台库）的权威值，会话上下文兜底。
             if (approvedDraft.record_type === 'suggestion' || approvedDraft.record_type === 'ticket') {
-              const expected = applyDeploymentTypeOverride(approvedDraft.record_type as 'suggestion' | 'ticket', session.customer?.usage_version)[0];
+              const deskUsageVersion = binding?.customer.usageVersion ?? session.customer?.usage_version;
+              const expected = applyDeploymentTypeOverride(approvedDraft.record_type as 'suggestion' | 'ticket', deskUsageVersion)[0];
               const actual = deskFieldValues.find((value) => value.fieldID === ONES_DESK_DEPLOYMENT_FIELD_ID);
               if (!expected || !actual || String(actual.value) !== expected.value) {
                 return json(res, 400, { error: `实例部署类型必须按 CRM 使用版本判定为 ${expected?.value ?? '(规则解析失败)'}，当前草稿为 ${actual?.value ?? '(缺失)'}（公有云版→公有云，其余→私有云）` });

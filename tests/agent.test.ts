@@ -101,6 +101,65 @@ test('runAgent: approve lets the write tool through (one-shot)', async () => {
   assert.equal(result, '已写入');
 });
 
+test('runAgent: identical confirm_write re-proposal after rejection is blocked without a second card', async () => {
+  // 真实事故：批准失败→用户拒绝→模型重跑查询后提交参数完全相同的草稿，对话里出现两张同题卡。
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('confirm_write', draft)]),
+    fauxAssistantMessage([fauxToolCall('confirm_write', draft)]),
+    fauxAssistantMessage('已询问用户需要修改什么'),
+  ]);
+
+  let confirmRequests = 0;
+  const results: string[] = [];
+  await runAgent({
+    models, model, mcp: gw, tools,
+    systemPrompt: 'test',
+    userInput: '整理跟进记录',
+    hooks: {
+      onEvent(e) { if (e.type === 'tool_result') results.push(String(e.result ?? '')); },
+      requestConfirm: async () => { confirmRequests++; return false; },
+    },
+  });
+
+  assert.equal(confirmRequests, 1, '原样重提不得再挂确认卡');
+  assert.equal(writeCalls(), 0);
+  assert.ok(results.some((r) => r.includes('不得原样重新提交')), '重提要被门禁拦截并说明出路');
+  assert.equal(results.filter((r) => r.includes('REJECTED')).length, 1, '只有第一次拒绝产生 REJECTED 工具结果');
+});
+
+test('runAgent: changed-args re-proposal passes, identical re-proposal after a successful write is blocked', async () => {
+  const { faux, models, model, tools } = buildContext();
+  const { gw, writeCalls } = makeGateway();
+  const revised: ConfirmDraft = { ...draft, title: '修改后的草稿', target_arguments: { note: 'v2' } };
+
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('confirm_write', draft)]),
+    fauxAssistantMessage([fauxToolCall('confirm_write', revised)]),
+    fauxAssistantMessage([fauxToolCall(WRITE_TOOL_NAME, { note: 'v2' })]),
+    fauxAssistantMessage([fauxToolCall('confirm_write', revised)]),
+    fauxAssistantMessage('完成'),
+  ]);
+
+  let decisions = 0;
+  const results: string[] = [];
+  await runAgent({
+    models, model, mcp: gw, tools,
+    systemPrompt: 'test',
+    userInput: '整理跟进记录',
+    hooks: {
+      onEvent(e) { if (e.type === 'tool_result') results.push(String(e.result ?? '')); },
+      requestConfirm: async () => { decisions++; return decisions === 2; },
+    },
+  });
+
+  assert.equal(decisions, 2, '改参重提要放行出第二张卡');
+  assert.equal(writeCalls(), 1, '只应写入一次');
+  assert.ok(results.some((r) => r.includes('不要重复提交')), '写入成功后的同参重提要被拦截');
+});
+
 test('runAgent: approval is bound to exact tool arguments', async () => {
   const { faux, models, model, tools } = buildContext();
   const { gw, writeCalls } = makeGateway();

@@ -109,6 +109,13 @@ export async function runLoop(params: LoopParams): Promise<string> {
   const { models, model, mcp, context, hooks, localTools = {}, maxIterations = 20, signal } = params;
 
   let approvedWrite: { tool: string; argsHash: string } | null = null;
+  // 双向重提门禁（本轮作用域）：被拒绝或已写入的草稿参数不得原样重复提交。
+  // 真实事故：批准失败→用户拒绝→模型重跑查询后提交参数哈希完全相同的草稿，对话里出现两张同题卡；
+  // 对称风险：批准写入成功后同轮再提交相同草稿会在 ONES 重复建单。
+  const closedConfirmKeys = new Map<string, 'rejected' | 'written'>();
+  const confirmKeyOf = (draft: ConfirmDraft) =>
+    `${String(draft.record_type ?? '')}|${String(draft.target_tool ?? '')}|${argumentsHash(draft.target_arguments ?? {})}`;
+  let approvedConfirmKey: string | null = null;
   let lastText = '';
   const usage: TurnUsage = { input: 0, output: 0, total: 0 };
 
@@ -153,15 +160,26 @@ export async function runLoop(params: LoopParams): Promise<string> {
         isError = true;
       } else if (call.name === CONFIRM_TOOL_NAME) {
         const draft = call.arguments as unknown as ConfirmDraft;
-        hooks.onEvent({ type: 'confirm', draft });
-        const decision = await hooks.requestConfirm(draft);
-        const approvedDraft = decision === true ? draft : decision && typeof decision === 'object' ? decision : null;
-        approvedWrite = approvedDraft
-          ? { tool: approvedDraft.target_tool, argsHash: argumentsHash(approvedDraft.target_arguments ?? {}) }
-          : null;
-        resultText = approvedDraft
-          ? `APPROVED — 仅允许调用 ${approvedDraft.target_tool}，参数为 ${JSON.stringify(approvedDraft.target_arguments ?? {})}`
-          : 'REJECTED — 已拒绝，不要写入；请询问用户需要修改什么。';
+        const confirmKey = confirmKeyOf(draft);
+        const closedAs = closedConfirmKeys.get(confirmKey);
+        if (closedAs) {
+          resultText = closedAs === 'written'
+            ? '拒绝提交: 与本轮已批准写入的草稿参数完全相同，该记录已创建，不要重复提交；如需修改请基于新要求调整参数。'
+            : '拒绝提交: 与刚被用户拒绝的草稿参数完全相同，不得原样重新提交；请先向用户说明并询问需要修改什么，待用户给出新要求后再按新参数提交。';
+          isError = true;
+        } else {
+          hooks.onEvent({ type: 'confirm', draft });
+          const decision = await hooks.requestConfirm(draft);
+          const approvedDraft = decision === true ? draft : decision && typeof decision === 'object' ? decision : null;
+          approvedWrite = approvedDraft
+            ? { tool: approvedDraft.target_tool, argsHash: argumentsHash(approvedDraft.target_arguments ?? {}) }
+            : null;
+          approvedConfirmKey = approvedDraft ? confirmKeyOf(approvedDraft) : null;
+          if (!approvedDraft) closedConfirmKeys.set(confirmKey, 'rejected');
+          resultText = approvedDraft
+            ? `APPROVED — 仅允许调用 ${approvedDraft.target_tool}，参数为 ${JSON.stringify(approvedDraft.target_arguments ?? {})}`
+            : 'REJECTED — 已拒绝，不要写入；请询问用户需要修改什么。';
+        }
       } else if (localTools[call.name]) {
         try {
           const r = await localTools[call.name]((call.arguments ?? {}) as Record<string, unknown>, hooks.onEvent);
@@ -194,11 +212,14 @@ export async function runLoop(params: LoopParams): Promise<string> {
               const r = await mcp.call(call.name, actualArgs);
               resultText = r.text;
               isError = r.isError;
+              // 写入成功才封闭该草稿参数（失败允许原样重试）；封闭后同轮再提交相同参数会被重提门禁拦截。
+              if (!r.isError && approvedConfirmKey) closedConfirmKeys.set(approvedConfirmKey, 'written');
             } catch (err) {
               resultText = `MCP 调用失败: ${(err as Error).message}`;
               isError = true;
             } finally {
               approvedWrite = null;
+              approvedConfirmKey = null;
             }
           }
         } else {
