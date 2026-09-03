@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
+import { appRoot, isManagedInstall } from './managed-install.js';
 import { readBuildInfo } from './version.js';
 import { runUpdate } from './update.js';
 import { runUninstall } from './uninstall.js';
@@ -73,7 +74,8 @@ const CLI_CAPABILITIES = [
   { command: 'drafts', workflow: 'hemory-drafts', access: 'read', api: ['/api/draft-batches', '/api/draft-batches?include=written', '/api/draft-jobs', '/api/draft-jobs?status=failed&kind=hemory', '/api/draft-jobs?status=active&kind=hemory'], notes: 'draft jobs --active 列出进行中任务（含进度与中断标注）' },
   { command: 'draft', workflow: 'hemory-drafts', access: 'approved-write', api: ['/api/draft-batches', '/api/draft-items/:id', '/api/draft-items/:id (PATCH edits 结构化编辑)', '/api/draft-batches/:id/preview', '/api/draft-batches/:id/confirm', '/api/draft-batches/:id/regenerate', '/api/draft-batches/:id/dismiss', '/api/draft-items/:id/retry', '/api/draft-items/:id/dismiss'] },
   { command: 'service', workflow: 'macos-service', access: 'local', api: [] },
-  { command: 'update', workflow: 'self-update', access: 'local', api: [] },
+  { command: 'version', workflow: 'diagnostics', access: 'read', api: ['/api/version'], notes: '--json 输出安装指纹（version/buildId/gitSha/branch/HEAD/node 等）；两台机器各跑一次比对 gitSha 是否一致，即「一键安装/升级后与开发机一模一样」的验收锚点' },
+  { command: 'update', workflow: 'self-update', access: 'local', api: [], notes: '失败自动回滚到更新前构建（gitSha 可比对的完整还原）；成功后轮询 /api/version 确认服务已换新（serviceVerified）' },
   { command: 'uninstall', workflow: 'self-update', access: 'local', api: [] },
   { command: 'ones', workflow: 'ones-desk-fields', access: 'read', api: ['/api/ones-desk-fields', '/api/ones-desk-fields?verify=1'] },
   { command: 'agent', workflow: 'customer-agent', access: 'approved-write', api: ['/api/sessions', '/api/sessions/:id/events', '/api/sessions/:id/messages', '/api/sessions/:id/attachments/:attId', '/api/sessions/:id/confirm', '/api/sessions/:id/stop', '/api/config/search'], tools: ['get_customer_detail', 'get_customer_profile', 'get_customer_events', 'get_ones_desk_required_fields', 'web_search', 'record_web_intelligence'], notes: '贴截图/聊天记录说「帮我提 bug/需求/工单」：agent 从贴入内容分析生成 ONES 建议/工单/运维工单待确认草稿（先取 get_ones_desk_required_fields 字段契约，证据不足走兜底值+unknowns），会话内 [y] 批准/[e] 编辑后批准按参数哈希回写 ONES' },
@@ -253,7 +255,9 @@ function help(): void {
      挂起中的确认草稿按拒绝处理；agent 命令运行中按 Ctrl+C 同效）
   csm-agent api <GET|POST|PATCH|PUT|DELETE> </api/path> [JSON]
   csm-agent capabilities [--json]
-  csm-agent version
+  csm-agent version [--json]
+    （--json 输出安装指纹 version/buildId/gitSha/branch/HEAD/node 等；
+      两台机器各跑一次比对 gitSha 一致，即验证一键安装/升级还原出同一份代码构建）
 
 仓库内可用 npm run cli -- <命令> 获得相同行为。默认连接 ${baseUrl}，可用 CSM_BASE_URL 覆盖。
 所有 Agent 写入仍经过服务端客户绑定和人工批准。`);
@@ -261,7 +265,30 @@ function help(): void {
 
 function version(): void {
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string };
-  console.log(packageJson.version ?? 'unknown');
+  if (!rawArgs.includes('--json')) {
+    console.log(packageJson.version ?? 'unknown');
+    return;
+  }
+  // 安装指纹：两台机器各跑 `csm-agent version --json` 比对（gitSha 一致 = 同一份代码构建）。
+  const root = appRoot();
+  const local = readBuildInfo();
+  const gitQuery = (...pieces: string[]): string | null => {
+    try { return execFileSync('git', pieces, { cwd: root, encoding: 'utf8' }).trim() || null; } catch { return null; }
+  };
+  print({
+    version: packageJson.version ?? 'unknown',
+    buildId: local?.buildId ?? null,
+    gitSha: local?.gitSha ?? null,
+    dirty: local?.dirty ?? null,
+    builtAt: local?.builtAt ?? null,
+    managed: isManagedInstall(root),
+    branch: gitQuery('rev-parse', '--abbrev-ref', 'HEAD'),
+    head: gitQuery('rev-parse', 'HEAD'),
+    origin: gitQuery('remote', 'get-url', 'origin'),
+    node: process.version,
+    platform: `${process.platform}-${process.arch}`,
+    port: Number(process.env.CSM_PORT ?? 3210),
+  });
 }
 
 async function serve(portInput?: string): Promise<void> {
@@ -1397,7 +1424,11 @@ async function draftCommand(subcommand: string, values: string[]): Promise<void>
 }
 
 async function serviceCommand(subcommand: string, values: string[]): Promise<void> {
-  if (subcommand === 'install') return print(installService(Number(values.shift() ?? process.env.CSM_PORT ?? 3210)));
+  if (subcommand === 'install') {
+    const port = Number(values.shift() ?? process.env.CSM_PORT ?? 3210);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535 的整数');
+    return print(installService(port));
+  }
   if (subcommand === 'status') {
     // 附运行中服务的构建版本：stale（磁盘构建已更新而进程未换新）一眼可见。
     const status = serviceStatus();

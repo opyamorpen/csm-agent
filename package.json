@@ -17,7 +17,7 @@
     "cli:smoke": "node dist/cli.js capabilities --json",
     "link:global": "npm run build && npm link",
     "start": "node dist/index.js",
-    "build": "node scripts/stamp-build.mjs && tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/stamp-build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "verify": "npm run typecheck && npm test && npm run build && npm run cli:smoke"

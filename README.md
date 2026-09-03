@@ -21,24 +21,28 @@
 
 ## 安装（macOS 一键安装）
 
-普通使用者无需克隆仓库和安装 Node，一条命令完成 CLI + 桌面端 + 常驻服务安装：
+普通使用者无需克隆仓库和安装 Node，一条命令完成 CLI + 桌面端 + 常驻服务安装。推荐「先下载后执行」（curl 失败会立刻显式报错）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opyamorpen/csm-agent/main/scripts/install.sh | bash
+curl -fsSL --retry 3 https://raw.githubusercontent.com/opyamorpen/csm-agent/main/scripts/install.sh -o /tmp/csm-agent-install.sh && bash /tmp/csm-agent-install.sh
 ```
+
+管道形式 `curl -fsSL .../install.sh | bash` 同样可用。
 
 安装器会：
 
 1. 检查 git 与 Xcode Command Line Tools（`swiftc`，缺失时提示 `xcode-select --install`）；
-2. 复用系统 Node（`>=22.5`），否则下载捆绑 Node 22 LTS 到 `~/.csm-agent/node`；
-3. `git clone` 仓库到 `~/.csm-agent/app` 并构建；
-4. 生成 `csm-agent` CLI shim（`~/.local/bin`，必要时写入 PATH）；
-5. 现场构建桌面 App（Swift WKWebView 壳）并在 `/Applications` 建立入口；
-6. 安装 launchd 常驻服务（`http://127.0.0.1:3210`，开机自启，`--no-service` 跳过）。
+2. 复用系统 Node（`>=22.5`），否则下载捆绑 Node 22 LTS 到 `~/.csm-agent/node`（官方 SHASUMS256 校验，复用须与钉住版本完全一致）；
+3. `git clone` 仓库到 `~/.csm-agent/app` 并构建（可用 `--repo`/`--branch` 指定安装源，默认 `main`；目录已存在但非受管安装时自动移到 `*.broken-<时间戳>` 后重新克隆，重跑必定自愈）；
+4. 生成 `csm-agent` CLI shim（`~/.local/bin`，固化 `CSM_DATA_DIR`，必要时按登录 shell 写入 PATH）；
+5. 现场构建桌面 App（Swift WKWebView 壳）并在 `/Applications` 建立入口（构建失败仅警告，不阻断 CLI/服务）；
+6. 安装 launchd 常驻服务（`http://127.0.0.1:3210`，开机自启，`--no-service` 跳过）并**轮询 `/api/version` 校验服务已加载本次构建**（buildId 与磁盘一致且非 stale，超时打印服务日志并以失败退出，不再「睡了 2 秒就当成功」）。
+
+安装收尾会打印安装指纹（commit/node/buildId/桌面 App/服务状态）。验证「与开发机一模一样」：两台机器各跑 `csm-agent version --json`，**gitSha 一致即同一份代码构建**（buildId 含构建时刻，两端必然不同，不作为比对项）。
 
 安装后：新开终端运行 `csm-agent version`；配置凭据后（App 设置中添加 MCP 服务器、`csm-agent config llm set` 配置大模型）即可使用。用户数据（配置、会话、SQLite、日志）都在 `~/.csm-agent` 下，与代码目录分离，更新和卸载不触碰。
 
-隔离验收参数（不动真实数据）：`bash scripts/install.sh --dir <目录> --bin-dir <目录> --data-dir <目录> --apps-dir <目录> --port <端口> --no-service`。
+隔离验收参数（不动真实数据）：`bash scripts/install.sh --dir <目录> --bin-dir <目录> --data-dir <目录> --apps-dir <目录> --port <端口> --no-service`（要在真实 launchd 里隔离验收服务，加 `CSM_LAUNCH_AGENT_LABEL=<独立label>` 避免与本机常驻服务同 label 冲突）。
 
 ### 更新与卸载
 
@@ -47,6 +51,12 @@ csm-agent update            # 拉取最新 main 并重建（重跑安装命令�
 csm-agent uninstall         # 移除 CLI、桌面端、常驻服务与受管目录；保留 ~/.csm-agent 用户数据
 csm-agent uninstall --purge # 连同用户数据一并删除（需确认，加 --yes 跳过确认）
 ```
+
+`csm-agent update` 的可靠性保证：
+
+- **失败自动回滚**：依赖安装或构建失败时，自动 `git reset` 回更新前 commit、重装旧依赖并重建旧构建，报告 `rollback: restored`（运行中的服务本就跑旧内存代码，不受影响）；回滚也失败时报告 `rollback: failed` 并给出恢复指引。
+- **升级后启动验证**：服务重启后轮询 `/api/version` 至多 120 秒，确认 buildId 已换新且非 stale（报告 `serviceVerified`），不再「重启了就算成功」。
+- 服务重启沿用安装时记录的端口与 node 二进制（非默认 `--port` 安装不会被改回 3210，用别的 node 跑 update 不会静默换运行时）。
 
 ## 运行
 
@@ -64,7 +74,7 @@ npm run dev
 
 `public/` 静态文件每次请求从磁盘实时读取（页面永远最新），而 API 路由在进程启动时加载进内存——**构建后若进程不重启，就会出现「新 UI + 旧 API」分裂**（新端点 404、新按钮失效）。防护体系：
 
-- `npm run build` 先执行 `scripts/stamp-build.mjs`：git SHA + dirty 标记 + 构建时刻写入 `dist/build-info.json` 与 `public/build-info.js`（`window.__CSM_BUILD__`，gitignore），同一次构建的服务端与前端共享同一 buildId；`npm run dev` 为 `tsx watch`（源码改动自动重载）。
+- `npm run build` 在 tsc 成功后执行 `scripts/stamp-build.mjs`：git SHA + dirty 标记 + 构建时刻写入 `dist/build-info.json` 与 `public/build-info.js`（`window.__CSM_BUILD__`，gitignore），同一次构建的服务端与前端共享同一 buildId；**构建戳只在编译成功后落盘**——失败的构建不推进 buildId，受监管进程不会自退出换新到坏 dist 上；`npm run dev` 为 `tsx watch`（源码改动自动重载）。
 - 服务暴露 `GET /api/version`（buildId/startedAt/pid/supervised/stale）；前端每 30s 比对自己脚本的 buildId 与进程的 buildId，不一致或端点缺失（进程早于该机制）时页面顶部常亮红色横幅提示重启，恢复一致自动消隐。
 - **自愈（推荐 launchd 托管）**：`csm-agent service install` 安装的 launchd 服务注入 `CSM_SUPERVISED=1` + KeepAlive——服务每 10s 自检 dist 变化，检测到新构建后自动退出（exit 0），launchd 拉起新构建，全程无人工介入；Mac App 自带子进程监管（terminationHandler 自动重启，短命退避 1s→60s 封顶）。
 - 无监管的手动进程（如终端 `nohup node dist/index.js`）不自动退出（可用性优先），只在 `/api/version` 报告 stale 并触发前端横幅；`csm-agent doctor` 与 `csm-agent service status` 均会比对服务端与本地构建并提示重启。

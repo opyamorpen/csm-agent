@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { appRoot, readInstallLayout, readPackageVersion } from '../src/managed-install.js';
-import { applyUpdate, planUpdate, serviceBelongsToRoot } from '../src/update.js';
+import { applyUpdate, planPlistRestart, planUpdate, serviceBelongsToRoot, UpdateFailedError } from '../src/update.js';
 import { runUninstall, SHIM_MARKER } from '../src/uninstall.js';
 
 function sh(command: string, cwd?: string): string {
@@ -55,14 +55,14 @@ test('update: up-to-date install reports without touching anything', (t) => {
   rmSync(dirname(root), { recursive: true, force: true });
 });
 
-test('update: fetches new version, resets, rebuilds and reports version change', (t) => {
+test('update: fetches new version, resets, rebuilds and reports version change', async (t) => {
   const { remote, root } = makeInstalledClone(t);
   const work = join(dirname(root), 'work');
   pushNewVersion(work, '0.3.0');
   const plan = planUpdate(root);
   assert.equal(plan.action, 'update');
   assert.equal(plan.localChanges.length, 0);
-  const report = applyUpdate(root, plan, {
+  const report = await applyUpdate(root, plan, {
     runBuildSteps: () => { /* 注入构建，避免真实 npm ci */ },
     rebuildDesktop: () => 'skipped',
   });
@@ -71,8 +71,100 @@ test('update: fetches new version, resets, rebuilds and reports version change',
   assert.equal(report.newVersion, '0.3.0');
   assert.equal(report.desktop, 'skipped');
   assert.equal(report.serviceRestarted, false); // 无 plist，不动服务
+  assert.equal(report.serviceVerified, null); // 无服务可验证
   assert.equal(readPackageVersion(root), '0.3.0');
   rmSync(dirname(root), { recursive: true, force: true });
+});
+
+test('update: 中途失败自动回滚到更新前 commit 并恢复旧构建', async (t) => {
+  const { root } = makeInstalledClone(t);
+  const work = join(dirname(root), 'work');
+  pushNewVersion(work, '0.4.0');
+  const plan = planUpdate(root);
+  assert.equal(plan.action, 'update');
+  const oldHead = plan.oldHead;
+  let restored = false;
+  await assert.rejects(
+    applyUpdate(root, plan, {
+      runBuildSteps: () => { throw new Error('npm ci 断网'); },
+      runRestoreSteps: () => { restored = true; },
+      rebuildDesktop: () => 'skipped',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UpdateFailedError);
+      assert.equal(error.rollback, 'restored');
+      assert.match(error.message, /npm ci 断网/);
+      assert.match(error.message, /回滚/);
+      return true;
+    },
+  );
+  assert.equal(restored, true);
+  // 源码回到 oldHead：受管目录恢复到可用的旧版本
+  const head = sh('git rev-parse HEAD', root).trim();
+  assert.equal(head, oldHead);
+  assert.equal(readPackageVersion(root), '0.2.0');
+  rmSync(dirname(root), { recursive: true, force: true });
+});
+
+test('update: 回滚自身失败时报告 rollback failed（源码已 reset，服务仍在旧内存代码）', async (t) => {
+  const { root } = makeInstalledClone(t);
+  const work = join(dirname(root), 'work');
+  pushNewVersion(work, '0.5.0');
+  const plan = planUpdate(root);
+  await assert.rejects(
+    applyUpdate(root, plan, {
+      runBuildSteps: () => { throw new Error('构建失败'); },
+      runRestoreSteps: () => { throw new Error('npm ci 仍断网'); },
+      rebuildDesktop: () => 'skipped',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UpdateFailedError);
+      assert.equal(error.rollback, 'failed');
+      return true;
+    },
+  );
+  assert.equal(sh('git rev-parse HEAD', root).trim(), plan.oldHead);
+  rmSync(dirname(root), { recursive: true, force: true });
+});
+
+function fakePlist(opts: { node: string; cli: string; port: number; supervised?: boolean }): string {
+  return `<plist version="1.0"><dict>
+  <key>Label</key><string>cn.csm-agent.service</string>
+  <key>ProgramArguments</key><array>
+    <string>${opts.node}</string>
+    <string>${opts.cli}</string>
+    <string>serve</string>
+    <string>${opts.port}</string>
+  </array>
+  ${opts.supervised === false ? '' : '<key>EnvironmentVariables</key><dict><key>CSM_SUPERVISED</key><string>1</string></dict>'}
+</dict></plist>`;
+}
+
+test('update: planPlistRestart 保留非默认端口（不再被静默改回 3210）', () => {
+  const cli = '/opt/app/dist/cli.js';
+  // --port 5000 的安装：layout 端口 5000 与 plist 一致 → 只 kickstart，不改写
+  const keep = planPlistRestart(fakePlist({ node: process.execPath, cli, port: 5000 }), { port: 5000, cliPath: cli });
+  assert.equal(keep.action, 'kickstart');
+  assert.equal(keep.existingPort, 5000);
+  // plist 是 3210 而安装 layout 记录 5000（历史错误状态）→ 重写并校正到 layout 端口
+  const fix = planPlistRestart(fakePlist({ node: process.execPath, cli, port: 3210 }), { port: 5000, cliPath: cli });
+  assert.equal(fix.action, 'rewrite');
+  assert.equal(fix.existingPort, 3210);
+});
+
+test('update: planPlistRestart 重写时优先沿用既有 plist 的 node，缺监管标记或换 cli 路径也触发重写', () => {
+  const cli = '/opt/app/dist/cli.js';
+  // 既有 node（/bin/cat 真实存在但不同于当前进程）被沿用：换 node 跑 update 不静默换运行时
+  const reuse = planPlistRestart(fakePlist({ node: '/bin/cat', cli, port: 3210 }), { port: 3210, cliPath: cli });
+  assert.equal(reuse.action, 'kickstart'); // node 差异本身不触发重写
+  const rewriteKeepsNode = planPlistRestart(fakePlist({ node: '/bin/cat', cli, port: 3210, supervised: false }), { port: 3210, cliPath: cli });
+  assert.equal(rewriteKeepsNode.action, 'rewrite');
+  assert.equal(rewriteKeepsNode.nodeBin, '/bin/cat');
+  // cli 路径变化（安装目录迁移）→ 重写；node 不存在时回落到当前进程的 node
+  const movedCli = '/opt/moved-app/dist/cli.js';
+  const fallback = planPlistRestart(fakePlist({ node: '/no/such/node', cli, port: 3210 }), { port: 3210, cliPath: movedCli });
+  assert.equal(fallback.action, 'rewrite');
+  assert.equal(fallback.nodeBin, process.execPath);
 });
 
 test('update: refuses to reset tracked local changes', (t) => {

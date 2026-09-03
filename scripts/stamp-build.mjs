@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
- * 构建戳：npm run build 时先于 tsc 运行。把 git SHA + dirty 标记 + 构建时间写入
- * dist/build-info.json（服务端读取）与 public/build-info.js（前端 window.__CSM_BUILD__），
- * 两者共享同一 buildId——「进程内代码」与「页面脚本」的版本比对以此为锚点，
- * 旧进程加载新 UI（或反之）可以被前端横幅与 /api/version 立刻暴露。
+ * 构建戳：npm run build 时在 tsc 成功之后运行（stamp 落盘 = 本次构建编译成功）。
+ * 把 git SHA + dirty 标记 + 构建时间写入 dist/build-info.json（服务端读取）与
+ * public/build-info.js（前端 window.__CSM_BUILD__），两者共享同一 buildId——
+ * 「进程内代码」与「页面脚本」的版本比对以此为锚点，旧进程加载新 UI（或反之）
+ * 可以被前端横幅与 /api/version 立刻暴露。
+ *
+ * 顺序不可倒退（tsc 在前）：构建戳只在编译成功后落盘，失败的构建不会推进 buildId，
+ * 否则受监管进程的自退出换新会重启到坏 dist 上无限 crash-loop。
  *
  * --out <dir> 指定 dist 输出目录（默认 dist），单测用它写临时目录；public 锚点只在
  * 输出目录就是仓库 dist 的真实构建时才改写——单测的临时 --out 若也改写它，每次 npm test

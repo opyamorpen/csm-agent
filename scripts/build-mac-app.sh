@@ -23,8 +23,13 @@ if NPX_BIN="$(command -v npx 2>/dev/null)"; then
   NPX_DIR="$(dirname "$NPX_BIN")"
 fi
 
-echo "==> 构建服务器 dist/"
-(cd "$ROOT" && npm run build)
+if [ "${CSM_SKIP_SERVER_BUILD:-0}" = "1" ]; then
+  # 调用方（install.sh / csm-agent update）刚构建过 dist，跳过重复构建
+  echo "==> 跳过服务器构建（CSM_SKIP_SERVER_BUILD=1）"
+else
+  echo "==> 构建服务器 dist/"
+  (cd "$ROOT" && npm run build)
+fi
 
 echo "==> 准备 .app 包结构"
 rm -rf "$APP_DIR" "$BUILD_DIR"

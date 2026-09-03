@@ -21,12 +21,40 @@ test('package exposes the canonical global CLI and verification gate', () => {
   assert.equal(readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8').split('\n')[0], '#!/usr/bin/env node');
 });
 
+test('build script stamps only after tsc succeeds (failed builds never advance the stamp)', () => {
+  // 构建戳在 tsc 之后落盘：失败的构建不推进 buildId，否则受监管进程自退出换新会重启到坏 dist 上
+  // 无限 crash-loop。此顺序为自愈体系的硬前提，防倒退。
+  const build = packageJson.scripts?.build ?? '';
+  const tscAt = build.indexOf('tsc ');
+  const stampAt = build.indexOf('stamp-build');
+  assert.ok(tscAt > -1 && stampAt > -1, `build 脚本应同时包含 tsc 与 stamp-build: ${build}`);
+  assert.ok(tscAt < stampAt, `stamp-build 必须在 tsc 成功之后运行: ${build}`);
+});
+
+test('version --json prints the install fingerprint for cross-machine comparison', () => {
+  const plain = runCli('version');
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout.trim(), packageJson.version);
+  const json = runCli('version', '--json');
+  assert.equal(json.status, 0, json.stderr);
+  const fingerprint = JSON.parse(json.stdout) as Record<string, unknown>;
+  assert.equal(fingerprint.version, packageJson.version);
+  // 指纹字段齐备（gitSha 是「与开发机一模一样」的比对锚点；dist 未构建时 buildId 可为 null）
+  for (const key of ['buildId', 'gitSha', 'dirty', 'builtAt', 'managed', 'branch', 'head', 'origin', 'node', 'platform', 'port']) {
+    assert.ok(key in fingerprint, `version --json 缺少字段: ${key}`);
+  }
+  assert.equal(fingerprint.managed, false); // 测试跑在开发 checkout
+  assert.equal(fingerprint.node, process.version);
+  const help = runCli('help');
+  assert.match(help.stdout, /version \[--json\]/);
+});
+
 test('CLI exposes machine-readable core capability coverage without a running server', () => {
   const result = runCli('capabilities', '--json');
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
   // 公开动态检索能力：CLI 命令与强制刷新端点同源；轮次报告查询与轮换排空端点同在。
