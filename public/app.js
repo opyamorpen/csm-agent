@@ -52,6 +52,11 @@
   const chatView = document.getElementById('chat');
   const footerEl = document.querySelector('footer');
   const agentSessions = document.getElementById('agentSessions');
+  // Agent 悬浮球与悬浮面板头（#chat.floating 态）：任何视图就地开对话。
+  const chatFab = document.getElementById('chatFab');
+  const chatFloatingNew = document.getElementById('chatFloatingNew');
+  const chatFloatingExpand = document.getElementById('chatFloatingExpand');
+  const chatFloatingClose = document.getElementById('chatFloatingClose');
   const agentConversation = document.getElementById('agentConversation');
   const scrollBottomBtn = document.getElementById('scrollBottomBtn');
   const hemoryInbox = document.getElementById('hemoryInbox');
@@ -121,6 +126,8 @@
 
   let activeView = 'portfolio';
   let activeAgentMode = 'conversation';
+  // Agent 对话悬浮态：#chat 本体加 .floating 变 fixed 弹层，脱离 agent 视图也可用。
+  let chatFloating = false;
   let activeCustomerId = null;
   let customersCache = [];
 
@@ -759,7 +766,7 @@
     if (!e) return;
     switch (e.type) {
       case 'user': addUserMessage(e); break;
-      case 'turn_start': busy = true; setThinking(true); startStreaming(); setSendStopping(true); break;
+      case 'turn_start': busy = true; setThinking(true); startStreaming(); setSendStopping(true); syncChatFab(); break;
       case 'text_delta': appendTextDelta(e.delta); break;
       case 'thinking_delta': appendThinkingDelta(e.delta); break;
       case 'thinking': settleThinking(); break;
@@ -775,11 +782,13 @@
       case 'customer_context': renderCustomerCard(e.context); break;
       case 'turn_end':
         busy = false;
+        syncChatFab();
         setThinking(false);
         endStreaming();
         setSendStopping(false);
         inputEl.disabled = false;
-        inputEl.focus();
+        // 焦点只在对话界面在场时回填（完整视图或悬浮面板），后台轮次结束不抢其他页面输入框的焦点。
+        if (activeView === 'agent' || chatFloating) inputEl.focus();
         // 停止会把挂起中的草稿自动按拒绝处理，旧确认卡不允许再交互。
         if (e.stopped === true) disablePendingConfirmCards();
         addTokenUsage(e.usage);
@@ -2056,13 +2065,51 @@
     hemoryInbox.classList.toggle('hidden', mode !== 'hemory');
     agentDrafts.classList.toggle('hidden', mode !== 'drafts');
     recordsPanel.classList.toggle('hidden', activeView !== 'agent' || mode !== 'conversation');
-    footerEl.classList.toggle('hidden', activeView !== 'agent' || mode !== 'conversation');
+    footerEl.classList.toggle('hidden', activeView !== 'agent' && !chatFloating || mode !== 'conversation');
     for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.classList.toggle('active', tab.dataset.agentMode === mode);
     if (mode === 'hemory') await loadHemoryInbox();
     if (mode === 'drafts') await loadDraftBatches();
   }
 
   for (const tab of document.querySelectorAll('.agent-mode-tab')) tab.onclick = () => void showAgentMode(tab.dataset.agentMode);
+
+  // ── Agent 悬浮球 / 悬浮对话面板 ─────────────────────────────────
+  // 悬浮面板复用 #chat 本体（加 .floating 变 fixed 弹层）：SSE/消息渲染/滚动逻辑全在既有
+  // 节点上零改动；显隐条件从「仅 agent 视图」放宽到「agent 视图或悬浮态」（见 showView/showAgentMode）。
+
+  /** 悬浮球态同步：完整 Agent 视图内收起（入口重复）；对话进行中挂 busy 呼吸点。 */
+  function syncChatFab() {
+    chatFab.classList.toggle('hidden', activeView === 'agent');
+    chatFab.classList.toggle('busy', busy);
+  }
+
+  async function openFloatingChat() {
+    chatFloating = true;
+    chatView.classList.add('floating');
+    chatView.classList.remove('hidden');
+    // 精简面板只承载对话：强制回对话 tab（Hemory 片段/草稿箱留在完整视图）。
+    await showAgentMode('conversation');
+    syncChatFab();
+    // 打开即看最新输出（与发送消息/切换会话同口径：明确意图，强制贴底）。
+    pinToBottom();
+    inputEl.focus();
+  }
+
+  function closeFloatingChat() {
+    chatFloating = false;
+    chatView.classList.remove('floating');
+    // 回到当前视图的正常显隐：非 agent 视图下 #chat 收回隐藏，输入条一并复位。
+    chatView.classList.toggle('hidden', activeView !== 'agent');
+    footerEl.classList.toggle('hidden', activeView !== 'agent' || activeAgentMode !== 'conversation');
+    syncChatFab();
+  }
+
+  chatFab.onclick = () => void openFloatingChat();
+  chatFloatingClose.onclick = () => closeFloatingChat();
+  // 悬浮面板头「新对话」：悬浮态恒在对话 tab，无需再切面板；会话管理（切换/归档等）走完整视图。
+  chatFloatingNew.onclick = () => void newSession();
+  chatFloatingExpand.onclick = () => { closeFloatingChat(); showView('agent'); };
+
   // 草稿箱二级 tab：待处理 / 已忽略/已作废 分列；切换后整表重渲染（选中 tab 态跨重渲染保持）。
   for (const tab of document.querySelectorAll('.draft-subtab')) tab.onclick = () => {
     if (activeDraftTab === tab.dataset.draftTab) return;
@@ -2148,13 +2195,17 @@
     activeView = view;
     if (view !== 'customer') activeCustomerId = null;
     const agent = view === 'agent';
+    // 完整 Agent 视图接管：先收悬浮面板（面板内容就是 #chat 本体，不能两处同时显示）。
+    if (agent && chatFloating) closeFloatingChat();
     workbench.classList.toggle('hidden', agent);
-    chatView.classList.toggle('hidden', !agent);
+    // 悬浮态下 #chat 与输入条跟随悬浮面板而非视图（面板浮在其他视图之上）。
+    chatView.classList.toggle('hidden', !agent && !chatFloating);
     recordsPanel.classList.toggle('hidden', !agent || activeAgentMode !== 'conversation');
-    footerEl.classList.toggle('hidden', !agent || activeAgentMode !== 'conversation');
+    footerEl.classList.toggle('hidden', !agent && !chatFloating || activeAgentMode !== 'conversation');
     agentSessions.classList.toggle('hidden', !agent);
     for (const [name, section] of Object.entries(viewSections)) section.classList.toggle('hidden', agent || name !== view);
     for (const item of document.querySelectorAll('.nav-item')) item.classList.toggle('active', item.dataset.view === view);
+    syncChatFab();
     if (view === 'portfolio') void loadPortfolio();
     if (view === 'actions') void loadActions();
     if (view === 'alerts') void loadAlerts();
@@ -3152,8 +3203,8 @@
       try {
         await ensureCustomerSession(c);
       } catch (error) { await alertDialog(error.message); return; }
-      showView('agent');
-      await showAgentMode('conversation');
+      // 就地弹悬浮对话面板：不离开客户详情页，边看资料边问（openFloatingChat 内部落回对话 tab）。
+      await openFloatingChat();
       inputEl.value = `结合工作台已同步数据与最近三个月的公开动态，分析「${c.name}」的续约风险、增购机会和下一步行动`;
       inputEl.focus();
     };
@@ -4032,6 +4083,7 @@
     pinToBottom();
     setThinking(true);
     setSendStopping(true);
+    syncChatFab();
     try {
       const res = await fetch(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
@@ -4042,6 +4094,7 @@
       if (!res.ok) throw new Error(result.error || `发送失败 (${res.status})`);
     } catch (err) {
       busy = false;
+      syncChatFab();
       inputEl.disabled = false;
       setThinking(false);
       setSendStopping(false);

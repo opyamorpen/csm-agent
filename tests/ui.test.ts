@@ -706,7 +706,82 @@ test('clicking a session in the agent sidebar lands on the conversation panel', 
   assert.match(source, /newSessionBtn\.addEventListener\('click', async \(\) => \{ await newSession\(\); await showAgentMode\('conversation'\); \}\)/);
   const ask = source.match(/const ask = el\('button', 'quiet-command', '询问 Agent'\);[\s\S]*?\n    };/)?.[0];
   assert.ok(ask, 'ask agent button source was not found');
-  assert.match(ask, /await showAgentMode\('conversation'\)/);
+  // 「询问 Agent」改为就地弹悬浮对话面板（不跳视图）；
+  // 「落回对话 tab」的不变式移入 openFloatingChat（见悬浮面板契约测试）。
+  assert.match(ask, /await openFloatingChat\(\)/);
+  assert.doesNotMatch(ask, /showView\('agent'\)/);
+});
+
+test('agent chat opens as a floating dock from anywhere in the workbench', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+
+  // 结构契约：全局悬浮球（body 直属）+ #chat 内悬浮面板头（新对话/完整视图/收起）。
+  assert.match(html, /<button id="chatFab" class="chat-fab" type="button" title="打开 Agent 对话"/);
+  assert.match(html, /<div id="chatFloatingBar" class="chat-floating-bar">/);
+  assert.match(html, /id="chatFloatingNew"/);
+  assert.match(html, /id="chatFloatingExpand"/);
+  assert.match(html, /id="chatFloatingClose"/);
+
+  // 悬浮面板复用 #chat 本体：加 .floating 变 fixed 弹层（SSE/消息渲染/滚动逻辑零改动的根基）。
+  const opener = app.match(/async function openFloatingChat[\s\S]*?\n  \}\n\n  function closeFloatingChat/)?.[0];
+  assert.ok(opener, 'openFloatingChat source was not found');
+  assert.match(opener, /chatView\.classList\.add\('floating'\)/);
+  assert.match(opener, /chatView\.classList\.remove\('hidden'\)/);
+  // 精简面板只承载对话：打开必须落回对话 tab，否则面板里可能是 Hemory/草稿箱（tab 条已隐藏无法切回）。
+  assert.match(opener, /await showAgentMode\('conversation'\)/);
+  assert.match(opener, /pinToBottom\(\)/);
+  const closer = app.match(/function closeFloatingChat[\s\S]*?\n  \}\n\n  chatFab\.onclick/)?.[0];
+  assert.ok(closer, 'closeFloatingChat source was not found');
+  assert.match(closer, /chatView\.classList\.remove\('floating'\)/);
+  assert.match(closer, /chatView\.classList\.toggle\('hidden', activeView !== 'agent'\)/);
+
+  // 显隐解耦：#chat 与输入条在「agent 视图或悬浮态」可见（showView/showAgentMode 两处同条件）。
+  const shower = app.match(/function showView\(view\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(shower, 'showView source was not found');
+  assert.match(shower, /chatView\.classList\.toggle\('hidden', !agent && !chatFloating\)/);
+  assert.match(shower, /footerEl\.classList\.toggle\('hidden', !agent && !chatFloating \|\| activeAgentMode !== 'conversation'\)/);
+  // 完整视图接管：进 agent 视图先收悬浮面板（面板内容就是 #chat 本体，不能两处同时显示）。
+  assert.match(shower, /if \(agent && chatFloating\) closeFloatingChat\(\)/);
+  const modeSwitch = app.match(/async function showAgentMode[\s\S]*?\n  \}\n\n  for \(const tab of document\.querySelectorAll\('\.agent-mode-tab'\)\)/)?.[0];
+  assert.ok(modeSwitch, 'showAgentMode source was not found');
+  assert.match(modeSwitch, /footerEl\.classList\.toggle\('hidden', activeView !== 'agent' && !chatFloating \|\| mode !== 'conversation'\)/);
+
+  // 悬浮球态同步：完整 Agent 视图内收起（入口重复）；busy 呼吸点在四个 busy 翻转点同步。
+  const fabSync = app.match(/function syncChatFab\(\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(fabSync, 'syncChatFab source was not found');
+  assert.match(fabSync, /chatFab\.classList\.toggle\('hidden', activeView === 'agent'\)/);
+  assert.match(fabSync, /chatFab\.classList\.toggle\('busy', busy\)/);
+  assert.match(app, /setSendStopping\(true\); syncChatFab\(\); break;/);
+  assert.match(app, /case 'turn_end':\s*\n\s*busy = false;\s*\n\s*syncChatFab\(\);/);
+  // 提交乐观置位与失败回滚都同步悬浮球 busy 态（锚定 submit 处理器区域内）。
+  const submitHandler = app.match(/form\.addEventListener\('submit', async \(ev\) => \{[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(submitHandler, 'composer submit handler was not found');
+  assert.match(submitHandler, /setSendStopping\(true\);\s*\n\s*syncChatFab\(\);/);
+  assert.match(submitHandler, /busy = false;\s*\n\s*syncChatFab\(\);\s*\n\s*inputEl\.disabled = false;/);
+
+  // 样式契约：悬浮球与面板均 fixed 定位 z-index 30（内容 12 与模态 50 之间的空档）；组件块仅用主题 token。
+  const fab = css.match(/\.chat-fab \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(fab, 'chat-fab style was not found');
+  assert.match(fab, /position: fixed/);
+  assert.match(fab, /z-index: 30/);
+  assert.doesNotMatch(fab, /#[0-9a-fA-F]{3,8}\b/);
+  const dock = css.match(/#chat\.floating \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(dock, 'chat floating dock style was not found');
+  assert.match(dock, /position: fixed/);
+  assert.match(dock, /z-index: 30/);
+  assert.doesNotMatch(dock, /#[0-9a-fA-F]{3,8}\b/);
+  // 精简面板：悬浮态隐藏二级 tab、换悬浮面板头（面板头显隐是 .floating 模式切换，不挂 .hidden）。
+  assert.match(css, /#chat\.floating \.agent-mode-tabs \{ display: none; \}/);
+  assert.match(css, /\.chat-floating-bar \{ display: none; \}/);
+  assert.match(css, /#chat\.floating \.chat-floating-bar \{/);
+  // 显隐复用全局 .hidden：不得给悬浮球另设 display 显隐规则（与 commandMenu 同契约）。
+  assert.doesNotMatch(css, /\.chat-fab\.hidden/);
+
+  // 悬浮面板头按钮接线：新对话（面板内直接续聊）、完整视图（收面板转完整 Agent 视图）。
+  assert.match(app, /chatFloatingNew\.onclick = \(\) => void newSession\(\);/);
+  assert.match(app, /chatFloatingExpand\.onclick = \(\) => \{ closeFloatingChat\(\); showView\('agent'\); \};/);
 });
 
 test('sidebar scrollbar only appears on hover inside its own track pad', () => {

@@ -692,6 +692,81 @@ footer {
 }
 .scroll-bottom-btn:hover { border-color: var(--accent); color: var(--text); }
 
+/* ── Agent 悬浮球 + 悬浮对话面板 ──
+   悬浮球全局常驻右下角（完整 Agent 视图内由 JS 加 hidden 收起）；
+   悬浮面板复用 #chat 本体（加 .floating 变 fixed 弹层），SSE/渲染/滚动逻辑零改动。
+   z-index 30：压过内容条（8/9）与下拉菜单（12），低于模态（50）与光标涟漪画布（60）。 */
+.chat-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 30;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent-soft-border);
+  border-radius: 50%;
+  background: var(--accent-gradient);
+  color: var(--on-accent);
+  cursor: pointer;
+  box-shadow: var(--shadow-m);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.chat-fab:hover { transform: translateY(-2px); box-shadow: var(--shadow-l); }
+.chat-fab:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring), var(--shadow-m); }
+/* 对话进行中：球角呼吸点提示后台有输出（面板收起也能看出仍在跑）；入口动画只动 transform/opacity。 */
+.chat-fab.busy::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 6px var(--warn);
+  animation: pulse 1.2s infinite;
+}
+
+/* 悬浮面板 = #chat 本体换宿主：fixed 弹层、毛玻璃面板底（与 #records 同底透出背景光晕）。 */
+#chat.floating {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  left: auto;
+  top: auto;
+  z-index: 30;
+  width: min(420px, calc(100vw - 36px));
+  height: min(620px, calc(100vh - 96px));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--records-bg);
+  box-shadow: var(--shadow-l);
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+  backdrop-filter: blur(14px) saturate(1.25);
+  animation: chat-dock-in 0.2s ease;
+}
+@keyframes chat-dock-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* 精简面板：不露 Hemory/草稿箱二级 tab（打开悬浮时 JS 强制回对话 tab），换成悬浮面板头。 */
+#chat.floating .agent-mode-tabs { display: none; }
+.chat-floating-bar { display: none; }
+#chat.floating .chat-floating-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar-bg);
+}
+#chat.floating .chat-floating-bar strong { font-size: 14px; color: var(--text); }
+
 /* 思考过程折叠面板（流式 delta 实时填充，完成后折叠成一行摘要） */
 .think-block {
   align-self: stretch;

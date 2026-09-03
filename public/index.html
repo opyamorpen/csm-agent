@@ -103,6 +103,15 @@
     </main>
 
     <main id="chat" class="hidden">
+      <!-- 悬浮面板头：仅 #chat.floating 悬浮态显示（纯 CSS 按 .floating 切换显隐，不走 .hidden）；完整视图下不占位。 -->
+      <div id="chatFloatingBar" class="chat-floating-bar">
+        <strong>Agent 对话</strong>
+        <div class="row-actions">
+          <button id="chatFloatingNew" class="quiet-command small" type="button">新对话</button>
+          <button id="chatFloatingExpand" class="quiet-command small" type="button" title="转到完整 Agent 视图">完整视图</button>
+          <button id="chatFloatingClose" class="icon-btn" type="button" title="收起悬浮面板" aria-label="收起悬浮面板">✕</button>
+        </div>
+      </div>
       <div class="agent-mode-tabs" role="tablist" aria-label="Agent 工作区">
         <button class="agent-mode-tab active" data-agent-mode="conversation">对话</button>
         <button class="agent-mode-tab" data-agent-mode="hemory">Hemory 片段 <span id="hemoryPendingCount" class="nav-count"></span></button>
@@ -201,6 +210,17 @@
       <div id="recordList"></div>
     </aside>
   </div>
+
+  <!-- Agent 悬浮球：任何视图右下角常驻（完整 Agent 视图内由 JS 收起），点击就地弹出悬浮对话面板。 -->
+  <button id="chatFab" class="chat-fab" type="button" title="打开 Agent 对话" aria-label="打开 Agent 对话">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="4" y="8" width="16" height="11" rx="3.5"></rect>
+      <circle cx="9" cy="13.5" r="1.3" fill="currentColor" stroke="none"></circle>
+      <circle cx="15" cy="13.5" r="1.3" fill="currentColor" stroke="none"></circle>
+      <path d="M12 8V5.5"></path>
+      <circle cx="12" cy="4" r="1.4"></circle>
+    </svg>
+  </button>
 
   <div id="settingsModal" class="modal hidden">
     <div class="modal-box">
