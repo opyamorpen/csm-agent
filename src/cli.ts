@@ -7,7 +7,7 @@ import { join, extname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
-import { appRoot, isManagedInstall } from './managed-install.js';
+import { appRoot, isManagedInstall, readInstallLayout } from './managed-install.js';
 import { readBuildInfo } from './version.js';
 import { runUpdate } from './update.js';
 import { runUninstall } from './uninstall.js';
@@ -272,6 +272,9 @@ function version(): void {
   // 安装指纹：两台机器各跑 `csm-agent version --json` 比对（gitSha 一致 = 同一份代码构建）。
   const root = appRoot();
   const local = readBuildInfo();
+  const managed = isManagedInstall(root);
+  // 受管安装的端口以 layout 记录为准（非默认 --port 安装不能只看环境变量默认值）
+  const port = managed ? (readInstallLayout(root)?.port ?? Number(process.env.CSM_PORT ?? 3210)) : Number(process.env.CSM_PORT ?? 3210);
   const gitQuery = (...pieces: string[]): string | null => {
     try { return execFileSync('git', pieces, { cwd: root, encoding: 'utf8' }).trim() || null; } catch { return null; }
   };
@@ -281,13 +284,13 @@ function version(): void {
     gitSha: local?.gitSha ?? null,
     dirty: local?.dirty ?? null,
     builtAt: local?.builtAt ?? null,
-    managed: isManagedInstall(root),
+    managed,
     branch: gitQuery('rev-parse', '--abbrev-ref', 'HEAD'),
     head: gitQuery('rev-parse', 'HEAD'),
     origin: gitQuery('remote', 'get-url', 'origin'),
     node: process.version,
     platform: `${process.platform}-${process.arch}`,
-    port: Number(process.env.CSM_PORT ?? 3210),
+    port,
   });
 }
 
