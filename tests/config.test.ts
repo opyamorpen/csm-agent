@@ -61,6 +61,15 @@ test('custom LLM config round-trips baseUrl; other providers drop it', () => {
     assert.equal(custom.baseUrl, 'https://relay.ones.pro/v1');
     assert.equal(custom.apiKeyEnv, 'CSM_CUSTOM_API_KEY');
     assert.equal(custom.apiKey, 'sk-test');
+    assert.equal(custom.protocol, undefined, 'openai is the default protocol and stays unwritten');
+
+    // anthropic 协议（如智谱 Coding Plan 的 /api/anthropic 端点）round-trip；内置 provider 一律丢弃。
+    saveLlmConfig({ provider: 'custom', model: 'glm-5.3-flash', apiKeyEnv: 'CSM_CUSTOM_API_KEY', baseUrl: 'https://open.bigmodel.cn/api/anthropic', apiKey: 'sk-test', vision: true, protocol: 'anthropic' });
+    const anthropic = loadLlmConfig();
+    assert.equal(anthropic.protocol, 'anthropic');
+    assert.equal(anthropic.vision, true);
+    saveLlmConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', apiKeyEnv: 'DEEPSEEK_API_KEY', protocol: 'anthropic' });
+    assert.equal(loadLlmConfig().protocol, undefined);
 
     saveLlmConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', apiKeyEnv: 'DEEPSEEK_API_KEY', baseUrl: 'https://ignored.example/v1' });
     const builtin = loadLlmConfig();

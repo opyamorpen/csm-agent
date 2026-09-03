@@ -209,7 +209,7 @@
       </div>
 
       <div class="settings-section">
-        <div class="section-title">大模型 <span class="hint-inline">选「自定义」可接入任意 OpenAI 兼容端点</span></div>
+        <div class="section-title">大模型 <span class="hint-inline">「GLM Coding Plan」一键接入智谱套餐；「自定义」可接任意 OpenAI / Anthropic 兼容端点</span></div>
         <div class="llm-editor">
           <div class="row">
             <div class="field">
@@ -221,9 +221,18 @@
               <input id="llmModel" placeholder="例如 deepseek-v4-flash" />
             </div>
           </div>
+          <div class="row hidden" id="llmProtocolRow">
+            <div class="field">
+              <label>端点协议（保存时按协议自动验证连通）</label>
+              <select id="llmProtocol">
+                <option value="openai">OpenAI 兼容（追加 /chat/completions）</option>
+                <option value="anthropic">Anthropic 兼容（追加 /v1/messages，Claude Code 风格）</option>
+              </select>
+            </div>
+          </div>
           <div class="row hidden" id="llmBaseUrlRow">
             <div class="field">
-              <label>Base URL（OpenAI 兼容端点，保存时自动验证连通）</label>
+              <label id="llmBaseUrlLabel">Base URL（OpenAI 兼容端点，保存时自动验证连通）</label>
               <input id="llmBaseUrl" placeholder="https://relay.ones.pro/v1" autocomplete="off" />
             </div>
           </div>

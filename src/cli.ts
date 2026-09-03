@@ -120,10 +120,14 @@ function help(): void {
   csm-agent doctor
     （健康自检，含旧进程探测：服务端构建 vs 本地 dist 构建，stale 会提示重启）
   csm-agent config llm [--json]
-  csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>] [--vision=on|off]
-    （查看/切换大模型；provider=custom 需 --base-url（OpenAI 兼容端点），
+  csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>] [--protocol=openai|anthropic] [--vision=on|off]
+    （查看/切换大模型；provider=custom 需 --base-url，--protocol 选端点协议：
+     openai=OpenAI 兼容（追加 /chat/completions，缺省），anthropic=Anthropic 兼容
+     （追加 /v1/messages，如智谱 GLM Coding Plan 的 https://open.bigmodel.cn/api/anthropic）。
      保存时自动发一次真实请求验证连通，失败则不落盘；API Key 只写本地配置文件；
-     --vision 声明自定义端点的图片输入能力（内置服务商按模型目录自动判定，无需设置））
+     --vision 声明自定义端点的图片输入能力（内置服务商按模型目录自动判定，无需设置）。
+     示例：config llm set --provider=custom --model=glm-5.3-flash \\
+              --base-url=https://open.bigmodel.cn/api/coding/paas/v4 --api-key=<key> --vision=on）
   csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
   csm-agent customer <客户ID或名称> [--json]
   csm-agent webintel <客户ID或名称> [--json]
@@ -853,10 +857,15 @@ async function configCommand(subcommand: string, values: string[]): Promise<void
     const baseUrl = flagOf(rest, 'base-url');
     const apiKey = flagOf(rest, 'api-key');
     const visionRaw = flagOf(rest, 'vision');
-    if (!provider || !model) throw new Error('config llm set 需要 --provider=<id> --model=<id>，可选 --base-url=<url> --api-key=<key> --vision=on|off');
+    const protocolRaw = flagOf(rest, 'protocol');
+    if (!provider || !model) throw new Error('config llm set 需要 --provider=<id> --model=<id>，可选 --base-url=<url> --api-key=<key> --protocol=openai|anthropic --vision=on|off');
+    if (protocolRaw !== undefined && !['openai', 'anthropic'].includes(protocolRaw)) {
+      throw new Error('--protocol 只接受 openai/anthropic（自定义端点协议：openai=…/chat/completions，anthropic=…/v1/messages）');
+    }
     const payload: Record<string, string | boolean> = { provider, model };
     if (baseUrl !== undefined) payload.baseUrl = baseUrl;
     if (apiKey !== undefined) payload.apiKey = apiKey;
+    if (protocolRaw !== undefined) payload.protocol = protocolRaw;
     if (visionRaw !== undefined) {
       const vision = ['on', 'true', '1', 'yes'].includes(visionRaw.toLowerCase()) ? true
         : ['off', 'false', '0', 'no'].includes(visionRaw.toLowerCase()) ? false : null;

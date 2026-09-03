@@ -25,7 +25,10 @@
   const llmProvider = document.getElementById('llmProvider');
   const llmModel = document.getElementById('llmModel');
   const llmKey = document.getElementById('llmKey');
+  const llmProtocolRow = document.getElementById('llmProtocolRow');
+  const llmProtocol = document.getElementById('llmProtocol');
   const llmBaseUrlRow = document.getElementById('llmBaseUrlRow');
+  const llmBaseUrlLabel = document.getElementById('llmBaseUrlLabel');
   const llmBaseUrl = document.getElementById('llmBaseUrl');
   const llmVision = document.getElementById('llmVision');
   const llmVisionLabel = document.getElementById('llmVisionLabel');
@@ -1082,24 +1085,55 @@
     }
   }
 
-  // 自定义（OpenAI 兼容）服务商需要额外的 Base URL 输入框；
+  // 「GLM Coding Plan（智谱）」预设：本质上仍是 provider=custom + OpenAI 兼容协议，
+  // 只是选它时一键带出官方 Coding Plan 端点/模型/视觉开关；回读时按 baseUrl 识别回预设。
+  const GLM_CODING_PRESET = {
+    provider: 'glm-coding',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    model: 'glm-5.3-flash',
+  };
+
+  // 自定义（OpenAI/Anthropic 兼容）服务商需要协议 + Base URL 输入；
   // 视觉开关同理：内置服务商按模型目录自动判定（只读展示），自定义端点无法探测须手动声明。
+  function updateLlmBaseUrlLabel() {
+    const anthropic = llmProtocol.value === 'anthropic';
+    llmBaseUrlLabel.textContent = anthropic
+      ? 'Base URL（Anthropic 兼容端点，自动追加 /v1/messages，保存时验证连通）'
+      : 'Base URL（OpenAI 兼容端点，自动追加 /chat/completions，保存时验证连通）';
+    llmBaseUrl.placeholder = anthropic ? 'https://open.bigmodel.cn/api/anthropic' : 'https://relay.ones.pro/v1';
+  }
+
   function syncLlmProviderUi() {
-    const isCustom = llmProvider.value === 'custom';
+    const isCustom = llmProvider.value === 'custom' || llmProvider.value === GLM_CODING_PRESET.provider;
     llmBaseUrlRow.classList.toggle('hidden', !isCustom);
-    llmModel.placeholder = isCustom ? '例如 ucloud-qwen3.8-max' : '例如 deepseek-v4-flash';
+    // 预设固定走 OpenAI 兼容协议，协议下拉只在裸 custom 时出现。
+    llmProtocolRow.classList.toggle('hidden', llmProvider.value !== 'custom');
+    llmModel.placeholder = isCustom ? '例如 glm-5.3-flash / ucloud-qwen3.8-max' : '例如 deepseek-v4-flash';
     llmVision.disabled = !isCustom;
     llmVisionLabel.classList.toggle('disabled', !isCustom);
+    updateLlmBaseUrlLabel();
   }
-  llmProvider.addEventListener('change', syncLlmProviderUi);
+  llmProvider.addEventListener('change', () => {
+    // 仅在用户主动选预设时填充（loadLlmConfigUI 走 syncLlmProviderUi，不得覆盖已加载值）。
+    if (llmProvider.value === GLM_CODING_PRESET.provider) {
+      llmBaseUrl.value = GLM_CODING_PRESET.baseUrl;
+      if (!llmModel.value.trim()) llmModel.value = GLM_CODING_PRESET.model;
+      llmVision.checked = true;
+    }
+    syncLlmProviderUi();
+  });
+  llmProtocol.addEventListener('change', updateLlmBaseUrlLabel);
 
   async function loadLlmConfigUI() {
     try {
       const res = await fetch('/api/config/llm');
       const data = await res.json();
-      llmProvider.value = data.provider || 'deepseek';
+      // custom + Coding Plan 官方端点 → 识别回 GLM 预设选项；其余按原样回填。
+      const isGlmPreset = data.provider === 'custom' && (data.baseUrl || '').replace(/\/+$/, '') === GLM_CODING_PRESET.baseUrl;
+      llmProvider.value = isGlmPreset ? GLM_CODING_PRESET.provider : (data.provider || 'deepseek');
       llmModel.value = data.model || '';
       llmBaseUrl.value = data.baseUrl || '';
+      llmProtocol.value = data.protocol === 'anthropic' ? 'anthropic' : 'openai';
       llmKey.value = '';
       llmKey.placeholder = data.apiKeyConfigured
         ? '已设置（留空则不修改）'
@@ -1140,13 +1174,15 @@
   saveConfigBtn.addEventListener('click', async () => {
     const servers = collectServers();
     const llmPayload = {
-      provider: llmProvider.value,
+      // GLM Coding Plan 预设本质是 custom + 固定 OpenAI 协议端点。
+      provider: llmProvider.value === GLM_CODING_PRESET.provider ? 'custom' : llmProvider.value,
       model: llmModel.value.trim(),
       apiKey: llmKey.value.trim(),
     };
     if (llmPayload.provider === 'custom') {
       llmPayload.baseUrl = llmBaseUrl.value.trim();
       llmPayload.vision = llmVision.checked;
+      llmPayload.protocol = llmProvider.value === GLM_CODING_PRESET.provider ? 'openai' : llmProtocol.value;
     }
     saveConfigBtn.disabled = true;
     configResult.className = '';
@@ -3888,7 +3924,8 @@
     ['anthropic', 'Anthropic (Claude)'],
     ['moonshotai', 'Moonshot (Kimi)'],
     ['groq', 'Groq'],
-    ['custom', '自定义（OpenAI 兼容）'],
+    ['glm-coding', 'GLM Coding Plan（智谱）'],
+    ['custom', '自定义（OpenAI / Anthropic 兼容）'],
   ];
   for (const [id, label] of PROVIDERS) {
     const opt = document.createElement('option');

@@ -767,7 +767,7 @@ test('settings modal exposes custom OpenAI-compatible endpoint configuration', (
   assert.match(html, /OpenAI 兼容端点/);
   const boot = source.match(/const PROVIDERS = \[[\s\S]*?\n  \];/)?.[0];
   assert.ok(boot, 'PROVIDERS list was not found');
-  assert.match(boot, /\['custom', '自定义（OpenAI 兼容）'\]/);
+  assert.match(boot, /\['custom', '自定义（OpenAI \/ Anthropic 兼容）'\]/);
   const sync = source.match(/function syncLlmProviderUi[\s\S]*?\n  }\n/)?.[0];
   assert.ok(sync, 'syncLlmProviderUi source was not found');
   assert.match(sync, /llmProvider\.value === 'custom'/);
@@ -779,6 +779,50 @@ test('settings modal exposes custom OpenAI-compatible endpoint configuration', (
   assert.ok(saver, 'saveConfigBtn handler was not found');
   assert.match(saver, /if \(llmPayload\.provider === 'custom'\) \{/);
   assert.match(saver, /llmPayload\.baseUrl = llmBaseUrl\.value\.trim\(\);/);
+});
+
+test('settings modal exposes the GLM Coding Plan preset and a custom endpoint protocol selector', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  // 显示契约：①「GLM Coding Plan（智谱）」下拉预设一键带出官方 Coding Plan 端点 +
+  // glm-5.3-flash + 视觉开关（本质仍是 provider=custom + openai 协议）；
+  // ②裸 custom 增加协议下拉（OpenAI 兼容 /chat/completions | Anthropic 兼容 /v1/messages），
+  // Base URL 标签随协议切换；保存 payload 携带 protocol，回读按 baseUrl 识别回预设。
+  assert.match(html, /id="llmProtocolRow"/);
+  assert.match(html, /id="llmProtocol"/);
+  assert.match(html, /Anthropic 兼容（追加 \/v1\/messages，Claude Code 风格）/);
+  const boot = source.match(/const PROVIDERS = \[[\s\S]*?\n  \];/)?.[0];
+  assert.ok(boot, 'PROVIDERS list was not found');
+  assert.match(boot, /\['glm-coding', 'GLM Coding Plan（智谱）'\]/);
+  const preset = source.match(/const GLM_CODING_PRESET = \{[\s\S]*?\n  \};/)?.[0];
+  assert.ok(preset, 'GLM_CODING_PRESET was not found');
+  assert.match(preset, /provider: 'glm-coding'/);
+  assert.match(preset, /baseUrl: 'https:\/\/open\.bigmodel\.cn\/api\/coding\/paas\/v4'/);
+  assert.match(preset, /model: 'glm-5\.3-flash'/);
+  const sync = source.match(/function syncLlmProviderUi[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(sync, 'syncLlmProviderUi source was not found');
+  // 预设固定走 openai 协议：协议下拉只在裸 custom 时出现。
+  assert.match(sync, /llmProtocolRow\.classList\.toggle\('hidden', llmProvider\.value !== 'custom'\)/);
+  // 选中预设一键填充（仅在用户主动选择时，加载回填不得覆盖已加载值）。
+  const picker = source.match(/llmProvider\.addEventListener\('change', \(\) => \{[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(picker, 'llmProvider change handler was not found');
+  assert.match(picker, /llmBaseUrl\.value = GLM_CODING_PRESET\.baseUrl;/);
+  assert.match(picker, /llmModel\.value = GLM_CODING_PRESET\.model;/);
+  assert.match(picker, /llmVision\.checked = true;/);
+  // 协议切换联动 Base URL 标签文案。
+  const label = source.match(/function updateLlmBaseUrlLabel[\s\S]*?\n  }\n/)?.[0];
+  assert.ok(label, 'updateLlmBaseUrlLabel was not found');
+  assert.match(label, /\/v1\/messages/);
+  assert.match(label, /\/chat\/completions/);
+  // 保存：预设映射回 provider=custom + openai；裸 custom 按下拉提交协议。
+  const saver = source.match(/saveConfigBtn\.addEventListener\('click'[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(saver, 'saveConfigBtn handler was not found');
+  assert.match(saver, /llmPayload\.protocol = llmProvider\.value === GLM_CODING_PRESET\.provider \? 'openai' : llmProtocol\.value;/);
+  // 回读：custom + Coding Plan 官方端点 → 识别回预设；协议按响应回填。
+  const loader = source.match(/async function loadLlmConfigUI[\s\S]*?\n  }\n\n  async function loadSearchConfigUI/)?.[0];
+  assert.ok(loader, 'loadLlmConfigUI source was not found');
+  assert.match(loader, /data\.provider === 'custom' && \(data\.baseUrl \|\| ''\)\.replace\(\/\\\/\+\$\/, ''\) === GLM_CODING_PRESET\.baseUrl/);
+  assert.match(loader, /llmProtocol\.value = data\.protocol === 'anthropic' \? 'anthropic' : 'openai';/);
 });
 
 test('draft generation shows a loading banner and polls job status after attribution', () => {

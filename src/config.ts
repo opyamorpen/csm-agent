@@ -132,6 +132,11 @@ export interface LlmConfig {
    * custom 端点无法探测，须用户显式声明——决定附件图片是否作为 image 块发给模型。
    */
   vision?: boolean;
+  /**
+   * custom 端点协议：openai（缺省，追加 /chat/completions）或 anthropic
+   * （追加 /v1/messages，Claude Code 风格中继/智谱 Coding Plan 的 Anthropic 端点）。
+   */
+  protocol?: 'openai' | 'anthropic';
 }
 
 /** Provider id → { label, apiKeyEnv, defaultModel }. */
@@ -173,6 +178,7 @@ export function loadLlmConfig(): LlmConfig {
       apiKeyEnv: typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : p.apiKeyEnv,
       ...(provider === 'custom' && baseUrl ? { baseUrl } : {}),
       ...(raw?.vision === true ? { vision: true } : {}),
+      ...(provider === 'custom' && raw?.protocol === 'anthropic' ? { protocol: 'anthropic' } : {}),
     };
   } catch {
     const p = providerFor('deepseek')!;
@@ -189,6 +195,8 @@ export function saveLlmConfig(cfg: LlmConfig): void {
   };
   if (cfg.provider === 'custom' && cfg.baseUrl?.trim()) out.baseUrl = cfg.baseUrl.trim().replace(/\/+$/, '');
   if (cfg.vision === true) out.vision = true;
+  // openai 是缺省协议，省略不落盘，旧 YAML 的读写行为保持不变。
+  if (cfg.provider === 'custom' && cfg.protocol === 'anthropic') out.protocol = 'anthropic';
   if (cfg.apiKey && cfg.apiKey.trim()) out.apiKey = cfg.apiKey.trim();
   mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
   atomicWriteYaml(userConfigPath('llm.user.yaml'), out);

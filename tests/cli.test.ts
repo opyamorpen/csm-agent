@@ -421,6 +421,11 @@ test('agent CLI exposes attachments and the customer-detail tool; config llm set
   assert.match(source, /--vision 只接受 on\/off/);
   assert.match(source, /payload\.vision = vision;/);
 
+  // --protocol：自定义端点协议（openai 缺省 / anthropic 兼容），白名单校验 + 仅随 payload 提交。
+  assert.match(help.stdout, /--protocol=openai\|anthropic/);
+  assert.match(source, /--protocol 只接受 openai\/anthropic/);
+  assert.match(source, /payload\.protocol = protocolRaw;/);
+
   // 能力清单：客户详情按需抓取工具 + 附件下载路由。
   const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string; workflow: string; api: string[]; tools?: string[] }>;
   const agent = capabilities.find((item) => item.workflow === 'customer-agent');

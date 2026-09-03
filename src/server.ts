@@ -1058,6 +1058,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           apiKeyConfigured: !!runtime.llm.apiKey,
           // 视觉（图片输入）能力：附件图片与设置页开关共用这一权威出口。
           vision: visionSupported(),
+          // custom 端点协议（openai 缺省 / anthropic 兼容端点），设置页据此回填。
+          protocol: runtime.llm.protocol === 'anthropic' ? 'anthropic' : 'openai',
         });
       }
       if (req.method === 'PUT' && path === '/api/config/llm') {
@@ -1066,22 +1068,32 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const provider = String(body.provider);
         const model = String(body.model);
         const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim().replace(/\/+$/, '') : '';
+        const protocolRaw = typeof body.protocol === 'string' ? body.protocol.trim() : '';
         // custom: the endpoint URL is part of the identity; everything else
         // must not carry one.
         if (provider === CUSTOM_PROVIDER_ID) {
           if (!baseUrl) return json(res, 400, { error: '自定义服务商必须填写 Base URL' });
           if (!/^https?:\/\//i.test(baseUrl)) return json(res, 400, { error: 'Base URL 必须以 http(s):// 开头' });
+          if (protocolRaw && !['openai', 'anthropic'].includes(protocolRaw)) {
+            return json(res, 400, { error: 'protocol 只接受 openai / anthropic' });
+          }
         } else if (baseUrl) {
           return json(res, 400, { error: '只有自定义服务商支持 Base URL' });
+        } else if (protocolRaw) {
+          return json(res, 400, { error: '只有自定义服务商支持协议选择' });
         }
         try {
           const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey : undefined;
           // Verify a custom endpoint with a real streaming request before it
           // can be saved; a saved-but-broken config would break every session.
+          // 协议未显式传时沿用旧值（旧版 UI 改模型不得静默翻转 anthropic 配置）。
+          const protocol = provider === CUSTOM_PROVIDER_ID
+            ? (protocolRaw || (runtime.llm.provider === CUSTOM_PROVIDER_ID && runtime.llm.protocol === 'anthropic' ? 'anthropic' : 'openai'))
+            : undefined;
           if (provider === CUSTOM_PROVIDER_ID) {
             const savedKey = apiKey ?? (runtime.llm.provider === CUSTOM_PROVIDER_ID ? runtime.llm.apiKey : undefined);
             if (!savedKey) return json(res, 400, { error: '自定义端点缺少 API Key（新配置必填；旧配置未保存过 key）' });
-            await testCustomEndpoint({ baseUrl, model, apiKey: savedKey });
+            await testCustomEndpoint({ baseUrl, model, apiKey: savedKey, ...(protocol === 'anthropic' ? { protocol } : {}) });
           }
           const vision = typeof body.vision === 'boolean' ? body.vision : undefined;
           runtime.setLlm({
@@ -1091,7 +1103,12 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
             apiKeyEnv: runtime.llm.apiKeyEnv,
             ...(baseUrl ? { baseUrl } : {}),
             // custom 端点无法探测视觉能力，靠用户声明；未显式传时沿用旧值（避免换模型/改 key 时静默丢配置）。
-            ...(provider === CUSTOM_PROVIDER_ID ? { vision: vision ?? runtime.llm.vision === true } : {}),
+            ...(provider === CUSTOM_PROVIDER_ID
+              ? {
+                  vision: vision ?? runtime.llm.vision === true,
+                  ...(protocol === 'anthropic' ? { protocol: 'anthropic' as const } : {}),
+                }
+              : {}),
           });
         } catch (err) {
           return json(res, 400, { error: (err as Error).message });
@@ -1103,6 +1120,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           baseUrl: runtime.llm.baseUrl,
           apiKeyConfigured: !!runtime.llm.apiKey,
           vision: visionSupported(),
+          protocol: runtime.llm.protocol === 'anthropic' ? 'anthropic' : 'openai',
         });
       }
 
