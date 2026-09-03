@@ -85,6 +85,28 @@ export class McpHub {
     await this.connect(configs);
   }
 
+  /** 断连自愈：只重连 failures 里仍失败的服务（瞬时网络抖动的 fetch failed 不再断到下次重启），
+   * 成功即摘除失败标记；不在 failures 里的一律跳过，已连接的连接由 reconnect（配置变更全量重连）管辖。 */
+  async retryFailed(configs: McpServerConfig[]): Promise<string[]> {
+    const recovered: string[] = [];
+    for (const cfg of configs) {
+      if (!this.failures.has(cfg.name)) continue;
+      if (this.servers.has(cfg.name)) {
+        this.failures.delete(cfg.name);
+        continue;
+      }
+      try {
+        await this.connectOne(cfg);
+        this.failures.delete(cfg.name);
+        recovered.push(cfg.name);
+        console.log(`[mcp] "${cfg.name}" 断连自愈重连成功`);
+      } catch (err) {
+        this.failures.set(cfg.name, (err as Error).message);
+      }
+    }
+    return recovered;
+  }
+
   private async connectOne(cfg: McpServerConfig): Promise<void> {
     const client = new Client({ name: 'csm-agent', version: '0.1.0' }, { capabilities: {} });
     if (cfg.transport === 'stdio') {

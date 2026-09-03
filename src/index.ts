@@ -28,6 +28,16 @@ async function main(): Promise<void> {
       console.error('MCP 连接失败:', err);
     }
   })();
+
+  // MCP 断连自愈：启动连接只跑一次，失败的服务（如瞬时网络抖动 fetch failed）此前会断到下次重启——
+  // 每 60s 只重试仍处 failures 的服务（每次重读配置），全部恢复后静默空转；与配置重存的 reloadMcp 互不冲突。
+  const mcpRetryTimer = setInterval(() => {
+    if (runtime.mcp.failures.size === 0) return;
+    void runtime.mcp.retryFailed(loadMcpServers()).catch((err) => {
+      console.error('[mcp] 断连自愈重试失败:', err);
+    });
+  }, 60_000);
+  mcpRetryTimer.unref();
 }
 
 main().catch((err) => {

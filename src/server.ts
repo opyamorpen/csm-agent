@@ -1712,17 +1712,19 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     const data = await sync.listCustomerWorkhours(customerId);
     return { records: data.records.map((record) => ({ startTime: record.startTime, hours: record.hours, description: record.description, owner: record.owner?.name ?? undefined })) };
   });
-  const stopPortfolio = schedulePortfolioSync(sync);
-  const stopHemory = scheduleHemorySync(sync, db);
-  // 公开动态自动轮换：每日 20:00–次日 08:00（上海错峰时段、token 更便宜）每小时检索 1 个客户，约两周全员轮换（最久未查优先）。
-  const stopWebIntel = scheduleWebIntelSync(sync);
   // 启动恢复：进程内未跑完的 SyncRun 与被重启烧掉额度的分段 job 都是残留脏数据——
   // 前者落 failed 终态，后者重置回 pending 交给 5s 后的 resumePending 重跑。
+  // 必须先于下方调度器挂载：scheduleHemorySync 启动即补跑漏槽并创建 running run，
+  // 清扫若落在其后会把刚建的补跑 run 误标「服务重启中断」（异步工作仍在跑、run 记录全花）。
   const orphanedRuns = db.failOrphanedSyncRuns();
   const resetJobs = db.resetInterruptedHemorySegmentationJobs();
   if (orphanedRuns || resetJobs) {
     db.audit('csm', 'recover_interrupted_sync_jobs', 'sync_run', 'startup', { orphanedRuns, resetSegmentationJobs: resetJobs });
   }
+  const stopPortfolio = schedulePortfolioSync(sync);
+  const stopHemory = scheduleHemorySync(sync, db);
+  // 公开动态自动轮换：每日 20:00–次日 08:00（上海错峰时段、token 更便宜）每小时检索 1 个客户，约两周全员轮换（最久未查优先）。
+  const stopWebIntel = scheduleWebIntelSync(sync);
   // 风险模型升级（ruleVersion 变化）后启动即全量重算：纯本地计算，无外部调用，
   // 否则升级部署后库里还压着旧版评分（UI 维度标签对不上 key）。
   for (const customer of db.listCustomers()) {
