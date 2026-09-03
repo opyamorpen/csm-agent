@@ -1623,7 +1623,7 @@
           if (failed.length) parts.push(`草稿生成失败：${[...new Set(failed)].join('；').slice(0, 160)}`);
           if (stalled.size) parts.push('部分任务疑似中断（服务重启未恢复），请在草稿箱点「重新生成」');
           setStatus('warn', parts.join('；'));
-        } else setStatus('', '草稿生成完成');
+        } else setTransientStatus('ok', '草稿生成完成', 5000);
         void loadDraftBatches();
         return;
       }

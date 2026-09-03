@@ -970,6 +970,9 @@ test('draft generation shows a loading banner and polls job status after attribu
   // 失败任务不创建批次，只能靠任务状态感知；终态后刷新草稿列表与角标。
   assert.match(tracker, /草稿生成失败/);
   assert.match(tracker, /void loadDraftBatches\(\)/);
+  // 成功终态必须是瞬态：完成文案短暂显示后自动清除，不再永久钉在顶栏（setStatus 纯赋值无自动清除）。
+  assert.match(tracker, /setTransientStatus\('ok', '草稿生成完成', 5000\)/);
+  assert.doesNotMatch(tracker, /setStatus\('', '草稿生成完成'\)/);
   // 重新生成同样接入轮询（响应同样返回 jobs）。
   const renderer = source.match(/async function loadDraftBatches[\s\S]*?\n  \}\n\n  \/\*\*\n   \* 失败生成任务卡片/)?.[0];
   assert.ok(renderer, 'loadDraftBatches source was not found');
