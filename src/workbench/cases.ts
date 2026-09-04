@@ -19,7 +19,7 @@ import { styleCaseFigureSvg } from './case-figure-shell.js';
 
 /** v15：核心蓝图图采用结构化内容+服务端确定性渲染，其余流程/里程碑图采用统一视觉外壳。
  * 提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v15-unified-figure-shell';
+export const CASE_GENERATION_VERSION = 'case-v16-value-map-horizontal-layout';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1842,7 +1842,7 @@ const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
   capability_map: '需求场景-产品能力映射图：横向分层业务蓝图——目标或核心场景、业务阶段、模块与能力矩阵、平台支撑、系统集成，有明确素材时追加组织保障；列对位即映射，仅阶段标题之间保留流程箭头',
   architecture: '系统集成架构图：多系统集成场景专用——素材表明方案涉及外部系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时绘制：ONES 平台为核心、外部系统环绕对接、连线带数据标注。模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
-  value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——顶部痛点及挑战、左下方案、右侧价值三块区域由服务端统一渲染，痛点与价值按序一一对位',
+  value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——左侧痛点及挑战、中间方案、右侧价值三块区域由服务端统一渲染，方案区占最大空间，痛点与价值按序一一对位',
 };
 
 /** 配图绘图规范·通用条目（所有 kind 适用；规模/画布/布局差异在 CASE_FIGURE_KIND_RULES 专属条目里）。 */
@@ -1891,9 +1891,10 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   ].join('\n'),
   value_map: [
     '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 三分区模板渲染。valueMap 结构：{"painPoints":[{"title":"项目延期","detail":"进度依赖人工汇总，风险常到最后才暴露"}],"values":[{"title":"项目进度可控","detail":"排期、工时与实际进展集中呈现，及时调整"}]}。',
-    '- painPoints 与 values 各 3~5 条且数量必须相等；按序一一对应，痛点标题写现状问题，价值标题写已确认改善，不要写空泛口号。',
-    '- 每项必须包含 title 与 detail；title 为 4~14 字宽短语，detail 为 1~34 字宽的客户化短说明，优先保留数据对象、管理动作和已确认结果。',
-    '- 顶部区域标题固定为「痛点及挑战」，左下区域固定为「方案」，右侧区域固定为「价值」；系统会将第三章节 capability_map 整体缩小嵌入左下区域，你不要输出方案区文字、坐标、颜色或 SVG。',
+    '- painPoints 与 values 各 3~5 条且数量必须相等；按序一一对应，痛点标题只写问题本身（如「数据不通」「协作不畅」「效率低下」），detail 再用一小段话扩展影响或表现；不要把痛点标题写成完整现状叙述。',
+    '- 价值标题与对应痛点逐条呼应，写方案解决后带来的已确认改善（如「数据贯通」「协作顺畅」「效率提升」），detail 用一句话说明通过什么改善、带来什么结果；不要写空泛口号或未经证实的百分比。',
+    '- 每项必须包含 title 与 detail；title 为 4~14 字宽问题/价值短语，detail 为 1~34 字宽的客户化短说明，优先保留数据对象、管理动作和已确认结果。',
+    '- 版式固定为从左到右「痛点及挑战｜方案｜价值」三栏；中间方案区占最大空间，系统会将第三章节 capability_map 整体等比缩小嵌入中间区域，你不要输出方案区文字、坐标、颜色或 SVG。',
     '- 痛点、价值、方案内容均须来自定稿正文、引用素材或已确认交付事实；无证据时减少条目或放弃整图，不使用待补充/unknown，不虚构数字与成效。',
   ].join('\n'),
 };
@@ -1914,7 +1915,7 @@ const CAPABILITY_CONTENT_COMMON_RULES = [
 /**
  * 配图生成 prompt 的唯一组装出口（生成调用 / 探针脚本 / 单测共用一份实现，防止三处漂移）。
  * capability_map / architecture / value_map 额外注入 ONES 能力图谱（模块命名依据），其余 kind 不注入。
- * v14：capability_map / architecture / value_map 只提取结构化内容，由服务端模板渲染。
+ * v16：capability_map / architecture / value_map 只提取结构化内容，由服务端模板渲染；value_map 使用左中右横向布局。
  */
 export function buildCaseFigurePrompt(input: {
   customerName: string;

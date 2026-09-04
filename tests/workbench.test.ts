@@ -4488,7 +4488,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v15-unified-figure-shell');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v16-value-map-horizontal-layout');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5388,6 +5388,9 @@ test('workbench: value map blueprint enforces 3~5 paired items and deterministic
   const svg = renderValueMapSvg((parsed as { blueprint: ValueMapBlueprint }).blueprint)!;
   assert.match(svg, /viewBox="0 0 1440 720"/);
   assert.ok(svg.includes('痛点及挑战') && svg.includes('id="value-map-solution-content"'), '三分区标题与方案槽位存在');
+  assert.match(svg, /x="24" y="32" width="300" height="656"/, '痛点栏位于左侧');
+  assert.match(svg, /x="340" y="32" width="760" height="656"/, '方案区位于中间且占比最大');
+  assert.match(svg, /x="1116" y="32" width="300" height="656"/, '价值栏位于右侧');
   assert.equal((svg.match(/痛点[1-4]/g) ?? []).length, 4);
   assert.equal((svg.match(/价值[1-4]/g) ?? []).length, 4);
   assert.equal(renderValueMapSvg(blueprint), svg, '同输入输出稳定');
@@ -5810,6 +5813,9 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
   assert.match(valueMap, /痛点及挑战/, '全景图顶部标题固定');
   assert.match(valueMap, /按序一一对位/, '痛点价值编号对位规则');
+  assert.match(valueMap, /痛点标题只写问题本身/, '痛点标题使用问题短语');
+  assert.match(valueMap, /价值标题与对应痛点逐条呼应/, '价值标题与痛点对应');
+  assert.match(valueMap, /从左到右「痛点及挑战｜方案｜价值」三栏/, '全景图左右布局');
   assert.match(valueMap, /1440×720/, '2:1 横版画布');
   assert.match(valueMap, /各 3~5 条且数量必须相等/, '痛点与价值数量契约');
   assert.match(valueMap, /【ONES 产品能力图谱/, '全景图注入能力图谱');
@@ -5953,7 +5959,7 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
     assert.match(figurePrompt, /【ONES 产品能力图谱/, '全景图注入能力图谱');
     // 服务端拼装：value_map 落库 SVG 嵌入「方案」分区框+标题牌+映射图本体（含其标识内容）。
     assert.ok(valueMapFigure.svg.includes('方案'), '方案区标题牌');
-    assert.ok(valueMapFigure.svg.includes('<svg x="64" y="240"'), '映射图以嵌套 svg 嵌入');
+    assert.ok(valueMapFigure.svg.includes('<svg x="348" y="40"'), '映射图以中间方案区嵌套 svg 嵌入');
     assert.ok(valueMapFigure.svg.includes('需求收集') && valueMapFigure.svg.includes('ONES Project'), '嵌入的是解决方案章映射图本体');
     assert.ok(valueMapFigure.svg.includes('preserveAspectRatio="xMidYMid meet"'), '等比嵌入');
     // Markdown 占位固定在价值章末尾（价值成效之后、项目总结之前）。

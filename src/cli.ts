@@ -68,7 +68,7 @@ const CLI_CAPABILITIES = [
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
     readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures'],
-    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定痛点及挑战/方案/价值三分区，痛点与价值各 3~5 条；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
@@ -163,7 +163,7 @@ function help(): void {
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
     （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
-     业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定痛点及挑战/方案/价值三分区，痛点与价值各 3~5 条；--wait 轮询任务到终态并实时打印生成进度）
+     业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；--wait 轮询任务到终态并实时打印生成进度）
   csm-agent case show <草稿ID> [--json]
     （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]

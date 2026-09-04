@@ -1,6 +1,6 @@
 /**
  * 案例配图·痛点-方案-价值全景图（value_map）。
- * 模型只提供痛点与价值内容，服务端固定绘制三分区，并为 capability_map 预留可替换的方案内容槽位。
+ * 模型只提供痛点与价值内容，服务端固定绘制左-中-右三分区，并为 capability_map 预留可替换的方案内容槽位。
  */
 
 export interface ValueMapItem {
@@ -127,49 +127,50 @@ function textBlock(parts: string[], text: string, x: number, centerY: number, wi
 const CANVAS_W = 1440;
 const CANVAS_H = 720;
 const MARGIN = 24;
-const TOP = { x: 24, y: 24, w: 1392, h: 160 };
-const LEFT = { x: 24, y: 208, w: 988, h: 488 };
-const RIGHT = { x: 1030, y: 208, w: 386, h: 488 };
+const PAIN = { x: 24, y: 32, w: 300, h: 656 };
+const SOLUTION = { x: 340, y: 32, w: 760, h: 656 };
+const VALUE = { x: 1116, y: 32, w: 300, h: 656 };
 
 /** 固定三分区渲染；solutionFigureSvg 由外层编排在生成完成后注入。 */
 export function renderValueMapSvg(blueprint: ValueMapBlueprint): string | null {
   const count = blueprint.painPoints.length;
   if (count < VALUE_MAP_LIMITS.minItems || count > VALUE_MAP_LIMITS.maxItems || blueprint.values.length !== count) return null;
   const parts: string[] = [];
-  const painGap = 14;
-  const painW = (TOP.w - 40 - painGap * (count - 1)) / count;
+  const painGap = 10;
+  const painCardW = PAIN.w - 32;
   parts.push(`<rect width="${CANVAS_W}" height="${CANVAS_H}" fill="${VALUE_MAP_PALETTE.white}"/>`);
-  parts.push(`<rect x="${TOP.x}" y="${TOP.y}" width="${TOP.w}" height="${TOP.h}" rx="12" fill="${VALUE_MAP_PALETTE.painTint}" stroke="${VALUE_MAP_PALETTE.pain}" stroke-width="2" stroke-dasharray="10 7"/>`);
-  parts.push(`<rect x="${CANVAS_W / 2 - 92}" y="${TOP.y - 16}" width="184" height="40" rx="6" fill="${VALUE_MAP_PALETTE.pain}"/>`);
-  textBlock(parts, '痛点及挑战', CANVAS_W / 2, TOP.y + 4, 170, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
+  parts.push(`<rect x="${PAIN.x}" y="${PAIN.y}" width="${PAIN.w}" height="${PAIN.h}" rx="12" fill="${VALUE_MAP_PALETTE.painTint}" stroke="${VALUE_MAP_PALETTE.pain}" stroke-width="2" stroke-dasharray="10 7"/>`);
+  parts.push(`<rect x="${PAIN.x + PAIN.w / 2 - 92}" y="${PAIN.y - 16}" width="184" height="40" rx="6" fill="${VALUE_MAP_PALETTE.pain}"/>`);
+  textBlock(parts, '痛点及挑战', PAIN.x + PAIN.w / 2, PAIN.y + 4, 170, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
+  const painCardH = (PAIN.h - 72 - painGap * (count - 1)) / count;
+  if (painCardH < 82) return null;
   for (const [index, item] of blueprint.painPoints.entries()) {
-    const x = TOP.x + 20 + index * (painW + painGap);
-    const y = TOP.y + 34;
-    const h = TOP.h - 44;
-    parts.push(`<rect x="${x}" y="${y}" width="${painW}" height="${h}" rx="8" fill="${VALUE_MAP_PALETTE.white}" stroke="${VALUE_MAP_PALETTE.pain}" stroke-width="1.5"/>`);
-    parts.push(`<rect x="${x + 8}" y="${y + 8}" width="${painW - 16}" height="34" rx="5" fill="${VALUE_MAP_PALETTE.pain}"/>`);
-    textBlock(parts, `${index + 1}. ${item.title}`, x + painW / 2, y + 25, painW - 30, 16, VALUE_MAP_PALETTE.white, 'bold', 2, 18);
-    textBlock(parts, item.detail, x + painW / 2, y + 77, painW - 30, 14, VALUE_MAP_PALETTE.text, 'normal', 3, 18);
+    const x = PAIN.x + 16;
+    const y = PAIN.y + 48 + index * (painCardH + painGap);
+    parts.push(`<rect x="${x}" y="${y}" width="${painCardW}" height="${painCardH}" rx="8" fill="${VALUE_MAP_PALETTE.white}" stroke="${VALUE_MAP_PALETTE.pain}" stroke-width="1.5"/>`);
+    parts.push(`<rect x="${x + 8}" y="${y + 8}" width="${painCardW - 16}" height="34" rx="5" fill="${VALUE_MAP_PALETTE.pain}"/>`);
+    textBlock(parts, `${index + 1}. ${item.title}`, x + painCardW / 2, y + 25, painCardW - 30, 16, VALUE_MAP_PALETTE.white, 'bold', 2, 18);
+    textBlock(parts, item.detail, x + painCardW / 2, y + 78, painCardW - 30, 14, VALUE_MAP_PALETTE.text, 'normal', 3, 18);
   }
 
-  parts.push(`<rect x="${LEFT.x}" y="${LEFT.y}" width="${LEFT.w}" height="${LEFT.h}" rx="12" fill="${VALUE_MAP_PALETTE.panel}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="2" stroke-dasharray="10 7"/>`);
-  parts.push(`<rect x="${LEFT.x + LEFT.w / 2 - 52}" y="${LEFT.y - 16}" width="104" height="40" rx="6" fill="${VALUE_MAP_PALETTE.value}"/>`);
-  textBlock(parts, '方案', LEFT.x + LEFT.w / 2, LEFT.y + 4, 80, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
-  parts.push(`<g id="value-map-solution-content"><text x="${LEFT.x + LEFT.w / 2}" y="${LEFT.y + LEFT.h / 2 + 7}" text-anchor="middle" font-size="20" fill="${VALUE_MAP_PALETTE.muted}">方案详见业务解决方案图</text></g>`);
+  parts.push(`<rect x="${SOLUTION.x}" y="${SOLUTION.y}" width="${SOLUTION.w}" height="${SOLUTION.h}" rx="12" fill="${VALUE_MAP_PALETTE.panel}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="2" stroke-dasharray="10 7"/>`);
+  parts.push(`<rect x="${SOLUTION.x + SOLUTION.w / 2 - 52}" y="${SOLUTION.y - 16}" width="104" height="40" rx="6" fill="${VALUE_MAP_PALETTE.value}"/>`);
+  textBlock(parts, '方案', SOLUTION.x + SOLUTION.w / 2, SOLUTION.y + 4, 80, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
+  parts.push(`<g id="value-map-solution-content"><text x="${SOLUTION.x + SOLUTION.w / 2}" y="${SOLUTION.y + SOLUTION.h / 2 + 7}" text-anchor="middle" font-size="20" fill="${VALUE_MAP_PALETTE.muted}">方案详见业务解决方案图</text></g>`);
 
-  parts.push(`<rect x="${RIGHT.x}" y="${RIGHT.y}" width="${RIGHT.w}" height="${RIGHT.h}" rx="12" fill="${VALUE_MAP_PALETTE.support}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="2" stroke-dasharray="10 7"/>`);
-  parts.push(`<rect x="${RIGHT.x + RIGHT.w / 2 - 52}" y="${RIGHT.y - 16}" width="104" height="40" rx="6" fill="${VALUE_MAP_PALETTE.value}"/>`);
-  textBlock(parts, '价值', RIGHT.x + RIGHT.w / 2, RIGHT.y + 4, 80, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
+  parts.push(`<rect x="${VALUE.x}" y="${VALUE.y}" width="${VALUE.w}" height="${VALUE.h}" rx="12" fill="${VALUE_MAP_PALETTE.support}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="2" stroke-dasharray="10 7"/>`);
+  parts.push(`<rect x="${VALUE.x + VALUE.w / 2 - 52}" y="${VALUE.y - 16}" width="104" height="40" rx="6" fill="${VALUE_MAP_PALETTE.value}"/>`);
+  textBlock(parts, '价值', VALUE.x + VALUE.w / 2, VALUE.y + 4, 80, 22, VALUE_MAP_PALETTE.white, 'bold', 1);
   const valueGap = 10;
-  const cardH = (RIGHT.h - 78 - valueGap * (count - 1)) / count;
+  const cardH = (VALUE.h - 72 - valueGap * (count - 1)) / count;
   if (cardH < 66) return null;
   for (const [index, item] of blueprint.values.entries()) {
-    const x = RIGHT.x + 16;
-    const y = RIGHT.y + 54 + index * (cardH + valueGap);
-    parts.push(`<rect x="${x}" y="${y}" width="${RIGHT.w - 32}" height="${cardH}" rx="7" fill="${VALUE_MAP_PALETTE.white}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="1.2"/>`);
-    parts.push(`<rect x="${x}" y="${y}" width="${RIGHT.w - 32}" height="34" rx="7" fill="${VALUE_MAP_PALETTE.value}"/>`);
-    textBlock(parts, `${index + 1}. ${item.title}`, x + (RIGHT.w - 32) / 2, y + 17, RIGHT.w - 54, 16, VALUE_MAP_PALETTE.white, 'bold', 2, 16);
-    textBlock(parts, item.detail, x + (RIGHT.w - 32) / 2, y + 54, RIGHT.w - 54, 14, VALUE_MAP_PALETTE.text, 'normal', VALUE_MAP_LIMITS.detailMaxLines, 17);
+    const x = VALUE.x + 16;
+    const y = VALUE.y + 48 + index * (cardH + valueGap);
+    parts.push(`<rect x="${x}" y="${y}" width="${VALUE.w - 32}" height="${cardH}" rx="7" fill="${VALUE_MAP_PALETTE.white}" stroke="${VALUE_MAP_PALETTE.value}" stroke-width="1.2"/>`);
+    parts.push(`<rect x="${x}" y="${y}" width="${VALUE.w - 32}" height="34" rx="7" fill="${VALUE_MAP_PALETTE.value}"/>`);
+    textBlock(parts, `${index + 1}. ${item.title}`, x + (VALUE.w - 32) / 2, y + 17, VALUE.w - 54, 16, VALUE_MAP_PALETTE.white, 'bold', 2, 16);
+    textBlock(parts, item.detail, x + (VALUE.w - 32) / 2, y + 54, VALUE.w - 54, 14, VALUE_MAP_PALETTE.text, 'normal', VALUE_MAP_LIMITS.detailMaxLines, 17);
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" font-family="PingFang SC, Microsoft YaHei, sans-serif">${parts.join('')}</svg>`;
 }
@@ -183,7 +184,7 @@ export function injectValueMapSolutionSvg(svg: string, solutionSvg: string | nul
     const sourceClosing = solutionSvg.lastIndexOf('</svg>');
     const viewBox = solutionSvg.match(/viewBox=["']([^"']+)["']/)?.[1];
     if (sourceRootEnd < 0 || sourceClosing <= sourceRootEnd || !viewBox) return '';
-    return `<svg x="64" y="240" width="908" height="424" viewBox="${viewBox}" preserveAspectRatio="xMidYMid meet">${solutionSvg.slice(sourceRootEnd + 1, sourceClosing)}</svg>`;
-  })() : `<text x="518" y="458" text-anchor="middle" font-size="20" fill="${VALUE_MAP_PALETTE.muted}">方案详见业务解决方案图</text>`;
+    return `<svg x="348" y="40" width="744" height="640" viewBox="${viewBox}" preserveAspectRatio="xMidYMid meet">${solutionSvg.slice(sourceRootEnd + 1, sourceClosing)}</svg>`;
+  })() : `<text x="720" y="370" text-anchor="middle" font-size="20" fill="${VALUE_MAP_PALETTE.muted}">方案详见业务解决方案图</text>`;
   return svg.replace(/<g id="value-map-solution-content">[\s\S]*?<\/g>/, `<g id="value-map-solution-content">${inner}</g>`);
 }
