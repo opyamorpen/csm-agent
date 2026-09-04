@@ -13,7 +13,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function rasterize(svg: string, outPng: string): void {
   const resvg = new Resvg(svg, {
-    fitTo: { mode: 'width', value: 1800 },
+    fitTo: { mode: 'width', value: 1440 },
     font: { loadSystemFonts: true, defaultFontFamily: 'PingFang SC' },
     background: 'rgba(255,255,255,1)',
   });
@@ -80,6 +80,17 @@ const FIXTURE_N7: ArchitectureGraph = {
   ],
 };
 
+const FIXTURE_N8: ArchitectureGraph = {
+  systems: Array.from({ length: 8 }, (_, index) => ({ id: `sys${index + 1}`, name: `系统${index + 1}`, modules: ['用户目录', '业务数据', '状态同步', '接口配置'] })),
+  hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库', '权限管理', '开放 API'],
+  flows: Array.from({ length: 10 }, (_, index) => ({
+    from: index % 3 === 0 ? 'ones' : `sys${(index % 8) + 1}`,
+    to: index % 3 === 0 ? `sys${(index % 8) + 1}` : 'ones',
+    label: index % 3 === 0 ? '输出业务状态' : '推送业务数据',
+    steps: [{ text: '业务对象与状态同步', fields: index % 2 ? ['对象ID'] : undefined }],
+  })),
+};
+
 const [inputPath, outPng] = process.argv.slice(2);
 if (inputPath) {
   const raw = JSON.parse(readFileSync(resolve(process.cwd(), inputPath), 'utf8'));
@@ -100,4 +111,5 @@ if (inputPath) {
   renderFixture('arch-n1', FIXTURE_N1);
   renderFixture('arch-n3', FIXTURE_N3);
   renderFixture('arch-n7', FIXTURE_N7);
+  renderFixture('arch-n8', FIXTURE_N8);
 }

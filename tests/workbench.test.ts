@@ -4486,7 +4486,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v12-capability-blueprint-render');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v13-architecture-layered-render');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5472,7 +5472,7 @@ test('workbench: renderArchitectureSvg deterministic template invariants (v11)',
   assert.ok(sanitized, '渲染产物过 sanitizeCaseSvg');
   assert.equal(sanitizeCaseSvg(sanitized!), sanitized, '消毒幂等');
   // 换行质量：ASCII 词不被拆行（视觉评审：账号ID 拆成 账号I / D）、全角左括号行首。
-  const bodyBlocks = [...svg.matchAll(/font-size="12"[^>]*>(.*?)<\/text>/g)].map((m) => m[1]);
+  const bodyBlocks = [...svg.matchAll(/font-size="14"[^>]*>(.*?)<\/text>/g)].map((m) => m[1]);
   for (const block of bodyBlocks) {
     const lines = [...block.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map((m) => m[1]);
     for (let i = 0; i + 1 < lines.length; i += 1) {
@@ -5511,18 +5511,17 @@ test('workbench: renderArchitectureSvg multi-system layout and density fallback 
   const svg = renderArchitectureSvg(graph)!;
   assert.ok(svg, '七系统图渲染成功');
   const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
-  assert.equal(Number(dims[1]), 1800, '多系统铺满 1800 宽');
+  assert.equal(Number(dims[1]), 1440, '系统集成图固定 1440 宽');
   assert.ok(Number(dims[2]) <= 920, '高度不超上限');
-  // 枢纽容器（rx=14）与所有系统容器（rx=12）/实心系统块（rx=8 且整列宽，排除枢纽与系统标题牌）水平分离。
+  // 上下分层系统与枢纽在垂直方向保持净距。
   const hub = archRects(svg, '14')[0];
   for (const container of [...archRects(svg, '12'), ...archRects(svg, '8').filter((rect) => rect[2] > 350)]) {
-    assert.ok(container[0] + container[2] <= hub[0] + 0.6 || container[0] >= hub[0] + hub[2] - 0.6,
-      `容器 ${container.join(',')} 与枢纽 ${hub.join(',')} 水平重叠`);
+    assert.ok(!rectsOverlap(container, hub), `容器 ${container.join(',')} 与枢纽 ${hub.join(',')} 重叠`);
   }
   // 双向流：ONES 发出的线用枢纽蓝。
   assert.ok(/<path [^>]*stroke="#1665D8"[^>]*marker-end/.test(svg), 'ONES 发出流用枢纽主题色');
   // 无模块系统 = 实心系统级单块（rx=8、整列宽，区别于窄标题牌）。
-  assert.ok(archRects(svg, '8').some((rect) => rect[2] > 350), 'SVN/BI 画成整列宽实心单块');
+  assert.ok(archRects(svg, '8').length >= 2, 'SVN/BI 画成实心系统块');
   // 压力规模（8 系统 × 6 模块）在四档密度内仍可渲染——模型按 prompt 上限如实输出不能丢图。
   const stress: ArchitectureGraph = {
     systems: Array.from({ length: 8 }, (_, i) => ({ id: `sys${i}`, name: `系统${i}`, modules: ['模块一', '模块二', '模块三', '模块四', '模块五', '模块六'] })),

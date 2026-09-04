@@ -15,9 +15,9 @@ import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
 import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
 
-/** v12：业务解决方案图 1（capability_map）改「模型供内容 blueprint、服务端模板确定性渲染」。
+/** v13：业务解决方案图 1 与系统集成图均采用「模型供结构化内容、服务端模板确定性渲染」。
  * 提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v12-capability-blueprint-render';
+export const CASE_GENERATION_VERSION = 'case-v13-architecture-layered-render';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1877,12 +1877,12 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
     '- 场景、模块、能力、平台支撑、集成系统和组织保障均须有素材依据；ONES 能力图谱只用于准确命名，不构成交付证据。',
   ].join('\n'),
   architecture: [
-    '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 上下分层模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
     '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6（如「OAuth2 统一认证」约 8 字宽、「开放 REST API」约 7 字宽），不是按字符个数。',
-    '- systems：与本方案有集成关系的外部系统，1~8 家（超过 8 家只保留主要集成系统）；id 用小写英文短标识（如 oa/erp/ehr，不得用保留 id "ones"），name 为系统称谓、用素材原称（不超过 12 字宽）；素材提到该系统具体功能/模块时尽量列满进 modules（密集清单，每家 0~6 个、每个不超过 11 字宽，如「OAuth2 统一认证」），未提内部模块的留空数组；与本方案有 2 条以上数据流（或双向）的系统，素材提及其内部环节（如流水线、构建、工单）时尽量提炼为 2~3 个 modules。',
+    '- systems：按业务重要性从上到下、从左到右稳定排序，列出与本方案有集成关系的外部系统，1~8 家（超过 8 家只保留主要集成系统）；id 用小写英文短标识（如 oa/erp/ehr，不得用保留 id "ones"），name 为系统称谓、用素材原称（不超过 12 字宽）；素材提到该系统具体功能/模块时列入 modules（每家 0~6 个、每个不超过 11 字宽），未提内部模块时留空数组。',
     '- hubModules：本方案在 ONES 侧涉及的能力模块 3~8 个（开放 API、单点登录等集成机制按实际采用可列入），命名与下方能力图谱一致、与方案正文涉及的能力相当，尽量列满；每个不超过 11 字宽。',
-    '- flows：系统与 ONES 之间的数据流 1~10 条；from=数据发出方、to=数据接收方——外部系统推送/同步至 ONES 时 from=外部系统 id、to="ones"，ONES 供数/输出至外部系统时 from="ones"、to=外部系统 id；每条流必须有一端是 "ones"（外部系统间直连拆成经 ONES 的两条流或省略）；label 为对接短标签（不超过 12 字宽，动词方向与流向一致，如「推送工单状态」/「输出项目进度」）。',
-    '- steps：这条对接传输的数据内容 1~3 条（每条不超过 36 字宽、须有素材依据），素材提到关联/对应字段时放进同条 step 的 fields（0~4 个、每个不超过 14 字宽）。',
+    '- flows：系统与 ONES 之间的数据流 1~10 条；from=数据发出方、to=数据接收方——外部系统推送/同步至 ONES 时 from=外部系统 id、to="ones"，ONES 供数/输出至外部系统时 from="ones"、to=外部系统 id；每条流必须有一端是 "ones"（外部系统间直连拆成经 ONES 的两条流或省略）；双向业务请拆成两条明确方向的流；label 使用 4~12 字的动宾短语（如「推送工单状态」/「输出项目进度」），不要写长句。',
+    '- steps：这条对接传输的数据内容 1~3 条，优先写「数据对象 + 关键字段」的短业务短语（每条不超过 36 字宽、须有素材依据），素材提到关联/对应字段时放进同条 step 的 fields（0~4 个、每个不超过 14 字宽），避免段落式解释。',
     '- 系统名、模块、数据项、字段只能来自素材原文与能力图谱，不虚构未交付组件；图内文字不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）。素材实际无外部系统与 ONES 对接时输出 {"systems":[],"hubModules":[],"flows":[]} 全空 graph（系统将放弃本图）。',
   ].join('\n'),
   value_map: [
