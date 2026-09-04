@@ -2157,9 +2157,9 @@ test('login gate blocks the app until authenticated and the user chip exposes lo
   assert.match(html, /id="loginUser"/);
   assert.match(html, /id="loginPass" type="password"/);
   assert.match(html, /id="loginError"/);
-  // 顶栏用户 chip 与退出。
-  assert.match(html, /id="userChip"/);
+  // 退出入口在头像悬浮菜单中（顶栏不再有用户 chip）。
   assert.match(html, /id="logoutBtn"/);
+  assert.doesNotMatch(html, /id="userChip"/);
   // 401 统一揭示登录门；登录提交打 /api/auth/login、成功整页重载；退出吊销凭证后重载。
   assert.match(source, /if \(response\.status === 401\) showLoginGate\(\)/);
   assert.match(source, /fetch\('\/api\/auth\/login'/);
@@ -2199,4 +2199,35 @@ test('wecom QR login entry appears only when configured', () => {
   // 服务端三端点：status/login-url/callback（免鉴权白名单）+ 绑定匹配 users.wecom_userid。
   assert.match(server, /\/api\/auth\/wecom\/status/);
   assert.match(server, /candidate\.wecomUserid === result\.userid/);
+});
+
+test('personal center: bottom-left avatar with popover menu and profile modal', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 左下角头像入口（图片优先、首字回退）+ 悬浮菜单（个人中心/退出登录）+ 个人中心弹窗（上传/移除/外观开关）。
+  assert.match(html, /id="avatarEntry"/);
+  assert.match(html, /id="userAvatar"/);
+  assert.match(html, /id="userAvatarImg"/);
+  assert.match(html, /id="userAvatarInitial"/);
+  assert.match(html, /id="avatarMenu"/);
+  assert.match(html, /id="avatarMenuProfile"/);
+  assert.match(html, /id="profileModal"/);
+  assert.match(html, /id="avatarUpload"/);
+  assert.match(html, /id="avatarRemove"/);
+  assert.match(html, /id="avatarFile" type="file" accept="image\/png,image\/jpeg,image\/webp"/);
+  // 主题切换与动效开关迁入个人中心（保留原 id 与 localStorage 契约），顶栏不再承载。
+  assert.match(html, /id="themeToggle"/);
+  assert.match(html, /id="cursorFxToggle"/);
+  // 菜单交互：点击头像展开、点击外部/ESC 关闭；上传走 PUT /api/auth/me/avatar（客户端裁方 256）。
+  assert.match(source, /getElementById\('userAvatar'\)\.addEventListener\('click'/);
+  assert.match(source, /closeAvatarMenu/);
+  assert.match(source, /api\('\/api\/auth\/me\/avatar'/);
+  assert.match(source, /canvas\.toDataURL\('image\/png'\)/);
+  assert.match(source, /refreshAvatar/);
+  // 样式只允许主题 token（双主题契约：个人中心块内无硬编码色值）。
+  const start = styles.indexOf('.avatar-entry');
+  assert.ok(start > -1, 'avatar styles missing');
+  const block = styles.slice(start);
+  assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/);
 });

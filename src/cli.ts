@@ -90,6 +90,7 @@ const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
   { command: 'login', workflow: 'auth', access: 'write', api: ['POST /api/auth/login'], notes: '多人共用部署的密码登录（logout 退出并吊销凭证、whoami 查看当前身份）；凭证按服务地址存于 ~/.csm-agent/cli-auth.json（0600），此后所有命令自动附带 Bearer。服务端 API 已全部要求登录；首启会创建 admin（CSM_ADMIN_PASSWORD 或随机生成打印一次）' },
   { command: 'users', workflow: 'user-admin', access: 'write', api: ['GET /api/users', 'POST /api/users', 'PATCH /api/users/:id', 'POST /api/users/:id/reset-password'], notes: '管理员管理账号：list 列出、create 建号（缺省生成初始密码仅显示一次）、reset-password 重置（收回该用户在线会话）、set-role/bind-wecom（绑定企微 userid 供扫码登录）/enable/disable；最后一名管理员不可降级或禁用' },
+  { command: 'profile', workflow: 'auth', access: 'write', api: ['GET /api/auth/me', 'PUT /api/auth/me/avatar', 'DELETE /api/auth/me/avatar', 'GET /api/auth/me/avatar'], notes: '个人中心：查看账号与头像状态；avatar 上传（≤2MB，网页端自动居中裁方压到 256px）/--remove 移除' },
   { command: 'token', workflow: 'auth', access: 'write', api: ['POST /api/auth/tokens', 'GET /api/auth/tokens', 'DELETE /api/auth/tokens/:id'], notes: '个人访问令牌（PAT，无过期可吊销）: create 生成（明文仅显示一次）、list 查看、revoke 吊销；适合脚本/CI 以 Bearer 调用 API' },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm', '/api/config/mcp'], notes: 'llm 为管理员维护的全局模型配置；mcp 查看本人「我的连接」（每人各自的 CRM/ONES/Hemory 凭证，会话与外部写走本人凭证，保存走网页设置页）' },
@@ -188,6 +189,10 @@ function help(): void {
     （退出并吊销当前凭证）
   csm-agent whoami [--json]
     （查看当前服务地址与登录身份）
+  csm-agent profile [--json]
+    （个人中心 CLI 侧：查看账号与头像状态）
+  csm-agent profile avatar <图片路径> | --remove
+    （上传头像（PNG/JPEG/WebP，≤2MB，网页端自动裁方压缩）或移除；与网页个人中心同一 API）
   csm-agent users list|create|reset-password|set-role|enable|disable ...（需管理员）
     （create <用户名> [--display-name=X] [--role=admin|member] [--password=X]，缺省生成初始密码仅显示一次；
      reset-password <用户名> [--password=X]；set-role <用户名> admin|member；bind-wecom <用户名> <企微 userid>；
@@ -2072,6 +2077,38 @@ async function tokenCommand(subcommand: string, values: string[]): Promise<void>
   throw new Error(`未知 token 子命令: ${subcommand}（可用: create/list/revoke）`);
 }
 
+// ── 个人中心（CLI 侧）：查看本人账号与头像；上传/移除头像（与网页个人中心同一 API）。 ──
+async function profileCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'avatar') {
+    if (rawArgs.includes('--remove')) {
+      await request('/api/auth/me/avatar', { method: 'DELETE' });
+      return console.log('已移除头像');
+    }
+    const file = values.shift() ?? '';
+    if (!file) throw new Error('用法: profile avatar <图片路径>（PNG/JPEG/WebP，≤2MB）或 profile avatar --remove');
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(file);
+    } catch (error) {
+      throw new Error(`读取文件失败: ${(error as Error).message}`);
+    }
+    const ext = extname(file).toLowerCase();
+    const mime = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : '';
+    if (!mime) throw new Error('只支持 PNG / JPEG / WebP 图片');
+    if (bytes.length > 2 * 1024 * 1024) throw new Error('图片超过 2MB 上限（网页端会自动压缩，CLI 请自行压缩后上传）');
+    await request('/api/auth/me/avatar', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: bytes.toString('base64'), mimeType: mime }),
+    });
+    return console.log(`已上传头像（${mime}，${bytes.length} 字节）`);
+  }
+  const me = await request<any>('/api/auth/me');
+  if (jsonOutput) return print(me);
+  console.log(`${baseUrl}: ${me.user.displayName || me.user.username}（${me.user.username}，${me.user.role === 'admin' ? '管理员' : '成员'}）`);
+  console.log(`头像: ${me.avatarConfigured ? '已设置' : '未设置（profile avatar <图片路径> 上传）'}`);
+}
+
 async function main(): Promise<void> {
   const command = args.shift() ?? 'help';
   if (command === 'help' || command === '--help' || command === '-h') return help();
@@ -2082,6 +2119,7 @@ async function main(): Promise<void> {
   if (command === 'login') return loginCommand(args.shift());
   if (command === 'logout') return logoutCommand();
   if (command === 'whoami') return whoamiCommand();
+  if (command === 'profile') return profileCommand(args.shift() ?? '', args);
   if (command === 'users') return usersCommand(args.shift() ?? 'list', args);
   if (command === 'token') return tokenCommand(args.shift() ?? '', args);
   if (command === 'config') return configCommand(args.shift() ?? '', args);

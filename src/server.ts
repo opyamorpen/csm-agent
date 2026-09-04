@@ -1,10 +1,11 @@
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
-import { loadUserMcpServers, saveUserMcpServers, migrateGlobalMcpToUser, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
+import { loadUserMcpServers, saveUserMcpServers, migrateGlobalMcpToUser, userStateDir, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
 import { CUSTOM_PROVIDER_ID, testCustomEndpoint } from './custom-llm.js';
 import { AgentSession, AgentAbortedError, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
@@ -370,6 +371,18 @@ function authenticate(db: WorkbenchDatabase, req: http.IncomingMessage): AuthCon
 /** 用户对外视图：永不携带密码哈希与企微 userid。 */
 function publicUser(user: AuthUser): { id: number; username: string; displayName: string; role: string; status: string } {
   return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, status: user.status };
+}
+
+// ── 个人中心头像（按用户自服务）：文件落 <dataDir>/users/<id>/avatar.<ext>，仅本人可读写。 ──
+const AVATAR_EXTENSIONS: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+function avatarFilesOf(userId: number): string[] {
+  return ['png', 'jpg', 'webp'].map((ext) => join(userStateDir(userId), `avatar.${ext}`));
+}
+
+function avatarConfigured(userId: number): boolean {
+  return avatarFilesOf(userId).some((file) => existsSync(file));
 }
 
 export function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices, legacyUserId: number | undefined): http.RequestListener {
@@ -842,7 +855,39 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
 
       // ── 账号与会话 ──
       if (req.method === 'GET' && path === '/api/auth/me') {
-        return json(res, 200, { user: publicUser(authCtx.user) });
+        return json(res, 200, { user: publicUser(authCtx.user), avatarConfigured: avatarConfigured(authCtx.user.id) });
+      }
+      if (req.method === 'PUT' && path === '/api/auth/me/avatar') {
+        const body = await readBody(req, 3_200_000);
+        const mimeType = String(body.mimeType ?? '').toLowerCase();
+        const extension = AVATAR_EXTENSIONS[mimeType];
+        if (!extension) return json(res, 400, { error: '头像只支持 PNG / JPEG / WebP 图片' });
+        const bytes = Buffer.from(String(body.data ?? ''), 'base64');
+        if (!bytes.length || bytes.length > AVATAR_MAX_BYTES) return json(res, 400, { error: '头像内容无效或超过 2MB' });
+        await mkdir(userStateDir(authCtx.user.id), { recursive: true });
+        for (const file of avatarFilesOf(authCtx.user.id)) await unlink(file).catch(() => {});
+        await writeFile(join(userStateDir(authCtx.user.id), `avatar.${extension}`), bytes, { mode: 0o600 });
+        workbench.db.audit(actor, 'profile.avatar_update', 'user', String(authCtx.user.id), { mimeType, bytes: bytes.length }, authCtx.user.id);
+        return json(res, 200, { ok: true, avatarConfigured: true });
+      }
+      if (req.method === 'DELETE' && path === '/api/auth/me/avatar') {
+        for (const file of avatarFilesOf(authCtx.user.id)) await unlink(file).catch(() => {});
+        workbench.db.audit(actor, 'profile.avatar_remove', 'user', String(authCtx.user.id), {}, authCtx.user.id);
+        return json(res, 200, { ok: true, avatarConfigured: false });
+      }
+      if (req.method === 'GET' && path === '/api/auth/me/avatar') {
+        for (const file of avatarFilesOf(authCtx.user.id)) {
+          try {
+            const bytes = await readFile(file);
+            const extension = extname(file).slice(1);
+            const mime = extension === 'png' ? 'image/png' : extension === 'jpg' ? 'image/jpeg' : 'image/webp';
+            res.writeHead(200, { 'Content-Type': mime, 'Content-Length': bytes.length, 'Cache-Control': 'no-store' });
+            return void res.end(bytes);
+          } catch {
+            /* 换下一个扩展名找 */
+          }
+        }
+        return json(res, 404, { error: 'avatar not found' });
       }
       if (req.method === 'POST' && path === '/api/auth/logout') {
         if (authCtx.credential === 'session') {

@@ -35,10 +35,7 @@
   <header>
     <div class="brand">客户成功工作台 <span class="sub">CSM Agent</span></div>
     <div class="right">
-      <div id="userChip" class="user-chip hidden"><span id="userLabel"></span><button id="logoutBtn" class="quiet-command" type="button">退出</button></div>
       <button id="globalSync" class="quiet-command">同步数据</button>
-      <button id="themeToggle" class="quiet-command theme-toggle" type="button" title="切换深浅主题" aria-label="切换深浅主题">☾ 深色</button>
-      <button id="cursorFxToggle" class="quiet-command" type="button" title="切换光标涟漪动效" aria-label="切换光标涟漪动效">✦ 开动效</button>
       <div id="status" class="status"><span class="dot"></span><span class="text">连接中…</span></div>
     </div>
   </header>
@@ -59,6 +56,13 @@
           <button id="archivedToggle" class="archived-toggle hidden">已归档 <span id="archivedCount" class="nav-count"></span></button>
           <div id="archivedList" class="archived-list hidden"></div>
         </div>
+      </div>
+      <div id="avatarEntry" class="avatar-entry hidden">
+        <button id="userAvatar" class="user-avatar" type="button" title="个人中心" aria-label="打开个人菜单" aria-haspopup="menu">
+          <img id="userAvatarImg" class="hidden" alt="" />
+          <span id="userAvatarInitial" class="user-avatar-initial"></span>
+        </button>
+        <span id="avatarName" class="avatar-name"></span>
       </div>
       <button id="settingsBtn" class="settings-bottom" title="连接与模型设置">设置</button>
     </aside>
@@ -206,6 +210,12 @@
     </aside>
   </div>
 
+  <!-- 头像悬浮菜单：点击左下角头像弹出（点击外部/ESC 关闭），JS 按 avatarEntry 定位。 -->
+  <div id="avatarMenu" class="avatar-menu hidden" role="menu">
+    <button id="avatarMenuProfile" class="avatar-menu-item" type="button" role="menuitem">个人中心</button>
+    <button id="logoutBtn" class="avatar-menu-item avatar-menu-danger" type="button" role="menuitem">退出登录</button>
+  </div>
+
   <!-- Agent 悬浮球：任何视图右下角常驻（完整 Agent 视图内由 JS 收起），点击就地弹出悬浮对话面板。 -->
   <button id="chatFab" class="chat-fab" type="button" title="打开 Agent 对话" aria-label="打开 Agent 对话">
     <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -296,6 +306,36 @@
         <button id="saveConfig" class="primary">保存全部</button>
       </div>
       <div id="configResult"></div>
+    </div>
+  </div>
+
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-box profile-box">
+      <div class="modal-head">
+        <h2>个人中心</h2>
+        <button id="profileClose" class="icon-btn">✕</button>
+      </div>
+      <div class="profile-body">
+        <div class="profile-avatar-col">
+          <div id="profileAvatar" class="profile-avatar">
+            <img id="profileAvatarImg" class="hidden" alt="" />
+            <span id="profileAvatarInitial" class="user-avatar-initial"></span>
+          </div>
+          <input id="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
+          <button id="avatarUpload" class="primary-command small" type="button">上传头像</button>
+          <button id="avatarRemove" class="quiet-command small hidden" type="button">移除头像</button>
+          <div id="avatarResult" class="login-error hidden" role="alert"></div>
+        </div>
+        <div class="profile-info-col">
+          <div class="profile-field"><span>用户名</span><b id="profileUsername"></b></div>
+          <div class="profile-field"><span>显示名</span><b id="profileDisplayName"></b></div>
+          <div class="profile-field"><span>角色</span><b id="profileRole"></b></div>
+          <div class="profile-section-title">外观</div>
+          <button id="themeToggle" class="quiet-command theme-toggle" type="button" title="切换深浅主题" aria-label="切换深浅主题">☾ 深色</button>
+          <button id="cursorFxToggle" class="quiet-command" type="button" title="切换光标涟漪动效" aria-label="切换光标涟漪动效">✦ 开动效</button>
+          <p class="profile-hint">头像仅本人可见；上传后自动居中裁方并压缩到 256px。</p>
+        </div>
+      </div>
     </div>
   </div>
 

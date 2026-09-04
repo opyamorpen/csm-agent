@@ -265,6 +265,152 @@
     location.reload();
   };
 
+  // ── 个人中心（左下角头像，Zode 模式）：点击弹悬浮菜单；个人中心内上传头像与外观开关。 ──
+  const avatarEntry = document.getElementById('avatarEntry');
+  const avatarMenu = document.getElementById('avatarMenu');
+  const profileModal = document.getElementById('profileModal');
+  const avatarUploadBtn = document.getElementById('avatarUpload');
+  const avatarRemoveBtn = document.getElementById('avatarRemove');
+  const avatarFileInput = document.getElementById('avatarFile');
+  const avatarResult = document.getElementById('avatarResult');
+  let currentDisplayName = '';
+
+  function initialsOf(name) {
+    const text = (name || '?').trim();
+    return text ? text.charAt(0).toUpperCase() : '?';
+  }
+
+  function closeAvatarMenu() {
+    avatarMenu.classList.add('hidden');
+  }
+
+  function applyAvatar(url) {
+    for (const id of ['userAvatarImg', 'profileAvatarImg']) {
+      const img = document.getElementById(id);
+      if (url) {
+        img.src = url;
+        img.classList.remove('hidden');
+      } else {
+        img.removeAttribute('src');
+        img.classList.add('hidden');
+      }
+    }
+    const initial = initialsOf(currentDisplayName);
+    document.getElementById('userAvatarInitial').textContent = initial;
+    document.getElementById('profileAvatarInitial').textContent = initial;
+    avatarRemoveBtn.classList.toggle('hidden', !url);
+  }
+
+  async function refreshAvatar() {
+    try {
+      const response = await fetch('/api/auth/me/avatar', { cache: 'no-store' });
+      if (response.ok) {
+        const url = URL.createObjectURL(await response.blob());
+        applyAvatar(url);
+        return;
+      }
+    } catch (error) { /* 取不到按未设置处理 */ }
+    applyAvatar(null);
+  }
+
+  function setupAvatarEntry(me) {
+    currentDisplayName = me.user.displayName || me.user.username;
+    document.getElementById('avatarName').textContent = currentDisplayName;
+    document.getElementById('profileUsername').textContent = me.user.username;
+    document.getElementById('profileDisplayName').textContent = me.user.displayName || me.user.username;
+    document.getElementById('profileRole').textContent = me.user.role === 'admin' ? '管理员' : '成员';
+    avatarEntry.classList.remove('hidden');
+    void refreshAvatar();
+  }
+
+  document.getElementById('userAvatar').addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!avatarMenu.classList.contains('hidden')) return closeAvatarMenu();
+    const rect = avatarEntry.getBoundingClientRect();
+    avatarMenu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 180))}px`;
+    avatarMenu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    avatarMenu.classList.remove('hidden');
+  });
+  document.addEventListener('click', (event) => {
+    if (avatarMenu.classList.contains('hidden')) return;
+    if (!avatarMenu.contains(event.target) && !avatarEntry.contains(event.target)) closeAvatarMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    closeAvatarMenu();
+    profileModal.classList.add('hidden');
+  });
+
+  document.getElementById('avatarMenuProfile').addEventListener('click', () => {
+    closeAvatarMenu();
+    avatarResult.classList.add('hidden');
+    profileModal.classList.remove('hidden');
+    void refreshAvatar();
+  });
+  document.getElementById('profileClose').addEventListener('click', () => profileModal.classList.add('hidden'));
+  profileModal.addEventListener('click', (event) => { if (event.target === profileModal) profileModal.classList.add('hidden'); });
+
+  // 上传：客户端居中裁方 + 压缩到 256px PNG 再提交（WKWebView 下 canvas 不可用时回退原图直传）。
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  avatarUploadBtn.addEventListener('click', () => avatarFileInput.click());
+  avatarFileInput.addEventListener('change', async () => {
+    const file = avatarFileInput.files && avatarFileInput.files[0];
+    avatarFileInput.value = '';
+    if (!file) return;
+    avatarResult.classList.add('hidden');
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      avatarResult.textContent = '只支持 PNG / JPEG / WebP 图片';
+      avatarResult.classList.remove('hidden');
+      return;
+    }
+    let mimeType = file.type;
+    let data = '';
+    try {
+      const bitmap = await createImageBitmap(file);
+      const side = Math.min(bitmap.width, bitmap.height);
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 256;
+      canvas.getContext('2d').drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 256, 256);
+      data = canvas.toDataURL('image/png').split(',')[1];
+      mimeType = 'image/png';
+    } catch (error) {
+      data = await fileToBase64(file);
+    }
+    try {
+      avatarUploadBtn.disabled = true;
+      await api('/api/auth/me/avatar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data, mimeType }),
+      });
+      await refreshAvatar();
+    } catch (error) {
+      avatarResult.textContent = error.message || '上传失败';
+      avatarResult.classList.remove('hidden');
+    } finally {
+      avatarUploadBtn.disabled = false;
+    }
+  });
+
+  avatarRemoveBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/auth/me/avatar', { method: 'DELETE' });
+      await refreshAvatar();
+    } catch (error) {
+      avatarResult.textContent = error.message || '移除失败';
+      avatarResult.classList.remove('hidden');
+    }
+  });
+
   // 企业微信扫码（配置驱动）：配置齐备才显示入口，点击跳企微 Web 登录扫码页，回调由服务端建会话后带回。
   fetch('/api/auth/wecom/status').then((r) => r.json()).then((d) => {
     if (!d || d.configured !== true) return;
@@ -4233,10 +4379,8 @@
     // 身份先行：401 直接落登录门，不再加载任何业务数据；登录成功由表单整页重载重建。
     try {
       const me = await api('/api/auth/me');
-      const chip = document.getElementById('userChip');
-      document.getElementById('userLabel').textContent = me.user.displayName || me.user.username;
-      chip.classList.remove('hidden');
       currentUserRole = me.user.role;
+      setupAvatarEntry(me);
     } catch (error) {
       if (loginGateShown) return;
       showLoginGate('请先登录');

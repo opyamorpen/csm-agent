@@ -307,3 +307,35 @@ test('customer-domain reads are gated by per-user visibility', async () => {
     assert.deepEqual(adminList.data.customers.map((c: any) => c.id), []);
   });
 });
+
+test('avatar self-service: upload, fetch, me flag, remove with validation', async () => {
+  await withServer(async ({ base, call, memberId }) => {
+    const memberLogin = await call('POST', '/api/auth/login', { body: { username: 'csm1', password: 'member-pass-1' } });
+    const memberCookie = cookieFrom(memberLogin);
+    const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    // 未设置：me 为 false、GET 404；移除幂等。
+    const before = await call('GET', '/api/auth/me', { cookie: memberCookie });
+    assert.equal(before.data.avatarConfigured, false);
+    assert.equal((await call('GET', '/api/auth/me/avatar', { cookie: memberCookie })).status, 404);
+    assert.equal((await call('DELETE', '/api/auth/me/avatar', { cookie: memberCookie })).status, 200);
+    // 上传：错误 MIME 400；超限 400；合法 PNG 200 → me 置位、GET 回原图字节。
+    assert.equal((await call('PUT', '/api/auth/me/avatar', { cookie: memberCookie, body: { data: PNG_1PX, mimeType: 'image/gif' } })).status, 400);
+    assert.equal((await call('PUT', '/api/auth/me/avatar', { cookie: memberCookie, body: { data: 'A'.repeat(2_800_000), mimeType: 'image/png' } })).status, 400);
+    const put = await call('PUT', '/api/auth/me/avatar', { cookie: memberCookie, body: { data: PNG_1PX, mimeType: 'image/png' } });
+    assert.equal(put.status, 200, JSON.stringify(put.data));
+    const me = await call('GET', '/api/auth/me', { cookie: memberCookie });
+    assert.equal(me.data.avatarConfigured, true);
+    assert.equal(me.data.user.id, memberId);
+    // 字节级验证：cookie 会话取回 PNG 原文。
+    const raw = await fetch(`${base}/api/auth/me/avatar`, { headers: { cookie: memberCookie } });
+    assert.equal(raw.status, 200);
+    assert.equal(raw.headers.get('content-type'), 'image/png');
+    assert.equal(Buffer.from(PNG_1PX, 'base64').equals(Buffer.from(await raw.arrayBuffer())), true);
+    // 删除后回落未设置。
+    assert.equal((await call('DELETE', '/api/auth/me/avatar', { cookie: memberCookie })).status, 200);
+    assert.equal((await call('GET', '/api/auth/me/avatar', { cookie: memberCookie })).status, 404);
+    assert.equal((await call('GET', '/api/auth/me', { cookie: memberCookie })).data.avatarConfigured, false);
+    // 未登录不可读写头像（鉴权门）。
+    assert.equal((await call('PUT', '/api/auth/me/avatar', { body: { data: PNG_1PX, mimeType: 'image/png' } })).status, 401);
+  });
+});

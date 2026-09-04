@@ -528,3 +528,11 @@ test('users bind-wecom is documented for wecom QR login', () => {
   const help = runCli('help');
   assert.match(help.stdout, /bind-wecom <用户名> <企微 userid>/);
 });
+
+test('profile command exposes avatar self-service', () => {
+  const help = runCli('help');
+  assert.match(help.stdout, /csm-agent profile \[--json\]/);
+  assert.match(help.stdout, /csm-agent profile avatar <图片路径> \| --remove/);
+  const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string }>;
+  assert.ok(capabilities.some((item) => item.command === 'profile'), 'capabilities 缺少 profile');
+});

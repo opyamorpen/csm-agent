@@ -79,6 +79,7 @@ npm run dev
 - **登录方式**：浏览器走用户名 + 密码（HttpOnly cookie 会话，7 天滑动过期）；CLI 走 `csm-agent login`（签发个人访问令牌 PAT，存 `~/.csm-agent/cli-auth.json`，0600，按服务地址键控）。企业微信扫码登录见下节。
 - **每人各自的连接与数据可见性**：设置页「我的连接」维护本人 CRM/ONES/Hemory 凭证（服务器名称需为 `crm`/`ones`/`hemory`，模板即如此）；同步按用户执行——**你的凭证拉到的客户即你可见的客户**（`user_customer_access` 映射，CRM/ONES 双源授权；领导账号在 CRM/ONES 里的数据权限范围就是其区域范围）。Agent 会话/写入记录/待办为个人工作区按属主私有；草稿/案例/周报/预警等客户域数据按客户可见性过滤（不可见一律 404）；写审批限定会话属主可见的客户，外部写经操作者本人凭证执行（写身份=登录用户）。Hemory 收件箱按「本人录音 ∪ 可见客户」过滤。全量重切/孪生修复/同步运行详情为管理员维护操作。
 - **企业微信扫码登录（配置即启用）**：`~/.csm-agent/config/wecom.user.yaml` 写齐 `corpid`/`agentid`/`secret`（自建应用）后登录页自动出现「企业微信扫码登录」；流程为 wwlogin 扫码页 → 回调 `GET /api/auth/wecom/callback` → code 换 userid → 匹配 `users.wecom_userid` 建会话。绑定：管理员执行 `csm-agent users bind-wecom <用户名> <企微 userid>`；state 一次性 5 分钟有效防重放。**前置条件**：企微管理后台配置应用的「登录可信域名」（部署域名确定后设置）；拿到真实凭证前本层以 mock 测试覆盖协议分支，端到端联调待真实环境验收。
+- **个人中心（左下角头像，点击弹悬浮菜单）**：上传/移除头像（网页端自动居中裁方压到 256px，仅本人可见）；主题切换与光标动效开关在此设置；退出登录在头像菜单中。CLI 对应 `csm-agent profile` / `profile avatar`。
 - **账号管理（管理员）**：`csm-agent users list / create <用户名> [--display-name=X] [--role=admin|member] [--password=X] / reset-password / set-role / enable / disable`；create/reset 缺省生成随机密码仅回显一次，重置密码会收回该用户全部在线会话；最后一名管理员不可降级或禁用。无自助注册。
 - **权限口径（现阶段）**：`admin` 管理用户与全局配置（LLM/搜索密钥、MCP 配置、备份触发）；`member` 使用业务功能。Agent 会话与写入审批记录按属主私有（他人的会话 403）；审计（`audit_log`）记录真实登录用户名与 `user_id`，审批落 CRM/ONES 的执行记录带操作人。
 - **安全要点**：密码 scrypt 加盐哈希（`node:crypto`，无外部依赖）；登录失败按 用户名+来源IP 连续 5 次锁 15 分钟；cookie 变更请求校验同源（CSRF 防御）；服务默认只监听 `127.0.0.1`（此前未绑 host 会监听全部网卡），多人局域网/公网部署用 `CSM_HOST` 打开（公网务必置于 HTTPS 反代之后）。
@@ -111,6 +112,7 @@ csm-agent serve 3210
 csm-agent doctor
 csm-agent login # 多人部署：交互输密码登录，此后所有命令自动携带凭证（logout 退出）
 csm-agent whoami # 查看当前服务地址与登录身份
+csm-agent profile # 个人中心：账号与头像状态；profile avatar <图片> 上传 / --remove 移除
 csm-agent customers 青岛高测
 csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount

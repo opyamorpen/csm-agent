@@ -1423,3 +1423,94 @@ header, #sidebar, #records { -webkit-backdrop-filter: blur(14px) saturate(1.25);
 .user-chip #userLabel { font-size: 13px; color: var(--header-text); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .wecom-login-btn { margin-top: 2px; }
+
+/* ── 个人中心（左下角头像，Zode 模式）：悬浮菜单 + 个人中心弹窗，全部走主题 token ── */
+.avatar-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 10px;
+  min-width: 0;
+}
+.user-avatar {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+}
+.user-avatar:hover { border-color: var(--focus-border); box-shadow: 0 0 0 3px var(--focus-ring); }
+.user-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar-name {
+  font-size: 13px;
+  color: var(--text-2);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar-menu {
+  position: fixed;
+  z-index: 110;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 14px 40px rgba(15, 23, 38, 0.24);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.avatar-menu-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.avatar-menu-item:hover { background: var(--panel-3); }
+.avatar-menu-danger { color: var(--danger); }
+.profile-box { width: min(480px, calc(100vw - 48px)); }
+.profile-body { display: grid; grid-template-columns: 150px 1fr; gap: 22px; padding: 6px 4px 2px; }
+.profile-avatar-col { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.profile-avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 34px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-info-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.profile-field { display: flex; align-items: baseline; gap: 12px; font-size: 13.5px; color: var(--text-2); }
+.profile-field span { flex: none; width: 48px; color: var(--text-3); }
+.profile-field b { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-section-title { margin-top: 6px; font-size: 12px; color: var(--text-3); letter-spacing: 0.08em; }
+.profile-info-col .quiet-command { align-self: flex-start; }
+.profile-hint { margin: 4px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.6; }
+@media (max-width: 720px) {
+  .avatar-name { display: none; }
+  .profile-body { grid-template-columns: 1fr; }
+}
