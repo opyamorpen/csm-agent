@@ -51,6 +51,8 @@ test('version --json prints the install fingerprint for cross-machine comparison
   assert.match(help.stdout, /--db-only/, 'help 应说明 --db-only 恢复语义');
   assert.match(help.stdout, /customers aliases <客户ID或名称>/, 'help 应包含客户别名维护子命令');
   assert.match(help.stdout, /--set 别名1,别名2\] \[--add 别名\] \[--remove 别名\]/, 'help 应说明别名三种维护方式');
+  assert.match(help.stdout, /customers merge --from <客户ID或精确名> --into <客户ID或精确名>/, 'help 应包含客户合并子命令');
+  assert.match(help.stdout, /审计 customers_merge/, 'help 应说明合并操作落审计');
 });
 
 test('CLI exposes machine-readable core capability coverage without a running server', () => {
@@ -58,9 +60,14 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customers aliases', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'backup', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customers aliases', 'customers merge', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'backup', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
+  // 客户合并（重复/幽灵客户修复）：写能力条目必须暴露合并端点并说明审计与同名歧义约束。
+  const mergeCapability = capabilities.find((item) => item.command === 'customers merge')!;
+  assert.ok(mergeCapability.api.includes('POST /api/customers/merge'), 'merge capability must expose the merge endpoint');
+  assert.match(mergeCapability.notes ?? '', /审计 customers_merge/);
+  assert.match(mergeCapability.notes ?? '', /同名双行必须用客户 ID/);
   // 客户别名维护：写能力条目必须暴露整组替换端点（agent 解析口径：全称/简称/别名精确 + 唯一子串兜底）。
   const aliasCapability = capabilities.find((item) => item.command === 'customers aliases')!;
   assert.ok(aliasCapability.api.includes('PUT /api/customers/:id/aliases'), 'alias capability must expose the replace endpoint');

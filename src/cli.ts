@@ -97,6 +97,8 @@ const CLI_CAPABILITIES = [
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customers aliases', workflow: 'customer-portfolio', access: 'write', api: ['PUT /api/customers/:id/aliases', 'GET /api/customers/:id/overview'],
     notes: '维护客户别名（品牌名/口语简称，本地叠加层）：agent 与 CLI 的客户名解析支持全称/简称/别名精确匹配 + 唯一子串兜底；--set 整组替换（逗号分隔）、--add/--remove 可重复；跨客户撞名拒绝' },
+  { command: 'customers merge', workflow: 'customer-portfolio', access: 'write', api: ['POST /api/customers/merge'],
+    notes: '合并重复客户（管理员，修复同步/导入产生的同一客户双行或幽灵行）：from 行全部挂载数据改挂 into 行后删除 from 行，into 行 NULL 字段回填；同名双行必须用客户 ID 指定，逐表迁移计数 + 审计 customers_merge' },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', 'GET /api/customers/:id/web-intel/rounds', '/api/web-intel/rotation'],
     notes: '单客户强制检索（忽略 14 天门）；--history 查轮次报告（run 即报告：逐条明细带新增标记，同一条旧闻跨轮不重复落库只在报告留痕）；--rotation 手动排空自动轮换队列（夜间窗口每日 20:00–次日 08:00 上海错峰、每小时 1 个客户、约两周全员轮换、最久未查优先，失败次日优先重试）' },
@@ -215,6 +217,10 @@ function help(): void {
     （维护客户别名（品牌名/口语简称，同步不覆盖的本地叠加层）：agent 解析客户支持全称/简称/别名的
      精确匹配与唯一子串匹配，与全称无子串关系的叫法必须维护别名才能解析；无 flag 列出当前别名；
      撞其他客户的名称/简称/别名会被拒绝，避免制造歧义）
+  csm-agent customers merge --from <客户ID或精确名> --into <客户ID或精确名> [--json]
+    （合并重复客户（管理员）：from 行的全部挂载数据（事件/证据/风险/草稿/可见性授权等）改挂
+     into 行后删除 from 行，into 行 NULL 字段用 from 行回填；同名双行必须用客户 ID 指定；
+     输出逐表迁移计数，操作落审计 customers_merge）
   csm-agent customer <客户ID或名称> [--json]
   csm-agent webintel <客户ID或名称> [--json]
     （强制检索该客户最近三个月公开动态（8 个角度：融资/中标/产品/高管/组织/舆情/招聘/政策），
@@ -398,6 +404,7 @@ async function serve(portInput?: string): Promise<void> {
 
 async function showCustomers(input: string[]): Promise<void> {
   if (input[0] === 'aliases') return customerAliases(input.slice(1));
+  if (input[0] === 'merge') return customerMerge(input.slice(1));
   const values = [...input];
   let sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default';
   const sortIndex = values.findIndex((value) => value === '--sort' || value.startsWith('--sort='));
@@ -523,6 +530,46 @@ async function customerAliases(input: string[]): Promise<void> {
   console.log(aliases.length
     ? `别名: ${aliases.join('、')}`
     : '别名: （未维护；--add 添加。与全称无子串关系的品牌名/口语简称须维护别名才能被 agent 解析）');
+}
+
+/** 合并重复客户（管理员维护）：--from/--into 支持空格分隔与 = 传值，接受客户 ID 或精确唯一名；输出逐表迁移计数。 */
+async function customerMerge(input: string[]): Promise<void> {
+  const values = [...input];
+  const takeFlag = (flag: '--from' | '--into'): string => {
+    const inlinePrefix = `${flag}=`;
+    const spaced = values.indexOf(flag);
+    const inline = values.findIndex((value) => value.startsWith(inlinePrefix));
+    if (spaced >= 0 && inline >= 0) throw new Error(`${flag} 只能出现一次`);
+    if (spaced >= 0) {
+      const raw = values[spaced + 1];
+      if (!raw || raw.startsWith('--')) throw new Error(`${flag} 需要一个值（${flag} <客户ID或精确名> 或 ${flag}=<客户ID或精确名>）`);
+      values.splice(spaced, 2);
+      return raw;
+    }
+    if (inline >= 0) {
+      const raw = values[inline]!.slice(inlinePrefix.length);
+      if (!raw) throw new Error(`${flag} 需要一个值（${flag}=<客户ID或精确名>）`);
+      values.splice(inline, 1);
+      return raw;
+    }
+    throw new Error(`缺少 ${flag}。用法：csm-agent customers merge --from <客户ID或精确名> --into <客户ID或精确名>`);
+  };
+  const from = takeFlag('--from');
+  const into = takeFlag('--into');
+  if (values.length) throw new Error(`无法识别的参数: ${values.join(' ')}`);
+  const result = await request<any>('/api/customers/merge', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from, into }),
+  });
+  if (jsonOutput) return print(result);
+  console.log(`已合并 ${result.merged?.name} (${result.merged?.id}) ← 已删除 ${result.removed?.id}`);
+  const rows = Object.entries(result.tables ?? {}) as Array<[string, { moved: number; dropped: number }]>;
+  const affected = rows.filter(([, counts]) => counts.moved || counts.dropped);
+  if (affected.length) {
+    console.log('迁移明细:');
+    console.table(affected.map(([table, counts]) => ({ 表: table, 改挂: counts.moved, 去重丢弃: counts.dropped })));
+  }
+  if (result.fieldsFilled?.length) console.log(`回填字段: ${result.fieldsFilled.join(', ')}`);
+  console.log('操作已记录审计（customers_merge）');
 }
 
 /** 公开动态检索：单客户强制刷新（忽略 14 天门）；--history 查轮次报告；--rotation 手动排空自动轮换队列。 */
@@ -1894,6 +1941,12 @@ async function doctor(): Promise<void> {
   const [list, llm, search] = await Promise.all([customers(), request('/api/config/llm'), request('/api/config/search')]);
   const sample = list[0];
   const overview = sample ? await request<any>(`/api/customers/${encodeURIComponent(sample.id)}/overview`) : null;
+  // 可见客户同名重复（同步/历史导入 bug 的页面可见症状，如幽灵客户行）：doctor 层提前暴露，
+  // 修复路径为 customers merge --from <重复行ID> --into <保留行ID>。
+  const idsByName = new Map<string, string[]>();
+  for (const item of list) idsByName.set(item.name, [...(idsByName.get(item.name) ?? []), item.id]);
+  const duplicateCustomerNames = [...idsByName.entries()].filter(([, ids]) => ids.length > 1)
+    .map(([name, ids]) => ({ name, ids }));
   // 旧进程探测：服务端 buildId 与本地 dist 构建比对——分裂（新 UI + 旧 API）在 doctor 层可见。
   let build: Record<string, unknown> | string;
   try {
@@ -1909,7 +1962,14 @@ async function doctor(): Promise<void> {
     build = { error: (error as Error).message, hint: '服务进程无 /api/version 端点（版本过旧），请重启服务' };
   }
   print({ baseUrl, api: 'ok', build, customers: list.length, sampleCustomer: sample?.id ?? null,
-    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search });
+    sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search,
+    duplicateCustomerNames,
+    duplicateCustomerNamesHint: duplicateCustomerNames.length
+      ? `存在同名重复客户，用 customers merge --from <重复行ID> --into <保留行ID> 合并修复`
+      : 'ok' });
+  if (duplicateCustomerNames.length) {
+    console.warn(`⚠ 可见客户同名重复：${duplicateCustomerNames.map((item) => `${item.name} ×${item.ids.length}`).join('、')}`);
+  }
 }
 
 // ── 登录与账号（多人共用：密码登录；PAT 供 CI 复用，admin 管理用户） ──

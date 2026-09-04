@@ -808,6 +808,70 @@ export class WorkbenchDatabase {
     return row ? customerFromRow(row) : undefined;
   }
 
+  /** 精确全称/简称匹配（不限可见性，含隐藏历史行）：维护类入口（客户合并）按名称定位候选用。 */
+  listCustomersByExactName(name: string): Customer[] {
+    return (this.db.prepare('SELECT * FROM customers WHERE name=? OR short_name=?').all(name, name) as Row[])
+      .map((row) => customerFromRow(row));
+  }
+
+  /**
+   * 合并重复客户（同一 CRM 客户双行/幽灵行修复）：from 行的全部挂载数据改挂到 into 行后删除
+   * from 行。逐表 UPDATE OR IGNORE 改挂；唯一键冲突的残留行（into 侧已有同自然键记录）以 into
+   * 侧为准丢弃；customer_id 为主键的 1:1 表（机会生成态/案例候选）在 into 侧已有行时同样丢弃
+   * from 行。customers 字段只回填 into 侧为 NULL 的列（目标行数据权威）。全程单事务，逐表计数落审计。
+   */
+  mergeCustomers(fromId: string, intoId: string, actor = 'csm', userId?: number): {
+    from: string;
+    into: string;
+    tables: Record<string, { moved: number; dropped: number }>;
+    fieldsFilled: string[];
+  } {
+    if (fromId === intoId) throw new Error('from 与 into 不能是同一客户');
+    const from = this.getCustomer(fromId);
+    const into = this.getCustomer(intoId);
+    if (!from) throw new Error(`客户不存在（from）: ${fromId}`);
+    if (!into) throw new Error(`客户不存在（into）: ${intoId}`);
+    // 引用 customer_id 的全部表（建表口径）；customer_id 为主键的 1:1 表单列，走丢弃分支。
+    const regularTables = ['customer_aliases', 'external_identities', 'source_events', 'evidence', 'risk_assessments',
+      'opportunities', 'case_drafts', 'action_items', 'sync_runs', 'hemory_attributions', 'draft_batches',
+      'draft_items', 'draft_generation_jobs', 'weekly_reports', 'customer_alerts', 'user_customer_access'];
+    const pkTables = ['opportunity_generations', 'case_candidates'];
+    const result = { from: fromId, into: intoId, tables: {} as Record<string, { moved: number; dropped: number }>, fieldsFilled: [] as string[] };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const table of regularTables) {
+        const moved = Number(this.db.prepare(`UPDATE OR IGNORE ${table} SET customer_id=? WHERE customer_id=?`).run(intoId, fromId).changes);
+        const dropped = Number(this.db.prepare(`DELETE FROM ${table} WHERE customer_id=?`).run(fromId).changes);
+        result.tables[table] = { moved, dropped };
+      }
+      for (const table of pkTables) {
+        const intoRow = this.db.prepare(`SELECT 1 FROM ${table} WHERE customer_id=?`).get(intoId);
+        const dropped = Number(this.db.prepare(`DELETE FROM ${table} WHERE customer_id=?`).run(fromId).changes);
+        result.tables[table] = { moved: intoRow ? 0 : dropped, dropped: intoRow ? dropped : 0 };
+      }
+      const fillable: Array<[column: string, value: string | number]> = ([
+        ['short_name', from.shortName], ['industry', from.industry], ['usage_version', from.usageVersion],
+        ['csm_name', from.csmName], ['csm_wecom_userid', from.csmWecomUserid], ['after_sales_stage', from.afterSalesStage],
+        ['renewal_date', from.renewalDate], ['contract_value', from.contractValue], ['contract_status', from.contractStatus],
+        ['last_contact_at', from.lastContactAt], ['support_open_count', from.supportOpenCount],
+        ['support_blocked_count', from.supportBlockedCount], ['next_action', from.nextAction],
+        ['next_action_due', from.nextActionDue], ['crm_url', from.crmUrl],
+      ] as Array<[string, unknown]>).filter(([, value]) => value != null && String(value) !== '') as Array<[string, string | number]>;
+      for (const [column, value] of fillable) {
+        const filled = Number(this.db.prepare(`UPDATE customers SET ${column}=?, updated_at=? WHERE id=? AND ${column} IS NULL`)
+          .run(value, nowIso(), intoId).changes);
+        if (filled) result.fieldsFilled.push(column);
+      }
+      this.db.prepare('DELETE FROM customers WHERE id=?').run(fromId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.audit(actor, 'customers_merge', 'customer', intoId, { ...result, tables: result.tables }, userId);
+    return result;
+  }
+
   listCustomers(query = '', sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default', userId?: number): Customer[] {
     const rows = this.db.prepare(`
       SELECT c.*,

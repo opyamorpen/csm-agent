@@ -118,6 +118,7 @@ csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
 csm-agent customers aliases <CRM客户ID或名称> # 查看客户别名
 csm-agent customers aliases <CRM客户ID或名称> --add 青禾晶元 # 维护别名：agent 解析客户支持全称/简称/别名精确匹配 + 唯一子串兜底；与全称无子串关系的品牌名须维护别名才能解析（--set 整组替换 / --remove 删除）
+csm-agent customers merge --from <重复行ID> --into <保留行ID> # 合并重复客户（管理员，修复同步/导入产生的同一客户双行或幽灵行）：from 行全部挂载数据改挂 into 行后删除，逐表迁移计数 + 审计；doctor 会报出可见同名重复
 csm-agent customer <CRM客户ID> # 概览含续约风险五维度明细与全量完成率
 csm-agent webintel <CRM客户ID> # 强制检索该客户最近三个月公开动态（8 角度），落库并重算风险/机会
 csm-agent webintel <CRM客户ID> --history # 轮次报告：最近 10 轮逐条明细（★新增标记 + 来源链接），旧闻跨轮不重复落库只在报告留痕

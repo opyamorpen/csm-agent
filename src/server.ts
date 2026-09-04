@@ -241,6 +241,22 @@ function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_
 }
 
 /**
+ * 客户合并目标解析（维护操作，与读路径解析不同链）：id 直取（不限可见性——隐藏历史行/
+ * 幽灵行正是合并对象）；否则全称/简称精确唯一命中；命中多个即报错并带 id 候选（同名双行
+ * 必须用 id 指定），不做子串兜底（维护操作宁拒不猜）。
+ */
+export function resolveMergeCustomer(db: WorkbenchDatabase, value: string): Customer {
+  const byId = db.getCustomer(value);
+  if (byId) return byId;
+  const exact = db.listCustomersByExactName(value);
+  if (exact.length === 1) return exact[0]!;
+  if (exact.length > 1) {
+    throw new Error(`「${value}」匹配 ${exact.length} 个客户，请改用客户 ID：${exact.map((item) => `${item.name}(${item.id})`).join('、')}`);
+  }
+  throw new Error(`未找到客户「${value}」（合并仅支持客户 ID 或精确全称/简称）`);
+}
+
+/**
  * 两级解析草稿客户：fields.customer_id 库内直取 → fields.customer_name 唯一匹配
  * （全称/简称/别名精确，或唯一子串兜底——与读工具同一条解析链，避免对话里能解析、写单时又绑不上）。
  * 外部写的客户身份完全以草稿自含信息为准（贴图/聊天记录提单：客户名就在贴入内容里），
@@ -1017,6 +1033,27 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         const requestedSort = url.searchParams.get('sort');
         const sort = requestedSort === 'renewal_date' || requestedSort === 'renewal_amount' ? requestedSort : 'default';
         return json(res, 200, { customers: workbench.db.listCustomers(url.searchParams.get('q') ?? '', sort, authCtx.user.id) });
+      }
+      // 客户合并（重复/幽灵客户修复，须置于 /api/customers/:id 动态路由之前）：from 行全部
+      // 挂载数据改挂 into 行后删除 from 行；from/into 接受客户 ID 或精确唯一名。仅管理员。
+      if (req.method === 'POST' && path === '/api/customers/merge') {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限（客户合并为全局维护操作）' });
+        const body = await readBody(req);
+        const from = typeof body.from === 'string' ? body.from.trim() : '';
+        const into = typeof body.into === 'string' ? body.into.trim() : '';
+        if (!from || !into) return json(res, 400, { error: '需要 {"from":"<客户ID或精确名>","into":"<客户ID或精确名>"}' });
+        try {
+          const fromCustomer = resolveMergeCustomer(workbench.db, from);
+          const intoCustomer = resolveMergeCustomer(workbench.db, into);
+          const result = workbench.db.mergeCustomers(fromCustomer.id, intoCustomer.id, actor, authCtx.user.id);
+          return json(res, 200, {
+            merged: { id: intoCustomer.id, name: intoCustomer.name },
+            removed: { id: fromCustomer.id, name: fromCustomer.name },
+            ...result,
+          });
+        } catch (error) {
+          return json(res, 400, { error: (error as Error).message });
+        }
       }
       if (req.method === 'POST' && path === '/api/sync') {
         return json(res, 202, workbench.sync.refreshAll());
@@ -2092,6 +2129,34 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
   };
 }
 
+/**
+ * pre-SQLite 记录里的客户身份保留导入（启动幂等）：CRM 客户主键恒为 24 位十六进制 ObjectId。
+ * 历史 bug：案例生成时 CRM 查询报错说明文案被当成 customer_id 写入 records.json，启动导入未校验
+ * 把它 upsert 成了可见幽灵客户（默认 source_object=object_Umwnn__c）并接走大量工单/证据归属。
+ * 因此：非 ObjectId 的 customer_id 一律跳过；已存在的客户也不再覆盖（该导入只负责补建缺失身份，
+ * 存量行的 source_json 归 CRM 同步权威维护，避免 legacyRecordId 污染）。
+ */
+export function importLegacyCustomerIdentities(
+  db: WorkbenchDatabase,
+  records: Array<{ id: string; customer?: unknown; fields?: Record<string, unknown> }>,
+): { imported: number; skipped: number } {
+  let imported = 0;
+  let skipped = 0;
+  for (const record of records) {
+    const fields = record.fields ?? {};
+    const id = typeof fields.customer_id === 'string' && fields.customer_id ? fields.customer_id : '';
+    const rawName = typeof fields.customer_name === 'string' && fields.customer_name ? fields.customer_name : record.customer;
+    const name = typeof rawName === 'string' ? rawName : '';
+    if (!id || !name || !/^[0-9a-f]{24}$/.test(id) || db.getCustomer(id)) {
+      skipped++;
+      continue;
+    }
+    db.upsertCustomer({ id, name, source: { legacyRecordId: record.id } });
+    imported++;
+  }
+  return { imported, skipped };
+}
+
 export async function startServer(runtime: Runtime, port: number): Promise<http.Server> {
   const store = new Store(dataDir());
   const db = new WorkbenchDatabase(dataDir());
@@ -2114,12 +2179,8 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     console.log(`[visibility] 已将 ${granted} 个存量客户一次性授予 admin（单用户时代数据的可见性迁移）`);
   }
   // Preserve useful customer identities from pre-SQLite output records.
-  for (const record of store.records) {
-    const fields = record.fields ?? {};
-    const id = typeof fields.customer_id === 'string' && fields.customer_id ? fields.customer_id : '';
-    const name = typeof fields.customer_name === 'string' && fields.customer_name ? fields.customer_name : record.customer;
-    if (id && name) db.upsertCustomer({ id, name, source: { legacyRecordId: record.id } });
-  }
+  // 防护与幂等语义见 importLegacyCustomerIdentities 注释（非 ObjectId 跳过、已存在不覆盖）。
+  importLegacyCustomerIdentities(db, store.records);
   // 闭包延迟引用 sync（下方才声明）：resumePending 在启动 5s 后才运行，届时 sync 必已赋值。
   const drafts = new HemoryDraftService(db, runtime.mcp, runtime, (customerId: string) => sync.syncOnesForCustomer(customerId));
   // 增购机会 v2：从会议录音片段 + 公开动态证据 LLM 分析产出假设（串行队列 + 指纹/时长门控在服务内部）。
