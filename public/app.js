@@ -1247,10 +1247,21 @@
     }
   }
 
+  // 当前登录身份（/api/auth/me 下发）：LLM/搜索是管理员维护的全局配置，成员只配自己的连接。
+  let currentUserRole = null;
+  const isAdmin = () => currentUserRole === 'admin';
+
   settingsBtn.addEventListener('click', () => {
+    // LLM 与联网搜索是全局共享配置（管理员维护）；成员隐藏这两节，只保留「我的连接」。
+    for (const section of ['llmSettingsSection', 'searchSettingsSection']) {
+      const el = document.getElementById(section);
+      if (el) el.classList.toggle('hidden', !isAdmin());
+    }
     settingsModal.classList.remove('hidden');
-    loadLlmConfigUI();
-    loadSearchConfigUI();
+    if (isAdmin()) {
+      loadLlmConfigUI();
+      loadSearchConfigUI();
+    }
     loadMcpConfigUI();
   });
   settingsClose.addEventListener('click', () => settingsModal.classList.add('hidden'));
@@ -1276,35 +1287,38 @@
     configResult.textContent = '保存中…';
     const results = [];
     try {
-      // save LLM first (model switch may fail fast)
-      const llmRes = await fetch('/api/config/llm', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(llmPayload),
-      });
-      const llmData = await llmRes.json();
-      if (!llmRes.ok) {
-        results.push('模型: ' + (llmData.error || llmRes.status));
-      } else {
-        results.push('模型: ' + llmData.provider + '/' + llmData.model + (llmData.baseUrl ? ` @ ${llmData.baseUrl}` : '') + ' 已生效');
-        if (typeof llmData.vision === 'boolean') visionSupported = llmData.vision;
-      }
+      // 全局 LLM/搜索配置仅管理员保存（成员界面已隐藏；服务端亦 403 兜底）。
+      if (isAdmin()) {
+        // save LLM first (model switch may fail fast)
+        const llmRes = await fetch('/api/config/llm', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(llmPayload),
+        });
+        const llmData = await llmRes.json();
+        if (!llmRes.ok) {
+          results.push('模型: ' + (llmData.error || llmRes.status));
+        } else {
+          results.push('模型: ' + llmData.provider + '/' + llmData.model + (llmData.baseUrl ? ` @ ${llmData.baseUrl}` : '') + ' 已生效');
+          if (typeof llmData.vision === 'boolean') visionSupported = llmData.vision;
+        }
 
-      const searchPayload = { apiKey: searchKey.value.trim(), maxResults: Number(searchMaxResults.value) || 5 };
-      const searchRes = await fetch('/api/config/search', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(searchPayload),
-      });
-      const searchData = await searchRes.json();
-      if (!searchRes.ok) {
-        results.push('联网搜索: ' + (searchData.error || searchRes.status));
-      } else {
-        results.push(searchData.apiKeyConfigured
-          ? `联网搜索: Tavily 已配置（每次 ${searchData.maxResults} 条，严格时间窗）`
-          : `联网搜索: 未配 key，走免费匿名通道（每次 ${searchData.maxResults} 条）`);
-        searchKey.value = '';
-        searchKey.placeholder = searchData.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选）';
+        const searchPayload = { apiKey: searchKey.value.trim(), maxResults: Number(searchMaxResults.value) || 5 };
+        const searchRes = await fetch('/api/config/search', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(searchPayload),
+        });
+        const searchData = await searchRes.json();
+        if (!searchRes.ok) {
+          results.push('联网搜索: ' + (searchData.error || searchRes.status));
+        } else {
+          results.push(searchData.apiKeyConfigured
+            ? `联网搜索: Tavily 已配置（每次 ${searchData.maxResults} 条，严格时间窗）`
+            : `联网搜索: 未配 key，走免费匿名通道（每次 ${searchData.maxResults} 条）`);
+          searchKey.value = '';
+          searchKey.placeholder = searchData.apiKeyConfigured ? '已设置（留空则不修改）' : 'tvly-...（可选）';
+        }
       }
 
       const mcpRes = await fetch('/api/config/mcp', {
@@ -4196,6 +4210,7 @@
       const chip = document.getElementById('userChip');
       document.getElementById('userLabel').textContent = me.user.displayName || me.user.username;
       chip.classList.remove('hidden');
+      currentUserRole = me.user.role;
     } catch (error) {
       if (loginGateShown) return;
       showLoginGate('请先登录');

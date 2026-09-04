@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './bootstrap.js';
-import { loadMcpServers, saveMcpServers, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
+import { loadUserMcpServers, saveUserMcpServers, migrateGlobalMcpToUser, loadSearchConfig, saveSearchConfig, searchConfigStatus, type McpServerConfig } from './config.js';
 import { CUSTOM_PROVIDER_ID, testCustomEndpoint } from './custom-llm.js';
 import { AgentSession, AgentAbortedError, type AgentEvent } from './agent.js';
 import type { ConfirmDraft } from './tools/confirm.js';
@@ -544,15 +544,17 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
     return new AgentSession({
       models: runtime.models,
       model: runtime.model,
-      mcp: runtime.mcp,
-      tools: runtime.tools,
-      systemPrompt: runtime.systemPrompt,
+      // 会话走属主本人的 MCP 连接（各自凭证）：工具表与提示词取自该用户的运行时快照，
+      // live getter 每轮重取——配置重存/后台连完后在途会话也能取到新工具。
+      mcp: runtime.users.get(session.userId).mcp,
+      tools: runtime.users.get(session.userId).tools,
+      systemPrompt: runtime.users.get(session.userId).systemPrompt,
       // Sessions created before an MCP reconnect or model switch must pick up
       // the latest runtime state on every turn (restored sessions otherwise
       // stay frozen on a stale, possibly empty, tool list).
       live: {
-        getSystemPrompt: () => runtime.systemPrompt,
-        getTools: () => runtime.tools,
+        getSystemPrompt: () => runtime.users.get(session.userId).systemPrompt,
+        getTools: () => runtime.users.get(session.userId).tools,
         getModel: () => runtime.model,
       },
       localTools: {
@@ -1415,26 +1417,25 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       }
 
       // ── MCP configuration (read + save/reconnect) ──
-      // 阶段 1 仍为全局单套配置（含明文 token）：读写收敛到管理员；阶段 2 改为按用户「我的连接」。
+      // 「我的连接」：每人各自的 CRM/ONES/Hemory 凭证（写操作与本人会话走这套连接）。
+      // 读取/保存自己的配置无需管理员；admin 的连接另兼后台同步/生成的系统连接池。
       if (req.method === 'GET' && path === '/api/config/mcp') {
-        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         return json(res, 200, {
-          servers: loadMcpServers(),
-          failures: [...runtime.mcp.failures.entries()],
+          servers: loadUserMcpServers(authCtx.user.id),
+          failures: runtime.users.failuresOf(authCtx.user.id),
         });
       }
       if (req.method === 'PUT' && path === '/api/config/mcp') {
-        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         const body = await readBody(req);
         const err = validateServers(body.servers);
         if (err) return json(res, 400, { error: err });
         const servers = body.servers as McpServerConfig[];
-        saveMcpServers(servers);
-        await runtime.reloadMcp(servers);
+        saveUserMcpServers(authCtx.user.id, servers);
+        await runtime.users.reconnect(authCtx.user.id);
         return json(res, 200, {
           ok: true,
-          servers: loadMcpServers(),
-          failures: [...runtime.mcp.failures.entries()],
+          servers: loadUserMcpServers(authCtx.user.id),
+          failures: runtime.users.failuresOf(authCtx.user.id),
         });
       }
 
@@ -1577,7 +1578,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         session.agent = makeAgent(session);
         sessions.set(session.id, session);
         persist(session);
-        return json(res, 200, { id: session.id, customer: null, mcpFailures: [...runtime.mcp.failures.entries()] });
+        return json(res, 200, { id: session.id, customer: null, mcpFailures: runtime.users.failuresOf(authCtx.user.id) });
       }
 
       // ── per-session routes ──
@@ -1742,8 +1743,8 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
                     // 双下发会让前端按事件渲染出两张同题确认卡、审计记录也翻倍（真实事故）。
                     broadcast(session, { ...e, editContract: confirmDraftEditContract(e.draft, draftUsageVersion(workbench.db, e.draft)) } as unknown as DisplayEvent);
                   } else {
-                    if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
-                      const t = runtime.mcp.resolve(e.name);
+                  if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
+                    const t = runtime.users.get(session.userId).mcp.resolve(e.name);
                       if (t && runtime.mcp.isWrite(t.server, t.rawName) && session.lastRecordId) {
                         const rec = store.records.find((r) => r.id === session.lastRecordId && r.status === 'approved');
                         if (rec) {
@@ -1862,8 +1863,9 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
               }
               return json(res, 200, { ok: true, decided: 'approved', refined: true, draft: updated, warnings: refineWarnings.length ? refineWarnings : undefined });
             }
-            const target = runtime.mcp.resolve(approvedDraft.target_tool);
-            if (!target || !runtime.mcp.isWrite(target.server, target.rawName)) {
+            // 审批执行走会话属主本人的连接与凭证（写身份=登录用户）。
+            const target = runtime.users.get(session.userId).mcp.resolve(approvedDraft.target_tool);
+            if (!target || !runtime.users.get(session.userId).mcp.isWrite(target.server, target.rawName)) {
               return json(res, 400, { error: '目标工具不是已连接的写工具' });
             }
             // 客户身份以（可能编辑过的）草稿为准做最终解析与校验；ONES Desk 的客户字段在批准前
@@ -1946,6 +1948,14 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   // 存量单用户部署的历史数据（会话/客户/草稿）一律归属该 admin，升级后除多一步登录外行为不变。
   ensureBootstrapAdmin(db);
   const legacyUserId = db.getUserByUsername('admin')?.id ?? db.listUsers()[0]?.id;
+  // 多人化连接接管：①存量全局 mcp 配置原样复制给 admin（幂等，${ENV} 占位不烘焙）；
+  // ②admin 兼任「系统用户」——后台同步/生成服务共享其连接池（会话侧已按登录用户各走各的连接）。
+  if (legacyUserId != null) {
+    if (migrateGlobalMcpToUser(legacyUserId)) {
+      console.log('[mcp] 已将存量全局 MCP 配置迁移为 admin 的个人配置（原文件保留不再读取）');
+    }
+    runtime.attachSystemUser(legacyUserId);
+  }
   // Preserve useful customer identities from pre-SQLite output records.
   for (const record of store.records) {
     const fields = record.fields ?? {};

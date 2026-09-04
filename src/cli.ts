@@ -92,7 +92,7 @@ const CLI_CAPABILITIES = [
   { command: 'users', workflow: 'user-admin', access: 'write', api: ['GET /api/users', 'POST /api/users', 'PATCH /api/users/:id', 'POST /api/users/:id/reset-password'], notes: '管理员管理账号：list 列出、create 建号（缺省生成初始密码仅显示一次）、reset-password 重置（收回该用户在线会话）、set-role/enable/disable；最后一名管理员不可降级或禁用' },
   { command: 'token', workflow: 'auth', access: 'write', api: ['POST /api/auth/tokens', 'GET /api/auth/tokens', 'DELETE /api/auth/tokens/:id'], notes: '个人访问令牌（PAT，无过期可吊销）: create 生成（明文仅显示一次）、list 查看、revoke 吊销；适合脚本/CI 以 Bearer 调用 API' },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
-  { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
+  { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm', '/api/config/mcp'], notes: 'llm 为管理员维护的全局模型配置；mcp 查看本人「我的连接」（每人各自的 CRM/ONES/Hemory 凭证，会话与外部写走本人凭证，保存走网页设置页）' },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
   { command: 'customers aliases', workflow: 'customer-portfolio', access: 'write', api: ['PUT /api/customers/:id/aliases', 'GET /api/customers/:id/overview'],
     notes: '维护客户别名（品牌名/口语简称，本地叠加层）：agent 与 CLI 的客户名解析支持全称/简称/别名精确匹配 + 唯一子串兜底；--set 整组替换（逗号分隔）、--add/--remove 可重复；跨客户撞名拒绝' },
@@ -193,6 +193,8 @@ function help(): void {
      reset-password <用户名> [--password=X]；set-role <用户名> admin|member；enable/disable <用户名>）
   csm-agent token create|list|revoke
     （个人访问令牌（PAT，脚本/CI 用）: create [--name=X] 明文仅显示一次；revoke <令牌ID>）
+  csm-agent config mcp [--json]
+    （「我的连接」：查看本人 CRM/ONES/Hemory 凭证与连接状态；添加/保存走网页设置页）
   csm-agent config llm [--json]
   csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>] [--protocol=openai|anthropic] [--vision=on|off]
     （查看/切换大模型；provider=custom 需 --base-url，--protocol 选端点协议：
@@ -1066,6 +1068,18 @@ function mimeFromName(name: string): string {
 }
 
 async function configCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'mcp' && !values.length) {
+    // 「我的连接」：每人各自的 CRM/ONES/Hemory 凭证（网页设置页同一 API；保存仍走网页）。
+    const body = await request<any>('/api/config/mcp');
+    if (jsonOutput) return print(body);
+    if (!body.servers?.length) return console.log('（尚未配置；请在网页「设置 → 我的连接」添加 CRM/ONES/Hemory）');
+    for (const server of body.servers) {
+      console.log(`${server.name}  [${server.transport}]${server.url ? ' ' + server.url : ''}${server.command ? ' ' + server.command + ' ' + (server.args ?? []).join(' ') : ''}`);
+    }
+    const failures: Array<[string, string]> = body.failures ?? [];
+    if (failures.length) console.log(`未连接: ${failures.map(([name, err]) => `${name}(${err})`).join('; ')}`);
+    return;
+  }
   if (subcommand === 'llm' && !values.length) {
     const cfg = await request<any>('/api/config/llm');
     return print(cfg);
@@ -1099,7 +1113,7 @@ async function configCommand(subcommand: string, values: string[]): Promise<void
     });
     return print(result);
   }
-  throw new Error('config 子命令只允许 llm / llm set');
+  throw new Error('config 子命令只允许 llm / llm set / mcp');
 }
 
 async function waitSync(id: string, maxAttempts = 600): Promise<any> {

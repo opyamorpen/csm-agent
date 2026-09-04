@@ -82,6 +82,57 @@ export function saveMcpServers(servers: McpServerConfig[]): void {
   atomicWriteYaml(userConfigPath('mcp.user.yaml'), { servers });
 }
 
+// ── Per-user MCP configuration (multi-user: each person's own CRM/ONES/Hemory credentials) ──
+
+/** Root of user-scoped writable state: <CSM_DATA_DIR>/users/<id>. Global llm/search still under userConfigDir(). */
+export function userStateDir(userId: number): string {
+  const dataRoot = process.env.CSM_DATA_DIR ?? join(homedir(), '.csm-agent');
+  return join(dataRoot, 'users', String(userId));
+}
+
+function userMcpPath(userId: number): string {
+  return join(userStateDir(userId), 'config', 'mcp.user.yaml');
+}
+
+/**
+ * The user's own MCP server list. Unconfigured = empty array (each server is optional;
+ * missing ones simply mean that user has no related capabilities, and synchronization related to that user skips it).
+ */
+export function loadUserMcpServers(userId: number): McpServerConfig[] {
+  try {
+    return loadMcpConfig(userMcpPath(userId)).servers ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveUserMcpServers(userId: number, servers: McpServerConfig[]): void {
+  mkdirSync(join(userStateDir(userId), 'config'), { recursive: true, mode: 0o700 });
+  atomicWriteYaml(userMcpPath(userId), { servers });
+}
+
+/**
+ * One-time migration for the single-user era: on upgrade, copy the global mcp config verbatim to the specified user (admin),
+ * so existing connections and ${ENV} placeholders continue to be used seamlessly. Idempotent: skip if the user already has a config.
+ * Copy the original text rather than a yaml round-trip, to prevent the expanded env variable values from being baked into the file.
+ */
+export function migrateGlobalMcpToUser(userId: number): boolean {
+  const target = userMcpPath(userId);
+  if (existsSync(target)) return false;
+  const source = firstExisting([userConfigPath('mcp.user.yaml'), legacyConfigPath('mcp.user.yaml')]);
+  if (!source) return false;
+  try {
+    const raw = readFileSync(source, 'utf8');
+    mkdirSync(join(userStateDir(userId), 'config'), { recursive: true, mode: 0o700 });
+    const tmp = `${target}.tmp`;
+    writeFileSync(tmp, raw, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Load a project-root `.env` file into process.env (only keys not already
  * present). The packaged macOS app launches the server without a shell, so

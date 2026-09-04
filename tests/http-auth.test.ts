@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,14 +17,22 @@ import type { Runtime } from '../src/bootstrap.js';
  */
 
 function fakeRuntime(): Runtime {
+  const fakeUserRt = { userId: 0, mcp: { failures: new Map<string, string>() }, tools: [], systemPrompt: '' };
   return {
     models: {} as never,
     model: { input: [] } as never,
-    mcp: { failures: new Map() } as never,
+    users: {
+      get: () => fakeUserRt,
+      failuresOf: () => [] as Array<[string, string]>,
+      reconnect: async () => {},
+      retryFailed: async () => {},
+      list: () => [fakeUserRt],
+    },
+    mcp: fakeUserRt.mcp,
     tools: [],
     systemPrompt: '',
     llm: {} as never,
-    reloadMcp: async () => {},
+    attachSystemUser: () => {},
     setLlm: (() => ({})) as never,
   } as unknown as Runtime;
 }
@@ -62,6 +70,9 @@ async function withServer(fn: (ctx: {
   const dir = mkdtempSync(join(tmpdir(), 'csm-http-auth-'));
   const store = new Store(dir);
   const db = new WorkbenchDatabase(dir);
+  // userStateDir（按用户 MCP 配置）跟随 CSM_DATA_DIR：指到临时目录，绝不写真实 ~/.csm-agent。
+  const previousDataDir = process.env.CSM_DATA_DIR;
+  process.env.CSM_DATA_DIR = dir;
   process.env.CSM_ADMIN_PASSWORD = 'admin-pass-1';
   try {
     ensureBootstrapAdmin(db);
@@ -84,6 +95,8 @@ async function withServer(fn: (ctx: {
   } finally {
     server.close();
     db.close();
+    if (previousDataDir === undefined) delete process.env.CSM_DATA_DIR;
+    else process.env.CSM_DATA_DIR = previousDataDir;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -179,7 +192,7 @@ test('member cannot reach admin-only endpoints; admin can manage users', async (
     const memberCookie = cookieFrom(memberLogin);
     assert.equal((await call('GET', '/api/users', { cookie: memberCookie })).status, 403);
     assert.equal((await call('POST', '/api/users', { cookie: memberCookie, body: { username: 'x' } })).status, 403);
-    assert.equal((await call('GET', '/api/config/mcp', { cookie: memberCookie })).status, 403);
+    // 「我的连接」（/api/config/mcp）已按用户化：成员可读写自己的，不再 403（见专测）。
     assert.equal((await call('PUT', '/api/config/search', { cookie: memberCookie, body: {} })).status, 403);
     assert.equal((await call('PUT', '/api/config/llm', { cookie: memberCookie, body: {} })).status, 403);
     assert.equal((await call('POST', '/api/backup/run', { cookie: memberCookie, body: {} })).status, 403);
@@ -242,5 +255,31 @@ test('disabled accounts are blocked even with a still-valid token', async () => 
     // 登录也直接拒绝。
     const again = await call('POST', '/api/auth/login', { body: { username: 'csm1', password: 'member-pass-1' } });
     assert.equal(again.status, 403);
+  });
+});
+
+test('mcp config is per-user: members save their own connections without admin rights', async () => {
+  await withServer(async ({ call, memberId }) => {
+    const memberLogin = await call('POST', '/api/auth/login', { body: { username: 'csm1', password: 'member-pass-1' } });
+    const memberCookie = cookieFrom(memberLogin);
+    const empty = await call('GET', '/api/config/mcp', { cookie: memberCookie });
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.data.servers, []);
+    const saved = await call('PUT', '/api/config/mcp', {
+      cookie: memberCookie,
+      body: { servers: [{ name: 'crm', transport: 'streamable-http', url: 'https://crm.example/mcp', headers: { Authorization: 'Bearer mine' } }] },
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.data));
+    assert.equal(saved.data.servers.length, 1);
+    // 落在成员自己的用户目录（CSM_DATA_DIR 已指向临时目录）。
+    assert.ok(existsSync(join(process.env.CSM_DATA_DIR!, 'users', String(memberId), 'config', 'mcp.user.yaml')));
+    // 管理员的「我的连接」不受影响（另一份文件）。
+    const adminLogin = await call('POST', '/api/auth/login', { body: { username: 'admin', password: 'admin-pass-1' } });
+    const adminCookie = cookieFrom(adminLogin);
+    const adminView = await call('GET', '/api/config/mcp', { cookie: adminCookie });
+    assert.deepEqual(adminView.data.servers, []);
+    // 非法配置仍 400。
+    const bad = await call('PUT', '/api/config/mcp', { cookie: memberCookie, body: { servers: [{ name: '' }] } });
+    assert.equal(bad.status, 400);
   });
 });

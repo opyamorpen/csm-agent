@@ -67,8 +67,9 @@ test('mcp: retryFailed 不动健康服务——不在 failures 里的直接跳�
 
 test('mcp: 服务入口挂断连自愈定时器（启动失败的服务不再断到下次重启）', () => {
   // 2026-09-03 事故：Hemory 端点瞬时 fetch failed 后整个进程生命周期断连（MCP 只在启动连一次），
-  // 同步静默瘫痪到下次服务重启。契约：index.ts 定时调用 retryFailed（每次重读配置）。
+  // 同步静默瘫痪到下次服务重启。契约：index.ts 定时调用 retryFailed（多用户化后为逐用户
+  // 的 runtime.users.retryFailed()——内部每次重读各用户自己的配置，语义不变）。
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(source, /setInterval\(/);
-  assert.match(source, /retryFailed\(loadMcpServers\(\)\)/);
+  assert.match(source, /runtime\.users\.retryFailed\(\)/);
 });

@@ -2172,3 +2172,17 @@ test('login gate blocks the app until authenticated and the user chip exposes lo
   assert.ok(loginBlock.includes('.login-card'), '登录卡片样式缺失');
   assert.doesNotMatch(loginBlock.slice(0, loginBlock.indexOf('\n.user-chip') > 0 ? loginBlock.indexOf('\n.user-chip') : undefined), /#[0-9a-fA-F]{3,8}\b/);
 });
+
+test('settings split personal connections from admin-only global config', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  // 「我的连接」是每人各自的 MCP 凭证；LLM/搜索标注为管理员维护的全局配置。
+  assert.match(html, /id="llmSettingsSection"/);
+  assert.match(html, /id="searchSettingsSection"/);
+  assert.match(html, /我的连接/);
+  assert.match(html, /管理员维护的全局模型/);
+  // 成员打开设置时隐藏全局配置两节、保存也只提交 MCP；admin 才加载/保存 llm 与 search。
+  assert.match(source, /currentUserRole === 'admin'/);
+  assert.match(source, /llmSettingsSection/);
+  assert.match(source, /if \(isAdmin\(\)\) \{/);
+});

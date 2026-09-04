@@ -1,6 +1,5 @@
 import { createRuntime } from './bootstrap.js';
 import { startServer } from './server.js';
-import { loadMcpServers } from './config.js';
 
 async function main(): Promise<void> {
   // 后台任务（分段/草稿/周报生成等）的未处理 rejection 只记日志，绝不打崩常驻服务进程
@@ -13,28 +12,17 @@ async function main(): Promise<void> {
   const port = Number(process.env.CSM_PORT ?? 3210);
   const host = process.env.CSM_HOST ?? '127.0.0.1';
 
-  // Start the HTTP server first so the UI is available immediately; connect
-  // MCP servers in the background (slow OAuth flows must not block startup).
+  // Start the HTTP server first so the UI is available immediately; MCP servers
+  // connect in the background per user (startServer 挂接系统用户、会话按属主懒连，
+  // slow OAuth flows must not block startup).
   await startServer(runtime, port);
   console.log(`CSM Agent 已启动: http://${host}:${port}`);
 
-  void (async () => {
-    try {
-      await runtime.reloadMcp(loadMcpServers());
-      console.log(`MCP 连接完成: ${runtime.mcp.listTools().length} 个工具`);
-      for (const [name, err] of runtime.mcp.failures) {
-        console.warn(`[mcp] ${name} 未连接: ${err}`);
-      }
-    } catch (err) {
-      console.error('MCP 连接失败:', err);
-    }
-  })();
-
   // MCP 断连自愈：启动连接只跑一次，失败的服务（如瞬时网络抖动 fetch failed）此前会断到下次重启——
-  // 每 60s 只重试仍处 failures 的服务（每次重读配置），全部恢复后静默空转；与配置重存的 reloadMcp 互不冲突。
+  // 每 60s 对每个缓存用户只重试仍处 failures 的服务（每次重读该用户配置），
+  // 全部恢复后静默空转；与配置重存的 reconnect 互不冲突。
   const mcpRetryTimer = setInterval(() => {
-    if (runtime.mcp.failures.size === 0) return;
-    void runtime.mcp.retryFailed(loadMcpServers()).catch((err) => {
+    void runtime.users.retryFailed().catch((err) => {
       console.error('[mcp] 断连自愈重试失败:', err);
     });
   }, 60_000);
