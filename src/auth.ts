@@ -49,7 +49,8 @@ export function verifyPassword(password: string, stored: string): boolean {
 /** 与 verifyPassword 同参数、同耗时，用于「用户不存在」时抹平计时差。 */
 export const PHANTOM_HASH = hashPassword(randomBytes(24).toString('base64url'));
 
-export const PASSWORD_MIN_LENGTH = 8;
+// 最短 6 位（2026-09-04 按用户要求从 8 位放宽，容纳简单过渡口令；正式多人上线前建议收紧回 8 位）。
+export const PASSWORD_MIN_LENGTH = 6;
 
 export function validatePassword(password: string): string | null {
   if (password.length < PASSWORD_MIN_LENGTH) return `密码至少 ${PASSWORD_MIN_LENGTH} 位`;

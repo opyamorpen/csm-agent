@@ -33,7 +33,9 @@ test('password hashing roundtrips and rejects wrong or malformed input', () => {
 });
 
 test('password policy and generator', () => {
-  assert.ok(validatePassword('short'));
+  assert.ok(validatePassword('short'), '5 位不达标');
+  assert.equal(validatePassword('123456'), null, '6 位达标（下限 6）');
+  assert.ok(validatePassword('12345'));
   assert.equal(validatePassword('longenough1'), null);
   assert.equal(validatePassword('x'.repeat(201)), '密码过长（上限 200 位）');
   const generated = generatePassword(16);
