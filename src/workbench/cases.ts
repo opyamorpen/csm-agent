@@ -11,15 +11,24 @@ import { caseSpeakerRole, isDeliveredOnesEvent, type CaseSpeakerRole } from './s
 import { performRawWebSearch, type HttpPost } from '../tools/websearch.js';
 import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
-import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
 import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
-import { injectValueMapSolutionSvg, parseValueMapBlueprint, renderValueMapSvg } from './case-value-map-figure.js';
-import { styleCaseFigureSvg } from './case-figure-shell.js';
+import { injectValueMapSolutionSvg, parseValueMapBlueprint, renderValueMapSvg, VALUE_MAP_PAIN_TITLE_WORDS, VALUE_MAP_VALUE_TITLE_WORDS } from './case-value-map-figure.js';
+import { findFigureEdgeTextOverlaps, relayerFigureEdges, styleCaseFigureSvg } from './case-figure-shell.js';
+import { ONES_CAPABILITY_MAP, ONES_PLATFORM_CAPABILITIES, ONES_STANDARD_INTEGRATIONS } from './case-ones-knowledge.js';
 
-/** v15：核心蓝图图采用结构化内容+服务端确定性渲染，其余流程/里程碑图采用统一视觉外壳。
+/** v17：解决方案架构图/系统集成架构图/方案价值图三张结构化图全面改版——平台支撑固定词表、
+ * 集成系统规划期提取两图同源、1~6 系统工程化布局、价值图以架构图为锚动态比例+痛点价值对位。
  * 提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v16-value-map-horizontal-layout';
+export const CASE_GENERATION_VERSION = 'case-v17-integration-and-value-map';
+
+/** 三张结构化图的规范图名（用户拍板统一叫法）：生成时服务端把 caption 确定性覆盖为规范名，
+ * 系统内展示与导出 Word 的「图：…」图注随之统一；流程/里程碑图沿用模型图注（图内已有标题牌）。 */
+export const CASE_FIGURE_TITLES: Readonly<Partial<Record<CaseFigureKind, string>>> = {
+  capability_map: '解决方案架构图',
+  architecture: '系统集成架构图',
+  value_map: '方案价值图',
+};
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -242,6 +251,9 @@ interface CasePlan {
   title?: string;
   plan: Array<{ section: CaseChapterKey; items: PlanItem[] }>;
   figures?: PlanFigure[];
+  /** v17：规划期从素材提取的集成系统清单（≤6、仅名称、逐字来自素材原文）——解决方案架构图
+   * 「系统集成」带与系统集成架构图 systems 的单一事实源；为空时不画系统集成架构图。 */
+  integrationSystems: string[];
   unknowns?: string[];
 }
 
@@ -1510,6 +1522,34 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
     const empty = plan.filter((entry) => !entry.items.length);
     if (empty.length) throw new Error(`打捞后章节条目为空: ${empty.map((entry) => CASE_SECTIONS.find((section) => section.key === entry.section)!.label).join('、')}`);
   }
+  // 集成系统清单（v17）：仅系统名称、≤6 个、逐字出现在素材原文（重点 Hemory 片段中
+  // 集成/打通/同步/对接类表述），不得含 ONES/Hemory/CRM 内部系统名。违规默认整份拒绝
+  // （重试反馈）；salvage 模式丢弃非法条目。此清单是两张图「系统集成」的唯一事实源。
+  const integrationNameWidthEm = (text: string): number =>
+    [...text].reduce((sum, char) => sum + (char.charCodeAt(0) >= 0x2E80 ? 1 : 0.62), 0);
+  const integrationHaystack = [
+    ...(sources ?? []).map((source) => [source.title, source.excerpt, ...(source.speaker_lines ?? []).map((line) => line.text)].join('\n')),
+    ...(communications ?? []).map((fragment) => [fragment.summary, fragment.transcript].join('\n')),
+  ].join('\n');
+  const rawIntegration = Array.isArray(raw.integrationSystems) ? raw.integrationSystems : [];
+  const integrationSystems: string[] = [];
+  const integrationInvalid: string[] = [];
+  for (const entry of rawIntegration) {
+    const name = typeof entry === 'string' ? entry.replace(/\s+/g, ' ').trim() : '';
+    if (!name) continue;
+    if (integrationSystems.length >= 6) { integrationInvalid.push(`${name}（超过 6 个上限）`); continue; }
+    if (/(ones|hemory|crm)/i.test(name)) { integrationInvalid.push(`${name}（内部系统名不得列入）`); continue; }
+    if (integrationNameWidthEm(name) > 12) { integrationInvalid.push(`${name}（超过 12 字宽）`); continue; }
+    if (!integrationHaystack.includes(name)) { integrationInvalid.push(`${name}（未在素材原文中逐字出现）`); continue; }
+    if (integrationSystems.includes(name)) continue;
+    integrationSystems.push(name);
+  }
+  if (integrationInvalid.length && !options.salvage) {
+    throw new Error(`integrationSystems 存在违规条目：${integrationInvalid.slice(0, 3).join('；')}——名称必须是素材原文逐字出现的外部系统称谓（不含 ONES/Hemory/CRM），至多 6 个`);
+  }
+  if (integrationInvalid.length && options.salvage) {
+    unknowns.push(`规划期 ${integrationInvalid.length} 个集成系统名称未通过校验被丢弃（打捞模式），集成清单以保留项为准`);
+  }
   // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 6 张（六类图可共存）。
   const figures: PlanFigure[] = [];
   if (Array.isArray(raw.figures)) {
@@ -1527,10 +1567,15 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
       if (!sectionAllowed || !['flow_current', 'flow_target', 'capability_map', 'architecture', 'milestone', 'value_map'].includes(kind) || !idea || !refs.length) continue;
       if (refs.some((ref) => !allowedRefs.has(ref))) continue;
       if (figures.some((figure) => figure.kind === kind)) continue;
+      // v17：系统集成架构图只在识别到集成系统时绘制（清单为空时不画，解决方案架构图系统集成带落标准集成兜底）。
+      if (kind === 'architecture' && !integrationSystems.length) {
+        unknowns.push('规划含系统集成架构图但 integrationSystems 为空，已按规则丢弃该图（未识别到集成系统时不画）');
+        continue;
+      }
       figures.push({ section, kind, idea, source_refs: refs });
     }
   }
-  return { title, plan, figures: figures.length ? figures : undefined, unknowns };
+  return { title, plan, figures: figures.length ? figures : undefined, integrationSystems, unknowns };
 }
 
 /** SVG 标签白名单：只保留静态绘制元素——script/foreignObject/动画/引用外部资源的元素一律不在名单内。 */
@@ -1688,14 +1733,15 @@ function parseChapterOutput(section: CaseChapterKey, value: unknown): ChapterOut
 async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, contextText: string,
   communications: CaseCommunicationSource[], onProgress?: (text: string) => void): Promise<CasePlan> {
   const prompt = `为客户「${input.customer.name}」规划客户成功案例草稿的章节结构。这份案例经 CSM 审核后用于对外展示（深度长文：客户及背景介绍 → 场景及解决方案 → 方案价值概述 → 项目总结）。你只做规划不写正文，只输出 JSON：\n`
-    + `{"title":"...","plan":[{"section":"intro|status|demands|solution|value|summary","items":[{"slot":"intro/value 章需要","idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"figures":[{"section":"status|demands|solution|value","kind":"flow_current|flow_target|architecture|milestone","idea":"这张图画什么","source_refs":["..."]}],"unknowns":["..."]}\n`
+    + `{"title":"...","plan":[{"section":"intro|status|demands|solution|value|summary","items":[{"slot":"intro/value 章需要","idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"integrationSystems":["OA 系统"],"figures":[{"section":"status|demands|solution|value","kind":"flow_current|flow_target|architecture|milestone","idea":"这张图画什么","source_refs":["..."]}],"unknowns":["..."]}\n`
     + `规划规则：\n`
     + `- 先在思考中通读素材再输出：思考从简（只做章节路由与证据挑选判断），plan JSON 是唯一交付物。\n`
     + `- 六个章节都必须有条目：intro 恰好 4 条且按 slot 顺序 company_info（公司信息）/business_scope（核心业务范围）/competitive_strategy（竞争优势与发展战略）/project_background（项目背景）；status 2~4 条（每条一段现状/痛点）；demands 3~6 条；solution 2~6 条（每条一个方案级举措小节）；value 2~6 条（slot=value）另可加 0~3 条复盘条目（slot=lesson，合作过程中的研讨与优化结论）；summary 恰好 1 条。素材不足时允许在下限以内收缩、宁少勿注水，没有把握写入的素材收进 unknowns。\n`
     + `- 每个条目的 idea 是「这一条要写什么」的要点描述（40 字以内，如「客户因跨部门数据孤岛导致人工汇总耗时」），不是最终正文；后续章节生成会依据 idea 撰写完整正文。\n`
     + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
     + `- 客户简介三小节（intro 前三槽）的摘录必须真的可抄：优先逐字取 customer 档案行（如「客户名称：…；行业：…」）或 web_context snippet 中的完整原句；档案与检索都查不到的信息（成立年份、规模、排名等具体事实）不得凭常识补写来源——对应小节写基于档案的收缩要点，缺失信息收进 unknowns（服务端会把无法定位摘录的简介/总结条目回退到档案锚点，但凭常识编造的事实仍会被公开检查标记）。\n`
-    + `- 配图（figures）：capability_map=需求场景-产品能力映射图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序横排短标签、功能项按场景列对位，idea 写明场景顺序与对应能力主线）；value_map=痛点-方案-价值全景图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序收束对位，方案区由服务端嵌入需求场景-产品能力映射图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当素材中有外部系统与 ONES 对接/集成的表述时才在 capability_map 之外加画——此时解决方案章共两张图，idea 写明参与集成的系统与各自的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
+    + `- integrationSystems（集成系统清单）：通读素材（重点 communications 片段转写）中提到 集成/打通/同步/对接/联动/接口/导入/单点登录/统一认证 的表述，列出明确要与本方案集成的**外部系统名称**——只写系统名称（如「OA 系统」「费控系统」）、逐字使用素材原文中的称谓、至多 6 个、不含 ONES/Hemory/CRM；名称必须能在素材原文中逐字找到（服务端校验）。没有明确的集成表述时输出空数组。\n`
+    + `- 配图（figures）：capability_map=解决方案架构图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序横排、ONES 模块与能力按场景列对位，idea 写明场景顺序与对应能力主线）；value_map=方案价值图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序一一对位，方案区由服务端嵌入解决方案架构图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当 integrationSystems 非空时才在 capability_map 之外加画——此时解决方案章共两张图，systems 必须与 integrationSystems 完全一致，idea 写明各系统的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
     + `- 章节路由：客户简介三小节（company_info/business_scope/competitive_strategy）只取客户档案与 web_context 可信公开信息（customer_official、government_procurement 优先，media 只能辅助）；项目背景取合作动因（档案、早期沟通记录、招采与政策类公开信息）；业务现状必须是合作前或当前问题；诉求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值与复盘条目必须来自客户说话人或可复核指标，价值发生在方案落地之后、复盘发生在合作期间。\n`
     + `- 信号表兜底：pain_point_signals/value_signals 是关键词预扫描的线索而非全集——若在 communications 片段原文中发现未被收录、但确属客户痛点或方案落地后价值反馈的表述，可直接引用该片段（source_ref 取片段 id）建条目，不受信号表限制，摘录从片段原文逐字截取。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于客户简介/项目背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
@@ -1837,12 +1883,12 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
  * 配图类型说明（逐图生成 prompt 注入）：图内容的事实边界由素材原文约束，画法只约束形态不约束事实。
  */
 const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
-  flow_current: '流程现状图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
+  flow_current: '现状流程图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
   flow_target: '目标流程图：客户期望达成的目标流程——方案落地后的目标流转，步骤框 + 箭头，体现统一平台/自动化环节替代人工与断点',
-  capability_map: '需求场景-产品能力映射图：横向分层业务蓝图——目标或核心场景、业务阶段、模块与能力矩阵、平台支撑、系统集成，有明确素材时追加组织保障；列对位即映射，仅阶段标题之间保留流程箭头',
-  architecture: '系统集成架构图：多系统集成场景专用——素材表明方案涉及外部系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时绘制：ONES 平台为核心、外部系统环绕对接、连线带数据标注。模块名与连接关系须有素材依据，不虚构未交付组件',
+  capability_map: '解决方案架构图：横向分层业务蓝图——目标或核心场景、业务场景矩阵（恒 6~8 个阶段，不足时按能力图谱贴近客户业务补足）、平台支撑与系统集成两条底带（由服务端固定渲染），列对位即映射，仅阶段标题之间保留流程箭头',
+  architecture: '系统集成架构图：多系统集成场景专用——integrationSystems 清单非空时绘制：ONES 平台为核心、外部系统左右两列环绕对接、连线带数据标注；systems 必须与清单完全一致，模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
-  value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——左侧痛点及挑战、中间方案、右侧价值三块区域由服务端统一渲染，方案区占最大空间，痛点与价值按序一一对位',
+  value_map: '方案价值图：把前文客户痛点与已确认价值收束为一张总览大图——左侧痛点及挑战、中间方案、右侧价值三块区域由服务端统一渲染，方案区占最大空间，痛点与价值按序一一对位（同行对齐）',
 };
 
 /** 配图绘图规范·通用条目（所有 kind 适用；规模/画布/布局差异在 CASE_FIGURE_KIND_RULES 专属条目里）。 */
@@ -1871,30 +1917,30 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   flow_target: CASE_FIGURE_SIMPLE_KIND_RULES,
   milestone: CASE_FIGURE_SIMPLE_KIND_RULES,
   capability_map: [
-    '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。blueprint 结构：{"topBand":{"kind":"goals","items":["降低协作成本","提升交付质量"]},"stages":[{"label":"需求收集","module":"ONES Project","capabilities":["外链表单提报","必填字段校验"]}],"platformCapabilities":[{"title":"流程自动化","detail":"状态流转与审批"}],"integrations":["OA","ERP"],"assurance":["管理制度","协作机制"]}。',
-    '- stages：按客户真实业务先后顺序排列 3~6 个阶段；label 为 4~10 字业务短语，module 为该阶段实际采用的 ONES 产品模块或能力域，每阶段 capabilities 为 2~6 条「对象+动作」能力短语。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。blueprint 结构：{"topBand":{"kind":"goals","items":["降低协作成本","提升交付质量"]},"stages":[{"label":"需求收集","module":"ONES Project","capabilities":["外链表单提报","必填字段校验"]}]}。',
+    '- stages：按客户真实业务先后顺序排列恒 6~8 个阶段（列宽随数量自适应，必须写满至少 6 个）；label 为 4~10 字业务短语，module 为该阶段实际采用的 ONES 产品模块或能力域，每阶段 capabilities 为 2~6 条「对象+动作」能力短语。',
+    '- 素材中的真实业务场景不足 6 个时，依据下方 ONES 能力图谱按该客户业务域的典型研发现状补足到 6 个（贴近客户行业与实际场景，不虚构客户专属事实）；补足的阶段同样须 module/capabilities 齐备。',
     '- topBand 可选：仅素材明确给出业务目标或跨阶段核心场景时填写；kind=goals 或 core_scenarios，items 2~6 项；没有明确证据时省略。',
-    '- platformCapabilities 可选：跨阶段共同使用且已交付的能力，0~6 项；title 为能力名，detail 为一行短说明。不要为了填满底栏复述各阶段能力。',
-    '- integrations 可选：只列素材明确参与本方案的外部系统简称，0~8 项；无集成素材时输出空数组或省略。',
-    '- assurance 可选：只列素材明确描述的组织、制度、规范或人才保障，0~6 项；通用最佳实践不构成客户事实，无证据时输出空数组或省略。',
-    '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6；stage.label 不超过 10 字宽，module/capability/topBand item/integration/assurance 不超过 14 字宽，platform detail 不超过 18 字宽。',
-    '- 场景、模块、能力、平台支撑、集成系统和组织保障均须有素材依据；ONES 能力图谱只用于准确命名，不构成交付证据。',
+    '- 平台支撑与系统集成两条底带由服务端固定渲染（平台支撑=ONES 底层能力标准词表、系统集成=规划期集成系统清单，无集成时为标准连接兜底），你不要输出 platformCapabilities/integrations/assurance 等字段。',
+    '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6；stage.label 不超过 10 字宽，module/capability/topBand item 不超过 14 字宽。',
+    '- 场景、模块与能力优先取素材依据；补足场景命名须与 ONES 能力图谱一致（图谱只用于准确命名，不构成该客户已交付的证据）。',
   ].join('\n'),
   architecture: [
-    '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 上下分层模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 左右两列夹峙中心枢纽的模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
     '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6（如「OAuth2 统一认证」约 8 字宽、「开放 REST API」约 7 字宽），不是按字符个数。',
-    '- systems：按业务重要性从上到下、从左到右稳定排序，列出与本方案有集成关系的外部系统，1~8 家（超过 8 家只保留主要集成系统）；id 用小写英文短标识（如 oa/erp/ehr，不得用保留 id "ones"），name 为系统称谓、用素材原称（不超过 12 字宽）；素材提到该系统具体功能/模块时列入 modules（每家 0~6 个、每个不超过 11 字宽），未提内部模块时留空数组。',
+    `- systems：必须与下方集成系统清单完全一致——名称逐字使用清单原文、数量相等、不得增删或改名（服务端校验集合相等）；id 用小写英文短标识（如 oa/erp/ehr，不得用保留 id "ones"），name 不超过 12 字宽。系统较多时 modules 精选：1~3 家每家 0~6 个、4~5 家每家 0~4 个、6 家每家 0~2 个（超出会被模板截断），每个不超过 11 字宽；素材提到该系统具体功能/模块时列入，未提内部模块时留空数组。`,
     '- hubModules：本方案在 ONES 侧涉及的能力模块 3~8 个（开放 API、单点登录等集成机制按实际采用可列入），命名与下方能力图谱一致、与方案正文涉及的能力相当，尽量列满；每个不超过 11 字宽。',
     '- flows：系统与 ONES 之间的数据流 1~10 条；from=数据发出方、to=数据接收方——外部系统推送/同步至 ONES 时 from=外部系统 id、to="ones"，ONES 供数/输出至外部系统时 from="ones"、to=外部系统 id；每条流必须有一端是 "ones"（外部系统间直连拆成经 ONES 的两条流或省略）；双向业务请拆成两条明确方向的流；label 使用 4~12 字的动宾短语（如「推送工单状态」/「输出项目进度」），不要写长句。',
     '- steps：这条对接传输的数据内容 1~3 条，优先写「数据对象 + 关键字段」的短业务短语（每条不超过 36 字宽、须有素材依据），素材提到关联/对应字段时放进同条 step 的 fields（0~4 个、每个不超过 14 字宽），避免段落式解释。',
-    '- 系统名、模块、数据项、字段只能来自素材原文与能力图谱，不虚构未交付组件；图内文字不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）。素材实际无外部系统与 ONES 对接时输出 {"systems":[],"hubModules":[],"flows":[]} 全空 graph（系统将放弃本图）。',
+    '- 系统名、模块、数据项、字段只能来自素材原文、集成系统清单与能力图谱，不虚构未交付组件；图内文字不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）。素材实际无外部系统与 ONES 对接时输出 {"systems":[],"hubModules":[],"flows":[]} 全空 graph（系统将放弃本图）。',
   ].join('\n'),
   value_map: [
-    '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 三分区模板渲染。valueMap 结构：{"painPoints":[{"title":"项目延期","detail":"进度依赖人工汇总，风险常到最后才暴露"}],"values":[{"title":"项目进度可控","detail":"排期、工时与实际进展集中呈现，及时调整"}]}。',
-    '- painPoints 与 values 各 3~5 条且数量必须相等；按序一一对应，痛点标题只写问题本身（如「数据不通」「协作不畅」「效率低下」），detail 再用一小段话扩展影响或表现；不要把痛点标题写成完整现状叙述。',
-    '- 价值标题与对应痛点逐条呼应，写方案解决后带来的已确认改善（如「数据贯通」「协作顺畅」「效率提升」），detail 用一句话说明通过什么改善、带来什么结果；不要写空泛口号或未经证实的百分比。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统按左中右三分区模板渲染（画布高度以中间嵌入的解决方案架构图为锚）。valueMap 结构：{"painPoints":[{"title":"进度信息割裂","detail":"各环节进度依赖人工汇总，风险常到最后才暴露"}],"values":[{"title":"进度实时贯通","detail":"排期与实际进展集中呈现，风险及时可见"}]}。',
+    '- painPoints 与 values 各 3~5 条且数量必须相等；按序一一同行对位——values[i] 必须是解决 painPoints[i] 的结果（针对同一数据对象或同一流程），三块内容构成「痛点→方案→价值」的映射而不是三份独立清单。',
+    `- 痛点 title 必须体现负向措辞——含「${VALUE_MAP_PAIN_TITLE_WORDS.join('、')}」等任一词（如「数据割裂」「进度无法追踪」「审批效率低」），只写问题本身、不要写成现状流程叙述；detail 再用一小段话扩展影响或表现。`,
+    `- 价值 title 必须体现正向措辞——含「${VALUE_MAP_VALUE_TITLE_WORDS.join('、')}」等任一词（如「数据贯通」「效率提升」「风险可控」）；detail 用一句话说明通过什么改善、带来什么结果；不要写空泛口号或未经证实的百分比。`,
     '- 每项必须包含 title 与 detail；title 为 4~14 字宽问题/价值短语，detail 为 1~34 字宽的客户化短说明，优先保留数据对象、管理动作和已确认结果。',
-    '- 版式固定为从左到右「痛点及挑战｜方案｜价值」三栏；中间方案区占最大空间，系统会将第三章节 capability_map 整体等比缩小嵌入中间区域，你不要输出方案区文字、坐标、颜色或 SVG。',
+    '- 版式固定为从左到右「痛点及挑战｜方案｜价值」三栏；中间方案区占最大空间，系统会将第三章节解决方案架构图整体等比缩小嵌入中间区域，你不要输出方案区文字、坐标、颜色或 SVG。',
     '- 痛点、价值、方案内容均须来自定稿正文、引用素材或已确认交付事实；无证据时减少条目或放弃整图，不使用待补充/unknown，不虚构数字与成效。',
   ].join('\n'),
 };
@@ -1925,9 +1971,16 @@ export function buildCaseFigurePrompt(input: {
   /** 图所依托的定稿正文锚点（普通图=本章锚点；value_map=痛点/价值合并锚点，自带段落标记）。 */
   chapterAnchor: string;
   materials: string[];
+  /** v17：规划期提取的集成系统清单（两图「系统集成」的单一事实源；空=未识别到集成）。 */
+  integrationSystems: string[];
 }): string {
   const knowledge = input.kind === 'capability_map' || input.kind === 'architecture' || input.kind === 'value_map'
     ? `${ONES_CAPABILITY_MAP}\n（图中 ONES 能力模块的命名须与图谱一致；图谱不构成该客户已交付的证据——是否交付以正文与素材为准。）\n`
+    : '';
+  const integrationLine = input.kind === 'capability_map' || input.kind === 'architecture'
+    ? input.integrationSystems.length
+      ? `- 集成系统清单（规划期从素材提取，唯一事实源）：${input.integrationSystems.join('、')}。解决方案架构图/系统集成架构图的「系统集成」内容必须且只能使用这些名称（逐字一致、不得增删改名）。\n`
+      : '- 集成系统清单为空（素材未识别到外部系统集成）：不要虚构集成系统；系统集成内容按 ONES 开箱即用标准连接处理。\n'
     : '';
   const isArchitecture = input.kind === 'architecture';
   const isCapabilityMap = input.kind === 'capability_map';
@@ -1947,6 +2000,7 @@ export function buildCaseFigurePrompt(input: {
     + `${commonRules}\n`
     + `本图专属规范：\n${CASE_FIGURE_KIND_RULES[input.kind]}\n`
     + knowledge
+    + integrationLine
     + `- 本图要表达的内容（来自章节规划）：${input.idea}\n`
     + `- 图所依托的定稿正文（图内容须与正文口径一致）：${input.chapterAnchor}\n`
     + `- 支撑素材原文（图内容的事实依据，图中的环节/模块/角色/数字必须能在这里找到）：\n${input.materials.join('\n\n')}`;
@@ -2000,7 +2054,7 @@ function figureKindLabel(kind: CaseFigureKind): string {
 
 async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
   figure: PlanFigure, communications: CaseCommunicationSource[], chapterText: string, milestones: CaseMilestone[],
-  slots: CaseModelSlots, onProgress?: (text: string) => void): Promise<CaseFigure | null> {
+  integrationSystems: string[], slots: CaseModelSlots, onProgress?: (text: string) => void): Promise<CaseFigure | null> {
   const sectionLabel = CASE_SECTIONS.find((item) => item.key === figure.section)?.label ?? figure.section;
   // 关联来源的完整原文：hemory 片段取全量转写（流程描述常在片段中后段），其余来源取目录 title+excerpt。
   const sourceMap = new Map(snapshot.sources.map((item) => [item.id, item]));
@@ -2022,6 +2076,7 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     idea: figure.idea,
     chapterAnchor: chapterText,
     materials,
+    integrationSystems,
   });
   // 结构化配图内容校验失败时把具体违规附进下一轮 prompt（反馈环）——同错盲重试只会
   // 原样再犯，带上具体错误后模型可定点修正。
@@ -2055,14 +2110,16 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     const value = cleanJson(extractText(response.content));
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const record = value as Record<string, unknown>;
-      const caption = typeof record.caption === 'string' ? record.caption.trim().slice(0, 60) : '';
+      // 三张结构化图的图注确定性覆盖为规范图名（系统内与导出 Word 统一叫法）；其余图沿用模型图注。
+      const caption = CASE_FIGURE_TITLES[figure.kind]
+        ?? (typeof record.caption === 'string' ? record.caption.trim().slice(0, 60) : '');
       const accepted = (svg: string | null): CaseFigure | null => (svg && caption && !CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(caption))
         ? { id: `figure:${hash(`${figure.kind}:${figure.source_refs.join(',')}`).slice(0, 24)}`, section: figure.section,
           kind: figure.kind, svg, caption, source_refs: figure.source_refs, note: figure.idea }
         : null);
       if (figure.kind === 'architecture') {
-        // v11：架构图模型只供内容 graph，SVG 由服务端模板确定性渲染（版式/配色/走线不再依赖模型）。
-        const parsed = parseArchitectureGraph(record.graph, { textGuard: caseInternalEvidenceLabel });
+        // v17：架构图模型只供内容 graph，SVG 由服务端模板确定性渲染；systems 必须与集成系统清单完全一致（两图同源）。
+        const parsed = parseArchitectureGraph(record.graph, { textGuard: caseInternalEvidenceLabel, requiredSystemNames: integrationSystems });
         if ('graph' in parsed) {
           const rendered = renderArchitectureSvg(parsed.graph);
           const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
@@ -2074,17 +2131,22 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
           lastError = `架构图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         }
       } else if (figure.kind === 'capability_map') {
-        // v12：业务解决方案图 1 模型只供内容 blueprint，SVG 由服务端分层蓝图模板确定性渲染。
+        // v17：解决方案架构图模型只供场景矩阵内容；平台支撑固定词表 + 系统集成清单由服务端注入后统一渲染。
         const parsed = parseCapabilityMapBlueprint(record.blueprint, { textGuard: caseInternalEvidenceLabel });
         if ('blueprint' in parsed) {
-          const rendered = renderCapabilityMapSvg(parsed.blueprint);
+          const merged = {
+            ...parsed.blueprint,
+            platformCapabilities: ONES_PLATFORM_CAPABILITIES.map((item) => ({ ...item })),
+            integrations: integrationSystems.length ? [...integrationSystems] : [...ONES_STANDARD_INTEGRATIONS],
+          };
+          const rendered = renderCapabilityMapSvg(merged);
           const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
           if (result) return result;
-          structureFeedback = rendered ? '' : '内容规模超出画布承载，请精选阶段、能力与组织保障条目';
-          lastError = `能力映射图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+          structureFeedback = rendered ? '' : '内容规模超出画布承载，请精选阶段与能力条目（阶段恒 6~8 个）';
+          lastError = `解决方案架构图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         } else {
           structureFeedback = parsed.error;
-          lastError = `能力映射图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+          lastError = `解决方案架构图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         }
       } else if (figure.kind === 'value_map') {
         const parsed = parseValueMapBlueprint(record, { textGuard: caseInternalEvidenceLabel });
@@ -2093,23 +2155,31 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
           const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
           if (result) return result;
           structureFeedback = rendered ? '' : '痛点及价值必须各 3~5 条且数量相等，或内容超出画布承载，请精选条目并缩短说明';
-          lastError = `价值全景图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+          lastError = `方案价值图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         } else {
           structureFeedback = parsed.error;
-          lastError = `价值全景图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+          lastError = `方案价值图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         }
       } else {
         const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
         const sanitized = sanitizeCaseSvg(rawSvg);
-        const styled = sanitized && ['flow_current', 'flow_target', 'milestone'].includes(figure.kind)
-          ? styleCaseFigureSvg({ kind: figure.kind as 'flow_current' | 'flow_target' | 'milestone', svg: sanitized, caption })
-          : sanitized;
+        // v17：模型流程图连线沉底 + 白描边后再套外壳；残余「连线压字」按软校验反馈重试（末次尝试兜底接受）。
+        const relayered = sanitized ? relayerFigureEdges(sanitized) : null;
+        const overlaps = relayered ? findFigureEdgeTextOverlaps(relayered) : [];
+        const styled = relayered && ['flow_current', 'flow_target', 'milestone'].includes(figure.kind)
+          ? styleCaseFigureSvg({ kind: figure.kind as 'flow_current' | 'flow_target' | 'milestone', svg: relayered, caption })
+          : relayered;
         const result = accepted(styled ? sanitizeCaseSvg(styled) : null);
-        if (result) return result;
-        structureFeedback = sanitized
-          ? '服务端统一外壳适配失败；请使用短业务标签，保持节点/文字在 viewBox 内，不要输出外链、图片、脚本或整图背景'
-          : 'SVG 消毒失败；请仅输出自包含静态 SVG，不要输出外链、图片、脚本或非法文字结构';
-        lastError = `配图${sanitized ? '外壳适配、消毒或图注校验' : 'SVG 消毒或图注校验'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        if (result && (!overlaps.length || attempt === MAX_ATTEMPTS)) return result;
+        if (overlaps.length) {
+          structureFeedback = `连线与文字重叠（${overlaps.slice(0, 2).join('；')}）——请调整连线起终点或走线绕开所有文字标签（连线从节点边缘连接，不得压住文字）`;
+          lastError = `配图连线压字未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        } else {
+          structureFeedback = sanitized
+            ? '服务端统一外壳适配失败；请使用短业务标签，保持节点/文字在 viewBox 内，不要输出外链、图片、脚本或整图背景'
+            : 'SVG 消毒失败；请仅输出自包含静态 SVG，不要输出外链、图片、脚本或非法文字结构';
+          lastError = `配图${sanitized ? '外壳适配、消毒或图注校验' : 'SVG 消毒或图注校验'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        }
       }
     } else {
       lastError = `配图未返回可解析 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;
@@ -2301,7 +2371,7 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
       const anchor = figure.kind === 'value_map'
         ? valueMapAnchorText(chapters, chapterOutput)
         : chapterAnchorText(figure.section as CaseChapterKey, chapterOutput);
-      const generated = await generateFigureWithModel(runtime, input, snapshot, figure, communications, anchor, milestones, slots, stamped);
+      const generated = await generateFigureWithModel(runtime, input, snapshot, figure, communications, anchor, milestones, plan.integrationSystems ?? [], slots, stamped);
       // 方案区拼装：不占并发槽，等解决方案映射图完成后注入确定性渲染器预留的内容槽位；
       // 旧版模型 SVG 继续走 composeValueMapSvg 兼容路径。
       if (generated && figure.kind === 'value_map') {

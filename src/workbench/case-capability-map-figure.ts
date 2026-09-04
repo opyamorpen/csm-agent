@@ -24,19 +24,24 @@ export interface CapabilityPlatformItem {
   detail?: string;
 }
 
+/**
+ * v17：platformCapabilities 与 integrations 不再来自模型——平台支撑由调用方注入
+ * ONES_PLATFORM_CAPABILITIES 固定词表，系统集成由调用方注入规划期提取的集成系统清单
+ * （空清单时注入 ONES_STANDARD_INTEGRATIONS 标准集成兜底）。assurance（组织保障）已移除。
+ */
 export interface CapabilityMapBlueprint {
   topBand?: CapabilityTopBand;
   stages: CapabilityStage[];
   platformCapabilities?: CapabilityPlatformItem[];
   integrations?: string[];
-  assurance?: string[];
 }
 
 export type CapabilityMapBlueprintParse = { blueprint: CapabilityMapBlueprint } | { error: string };
 
 export const CAPABILITY_MAP_LIMITS = {
-  stagesMin: 3,
-  stages: 6,
+  /** v17：业务场景矩阵恒定 6~8 个阶段（素材不足时模型按能力图谱贴近客户实际补足到 6）。 */
+  stagesMin: 6,
+  stages: 8,
   stageLabelWidthEm: 10,
   moduleWidthEm: 14,
   capabilitiesMin: 2,
@@ -45,13 +50,11 @@ export const CAPABILITY_MAP_LIMITS = {
   topItemsMin: 2,
   topItems: 6,
   topItemWidthEm: 14,
-  platformItems: 6,
+  platformItems: 8,
   platformTitleWidthEm: 12,
   platformDetailWidthEm: 18,
-  integrations: 8,
+  integrations: 6,
   integrationWidthEm: 14,
-  assurance: 6,
-  assuranceWidthEm: 14,
 } as const;
 
 export const CAPABILITY_MAP_PALETTE = {
@@ -72,8 +75,6 @@ const CANVAS_H = 720;
 const MARGIN = 16;
 const ROW_GAP = 10;
 const LABEL_W = 148;
-const ASSURANCE_W = 224;
-const ASSURANCE_GAP = 12;
 
 const charWidthEm = (char: string): number => {
   const code = char.charCodeAt(0);
@@ -161,39 +162,14 @@ export function parseCapabilityMapBlueprint(
     stages.push({ label, module, capabilities });
   }
   if (stages.length < CAPABILITY_MAP_LIMITS.stagesMin) {
-    push(`stages 去重后须有 ${CAPABILITY_MAP_LIMITS.stagesMin}~${CAPABILITY_MAP_LIMITS.stages} 个（实际 ${stages.length}）`);
+    push(`stages 去重后须有 ${CAPABILITY_MAP_LIMITS.stagesMin}~${CAPABILITY_MAP_LIMITS.stages} 个（实际 ${stages.length}；素材不足时按 ONES 能力图谱贴近客户业务补足到 ${CAPABILITY_MAP_LIMITS.stagesMin} 个）`);
   }
-
-  const platformCapabilities: CapabilityPlatformItem[] = [];
-  const platformKeys = new Set<string>();
-  for (const [index, item] of (Array.isArray(raw.platformCapabilities) ? raw.platformCapabilities : []).entries()) {
-    if (platformCapabilities.length >= CAPABILITY_MAP_LIMITS.platformItems) break;
-    if (!item || typeof item !== 'object' || Array.isArray(item)) { push(`platformCapabilities[${index}] 不是对象`); continue; }
-    const entry = item as Record<string, unknown>;
-    const title = checked(entry.title, `platformCapabilities[${index}].title`, CAPABILITY_MAP_LIMITS.platformTitleWidthEm);
-    const detail = entry.detail == null || cleanText(entry.detail) == null
-      ? undefined
-      : checked(entry.detail, `platformCapabilities[${index}].detail`, CAPABILITY_MAP_LIMITS.platformDetailWidthEm) ?? undefined;
-    if (!title || platformKeys.has(title)) continue;
-    platformKeys.add(title);
-    platformCapabilities.push({ title, ...(detail ? { detail } : {}) });
-  }
-
-  const stringList = (key: 'integrations' | 'assurance', limit: number, maxWidth: number): string[] =>
-    unique((Array.isArray(raw[key]) ? raw[key] : [])
-      .map((item, index) => checked(item, `${key}[${index}]`, maxWidth))
-      .filter((item): item is string => !!item)).slice(0, limit);
-  const integrations = stringList('integrations', CAPABILITY_MAP_LIMITS.integrations, CAPABILITY_MAP_LIMITS.integrationWidthEm);
-  const assurance = stringList('assurance', CAPABILITY_MAP_LIMITS.assurance, CAPABILITY_MAP_LIMITS.assuranceWidthEm);
 
   if (errors.length) return { error: errors.join('；') };
   return {
     blueprint: {
       ...(topBand ? { topBand } : {}),
       stages,
-      ...(platformCapabilities.length ? { platformCapabilities } : {}),
-      ...(integrations.length ? { integrations } : {}),
-      ...(assurance.length ? { assurance } : {}),
     },
   };
 }
@@ -253,8 +229,8 @@ interface Density {
 
 function densityOf(blueprint: CapabilityMapBlueprint): Density {
   const maxItems = Math.max(...blueprint.stages.map((stage) => stage.capabilities.length));
-  if (blueprint.stages.length <= 4 && maxItems <= 4) return { stageFont: 20, moduleFont: 16, itemFont: 15, itemLine: 19 };
-  if (blueprint.stages.length <= 5 && maxItems <= 5) return { stageFont: 18, moduleFont: 15, itemFont: 14, itemLine: 18 };
+  if (blueprint.stages.length <= 6 && maxItems <= 4) return { stageFont: 19, moduleFont: 16, itemFont: 14, itemLine: 18 };
+  if (blueprint.stages.length <= 7 && maxItems <= 5) return { stageFont: 18, moduleFont: 15, itemFont: 13, itemLine: 17 };
   return { stageFont: 17, moduleFont: 14, itemFont: 13, itemLine: 16 };
 }
 
@@ -287,16 +263,14 @@ function bandRow(parts: string[], input: {
   parts.push('</g>');
 }
 
-/** 固定 1440×720 的自适应分层蓝图。 */
+/** 固定 1440×720 的自适应分层蓝图（v17：全宽布局，无组织保障侧栏；平台支撑/系统集成由调用方注入恒定内容）。 */
 export function renderCapabilityMapSvg(blueprint: CapabilityMapBlueprint): string | null {
   if (blueprint.stages.length < CAPABILITY_MAP_LIMITS.stagesMin || blueprint.stages.length > CAPABILITY_MAP_LIMITS.stages) return null;
   const p = CAPABILITY_MAP_PALETTE;
   const hasTop = !!blueprint.topBand?.items.length;
   const hasPlatform = !!blueprint.platformCapabilities?.length;
   const hasIntegrations = !!blueprint.integrations?.length;
-  const hasAssurance = !!blueprint.assurance?.length;
   const contentW = CANVAS_W - MARGIN * 2;
-  const leftW = contentW - (hasAssurance ? ASSURANCE_W + ASSURANCE_GAP : 0);
   const topH = hasTop ? 76 : 0;
   const platformH = hasPlatform ? 80 : 0;
   const integrationH = hasIntegrations ? 72 : 0;
@@ -317,10 +291,10 @@ export function renderCapabilityMapSvg(blueprint: CapabilityMapBlueprint): strin
   }
 
   const mainY = y;
-  parts.push(`<g id="cap-main"><rect x="${MARGIN}" y="${mainY}" width="${leftW}" height="${mainH}" rx="10" fill="${p.panel}" stroke="${p.border}"/>`);
+  parts.push(`<g id="cap-main"><rect x="${MARGIN}" y="${mainY}" width="${contentW}" height="${mainH}" rx="10" fill="${p.panel}" stroke="${p.border}"/>`);
   rowLabel(parts, 'cap-main-label', '业务场景', MARGIN + 8, mainY + 8, LABEL_W - 16, mainH - 16);
   const gridX = MARGIN + LABEL_W + 8;
-  const gridW = leftW - LABEL_W - 16;
+  const gridW = contentW - LABEL_W - 16;
   const stageGap = 16;
   const stageW = (gridW - stageGap * (blueprint.stages.length - 1)) / blueprint.stages.length;
   const stageY = mainY + 14;
@@ -358,32 +332,12 @@ export function renderCapabilityMapSvg(blueprint: CapabilityMapBlueprint): strin
   y = mainY + mainH;
   if (hasPlatform) {
     y += ROW_GAP;
-    bandRow(parts, { id: 'cap-platform', label: '平台支撑', items: blueprint.platformCapabilities!, x: MARGIN, y, w: leftW, h: platformH });
+    bandRow(parts, { id: 'cap-platform', label: '平台支撑', items: blueprint.platformCapabilities!, x: MARGIN, y, w: contentW, h: platformH });
     y += platformH;
   }
   if (hasIntegrations) {
     y += ROW_GAP;
-    bandRow(parts, { id: 'cap-integrations', label: '系统集成', items: blueprint.integrations!.map((title) => ({ title })), x: MARGIN, y, w: leftW, h: integrationH });
-  }
-
-  if (hasAssurance) {
-    const x = MARGIN + leftW + ASSURANCE_GAP;
-    const assuranceY = mainY;
-    const assuranceH = CANVAS_H - MARGIN - assuranceY;
-    parts.push(`<g id="cap-assurance"><rect x="${x}" y="${assuranceY}" width="${ASSURANCE_W}" height="${assuranceH}" rx="10" fill="${p.support}" stroke="${p.border}"/>`);
-    parts.push(`<rect x="${x + 10}" y="${assuranceY + 10}" width="${ASSURANCE_W - 20}" height="64" rx="9" fill="${p.primary}"/>`);
-    parts.push(textBlock('组织保障', x + ASSURANCE_W / 2, assuranceY + 42, ASSURANCE_W - 36, 20, p.white, { weight: 'bold' }));
-    const listY = assuranceY + 86;
-    const listBottom = assuranceY + assuranceH - 12;
-    const gap = 10;
-    const cardH = (listBottom - listY - gap * (blueprint.assurance!.length - 1)) / blueprint.assurance!.length;
-    if (cardH < 42) return null;
-    for (const [index, item] of blueprint.assurance!.entries()) {
-      const cardY = listY + index * (cardH + gap);
-      parts.push(`<rect x="${x + 10}" y="${cardY}" width="${ASSURANCE_W - 20}" height="${cardH}" rx="8" fill="${p.white}" stroke="${p.border}"/>`);
-      parts.push(textBlock(item, x + ASSURANCE_W / 2, cardY + cardH / 2, ASSURANCE_W - 38, 15, p.text, { lineHeight: 19, maxLines: 2 }));
-    }
-    parts.push('</g>');
+    bandRow(parts, { id: 'cap-integrations', label: '系统集成', items: blueprint.integrations!.slice(0, CAPABILITY_MAP_LIMITS.integrations).map((title) => ({ title })), x: MARGIN, y, w: contentW, h: integrationH });
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" font-family="PingFang SC, Microsoft YaHei, sans-serif"><rect width="${CANVAS_W}" height="${CANVAS_H}" fill="${p.white}"/>${parts.join('')}</svg>`;

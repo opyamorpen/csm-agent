@@ -56,8 +56,8 @@ const FIXTURE_N3: ArchitectureGraph = {
   ],
 };
 
-/** 示例图 B 同规模（7 系统）压力夹具。 */
-const FIXTURE_N7: ArchitectureGraph = {
+/** n6 压力夹具（v17：上限 6 系统，左右各 3；模块按列预算由模板截断）。 */
+const FIXTURE_N6: ArchitectureGraph = {
   systems: [
     { id: 'erp', name: 'ERP 系统', modules: ['物料主数据', '采购订单', '工单管理', '成本核算'] },
     { id: 'crm', name: 'CRM 系统', modules: ['客户管理', '商机管理', '合同管理', '报价管理'] },
@@ -65,7 +65,6 @@ const FIXTURE_N7: ArchitectureGraph = {
     { id: 'pdm', name: 'PDM 系统', modules: ['产品文档', '图纸管理', '变更管理'] },
     { id: 'oa', name: 'OA 系统', modules: ['流程审批', '统一待办', '公告发布'] },
     { id: 'svn', name: 'SVN 系统', modules: [] },
-    { id: 'bi', name: 'BI 系统', modules: [] },
   ],
   hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库'],
   flows: [
@@ -76,20 +75,23 @@ const FIXTURE_N7: ArchitectureGraph = {
     { from: 'oa', to: 'ones', label: '审批联动', steps: [{ text: '审批通过自动创建需求与任务' }] },
     { from: 'ones', to: 'oa', label: '待办推送', steps: [{ text: '任务分配与到期提醒推送统一待办' }] },
     { from: 'ones', to: 'svn', label: '代码关联', steps: [{ text: '需求任务关联代码提交记录' }] },
-    { from: 'ones', to: 'bi', label: '数据供数', steps: [{ text: '项目效能数据输出 BI 报表', fields: ['项目ID'] }] },
   ],
 };
 
-const FIXTURE_N8: ArchitectureGraph = {
-  systems: Array.from({ length: 8 }, (_, index) => ({ id: `sys${index + 1}`, name: `系统${index + 1}`, modules: ['用户目录', '业务数据', '状态同步', '接口配置'] })),
-  hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库', '权限管理', '开放 API'],
-  flows: Array.from({ length: 10 }, (_, index) => ({
-    from: index % 3 === 0 ? 'ones' : `sys${(index % 8) + 1}`,
-    to: index % 3 === 0 ? `sys${(index % 8) + 1}` : 'ones',
-    label: index % 3 === 0 ? '输出业务状态' : '推送业务数据',
+/** n2~n5 布局档夹具（v17：左右两列轮转，2→1+1、3→2+1、4→2+2、5→3+2）。 */
+const generatedLayout = (count: number): ArchitectureGraph => ({
+  systems: Array.from({ length: count }, (_, index) => ({
+    id: `sys${index + 1}`, name: `系统${index + 1}`,
+    modules: index % 2 === 0 ? ['用户目录', '业务数据', '状态同步', '接口配置'] : ['组织架构', '审批流程'],
+  })),
+  hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库'],
+  flows: Array.from({ length: count }, (_, index) => ({
+    from: index % 2 === 0 ? `sys${index + 1}` : 'ones',
+    to: index % 2 === 0 ? 'ones' : `sys${index + 1}`,
+    label: index % 2 === 0 ? '推送业务数据' : '输出业务状态',
     steps: [{ text: '业务对象与状态同步', fields: index % 2 ? ['对象ID'] : undefined }],
   })),
-};
+});
 
 const [inputPath, outPng] = process.argv.slice(2);
 if (inputPath) {
@@ -110,6 +112,6 @@ if (inputPath) {
 } else {
   renderFixture('arch-n1', FIXTURE_N1);
   renderFixture('arch-n3', FIXTURE_N3);
-  renderFixture('arch-n7', FIXTURE_N7);
-  renderFixture('arch-n8', FIXTURE_N8);
+  renderFixture('arch-n6', FIXTURE_N6);
+  for (const count of [2, 3, 4, 5]) renderFixture(`arch-gen-n${count}`, generatedLayout(count));
 }

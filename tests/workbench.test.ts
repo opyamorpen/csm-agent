@@ -4229,7 +4229,7 @@ import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, b
 import { ARCHITECTURE_FIGURE_PALETTE, parseArchitectureGraph, renderArchitectureSvg, type ArchitectureGraph } from '../src/workbench/case-architecture-figure.js';
 import { CAPABILITY_MAP_PALETTE, parseCapabilityMapBlueprint, renderCapabilityMapSvg, type CapabilityMapBlueprint } from '../src/workbench/case-capability-map-figure.js';
 import { parseValueMapBlueprint, renderValueMapSvg, type ValueMapBlueprint } from '../src/workbench/case-value-map-figure.js';
-import { CASE_FIGURE_SHELL_PALETTE, styleCaseFigureSvg } from '../src/workbench/case-figure-shell.js';
+import { CASE_FIGURE_SHELL_PALETTE, findFigureEdgeTextOverlaps, relayerFigureEdges, styleCaseFigureSvg } from '../src/workbench/case-figure-shell.js';
 import { Resvg } from '@resvg/resvg-js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
@@ -4371,7 +4371,7 @@ function seedCaseCustomer(db: WorkbenchDatabase): void {
   db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
     externalId: 'case-T-1', displayId: 'T-2001', title: '导出超时', occurredAt: '2026-03-10T03:00:00Z',
     payload: { field005: { name: '已完成', category: 'done' }, field009: '2026-03-10 11:00:00', field010: '2026-03-12 11:00:00' } });
-  segment(db, 'crm-c1', 'case-r1:t1', 'case-r1', '启动会', '2026-03-05T05:00:00Z', '客户提出希望统一管理研发项目');
+  segment(db, 'crm-c1', 'case-r1:t1', 'case-r1', '启动会', '2026-03-05T05:00:00Z', '客户提出希望统一管理研发项目，并与 OA 系统打通单点登录');
   const recording = db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
     externalId: 'case-r1', title: '录音 case-r1', occurredAt: '2026-03-05T05:00:00Z', payload: {} });
   db.activateHemoryFragments(recording.id, 'fp-case-r1', [db.findSourceEvent('hemory', 'ai_topic_segment', 'case-r1:t1')!.id]);
@@ -4495,7 +4495,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v16-value-map-horizontal-layout');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v17-integration-and-value-map');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5308,6 +5308,58 @@ test('workbench: legacy figure shell adds stable titles, padding, and blue palet
 
 // ── 业务解决方案图 1（capability_map）v12：内容蓝图 + 服务端确定性渲染 ──
 
+test('workbench: model figure edges sink below shapes with halo (v17)', () => {
+  const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">'
+    + '<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>'
+    + '<text x="100" y="60" font-size="14" text-anchor="middle" fill="#1c2b3a">流程说明</text>'
+    + '<rect x="60" y="120" width="80" height="30" fill="#ffffff" stroke="#3a6ea5" stroke-width="2"/>'
+    + '<line x1="140" y1="135" x2="260" y2="135" stroke="#3a6ea5" stroke-width="2" marker-end="url(#a)"/>'
+    + '<rect x="260" y="120" width="80" height="30" fill="#ffffff" stroke="#3a6ea5" stroke-width="2"/>'
+    + '<text x="300" y="140" font-size="14" text-anchor="middle">归档节点</text>'
+    + '</svg>';
+  const relayered = relayerFigureEdges(source);
+  const inner = relayered.slice(relayered.indexOf('>') + 1, relayered.lastIndexOf('</svg>'));
+  // 连线（含 halo）沉底：背景之后先是 halo+线，文字与节点矩形都在其后绘制（节点盖线、文字不被压）。
+  const haloAt = inner.indexOf('stroke-linecap="round"');
+  const edgeAt = inner.indexOf('marker-end');
+  const firstText = inner.indexOf('<text');
+  const firstNode = inner.indexOf('<rect x="60"');
+  assert.ok(haloAt > -1 && edgeAt > -1 && haloAt < edgeAt, 'halo 垫在连线正下方');
+  assert.ok(edgeAt < firstNode && edgeAt < firstText, '连线先于节点/文字绘制');
+  assert.match(relayered, new RegExp(`stroke="${CASE_FIGURE_SHELL_PALETTE.panel}"`), 'halo 使用面板底色');
+  assert.match(relayered, /stroke-width="8"/, 'halo 在原线宽 2 上加宽 6');
+  assert.ok(!/stroke-linecap="round"[^>]*marker-end/.test(relayered), 'halo 剥离箭头');
+  assert.ok(/\bfill="none"[^>]*stroke-linecap="round"|stroke-linecap="round"[^>]*\bfill="none"|fill="none"[^>]*stroke="#F3F8FE"/.test(relayered) || relayered.includes('fill="none"'), 'halo 透明填充');
+  for (const label of ['流程说明', '归档节点', '<rect x="60"', '<rect x="260"']) assert.ok(relayered.includes(label), `内容守恒：${label}`);
+  // 无边元素时原样返回（不过度重排）；无背景块但有边时仍安全沉底（外壳面板先于内容绘制）。
+  const noEdge = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="0" y="0" width="10" height="10" fill="#ffffff"/><text x="5" y="5">x</text></svg>';
+  assert.equal(relayerFigureEdges(noEdge), noEdge, '无边时原样返回');
+  const noBackground = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><rect x="60" y="120" width="80" height="30" fill="#ffffff" stroke="#3a6ea5" stroke-width="2"/><line x1="140" y1="135" x2="260" y2="135" stroke="#3a6ea5" stroke-width="2"/></svg>';
+  const noBackgroundOut = relayerFigureEdges(noBackground);
+  assert.ok(noBackgroundOut.indexOf('stroke-linecap="round"') < noBackgroundOut.indexOf('<rect x="60"'), '无背景块时 halo+连线仍先于节点绘制');
+  assert.ok(sanitizeCaseSvg(relayered), '重排产物仍过消毒');
+});
+
+test('workbench: figure edge-text overlap detector feeds retry feedback (v17)', () => {
+  // 开放空间连线穿过文字 → 检出（反馈重试）；文字整体落在实底节点内 → 由节点遮挡，不算压字。
+  const overlapping = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">'
+    + '<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>'
+    + '<text x="180" y="140" font-size="14" text-anchor="middle" fill="#000">提交审批</text>'
+    + '<line x1="40" y1="140" x2="360" y2="140" stroke="#333333" stroke-width="2"/>'
+    + '</svg>';
+  const hits = findFigureEdgeTextOverlaps(overlapping);
+  assert.equal(hits.length, 1, '开放空间连线压字被检出');
+  assert.match(hits[0]!, /提交审批/);
+  const insideNode = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">'
+    + '<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>'
+    + '<rect x="150" y="110" width="90" height="40" fill="#ffffff" stroke="#333333"/>'
+    + '<text x="195" y="135" font-size="14" text-anchor="middle" fill="#000">提交审批</text>'
+    + '<line x1="40" y1="130" x2="360" y2="130" stroke="#333333" stroke-width="2"/>'
+    + '</svg>';
+  assert.equal(findFigureEdgeTextOverlaps(insideNode).length, 0, '节点内文字由节点遮挡，不算压字');
+  assert.equal(findFigureEdgeTextOverlaps('<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>').length, 0, '无文字/无连线安全返回');
+});
+
 const CAPABILITY_BLUEPRINT: CapabilityMapBlueprint = {
   topBand: { kind: 'goals', items: ['降低协作成本', '提升交付质量', '加快产品上市'] },
   stages: [
@@ -5316,15 +5368,15 @@ const CAPABILITY_BLUEPRINT: CapabilityMapBlueprint = {
     { label: '分析拆分关联', module: '需求管理', capabilities: ['拆分敏稳态需求', '双向关联原始需求', '列表快速跳转', '数据权限隔离'] },
     { label: '纳入年度计划', module: '项目管理', capabilities: ['立项审批通过', '纳入年度计划', '标记纳入年份', '进度趋势分析'] },
     { label: '单点登录同步', module: 'ONES Account', capabilities: ['OAuth2 单点认证', '内网账号直登', '组织通讯录同步', '离职账号停用'] },
+    { label: '测试验收', module: 'ONES TestCase', capabilities: ['用例覆盖需求', '缺陷闭环回归', '验收报告留痕'] },
   ],
   platformCapabilities: [
-    { title: '统一需求池', detail: '结构化表单汇入' },
-    { title: '流程自动化', detail: '状态流转与审批' },
-    { title: '权限管理', detail: '按部门分层管控' },
-    { title: '私有化部署', detail: '内网环境适配' },
+    { title: '权限管理', detail: '五级权限·角色模板' },
+    { title: '流程自定义', detail: '工作流与状态流转' },
+    { title: '字段自定义', detail: '自定义字段与表单' },
+    { title: '流程自动化', detail: '事件触发流转通知' },
   ],
   integrations: ['OA', '统一认证平台', '信宝 APP', '自研业务系统'],
-  assurance: ['精益管理体系', '质量管理规范', '协同设计开发', '过程资产沉淀', '组织机制保障'],
 };
 
 const CAPABILITY_BLUEPRINT_RESPONSE = { caption: '映射：需求场景对应产品能力', blueprint: CAPABILITY_BLUEPRINT };
@@ -5341,22 +5393,22 @@ const capabilityErrorOf = (value: unknown): string => {
   return (parsed as { error: string }).error;
 };
 
-test('workbench: parseCapabilityMapBlueprint validates and normalizes v12 content contract', () => {
+test('workbench: parseCapabilityMapBlueprint validates and normalizes v17 content contract', () => {
   const parsed = capabilityBlueprintOf({
     ...CAPABILITY_BLUEPRINT,
     stages: CAPABILITY_BLUEPRINT.stages.map((stage, index) => index === 0
       ? { ...stage, label: ' 需求收集 ', capabilities: ['外链表单提报', '外链表单提报', '自定义必填项'] }
       : stage),
-    integrations: ['OA', 'OA', '统一认证平台'],
   });
   assert.equal(parsed.stages[0].label, '需求收集', '阶段名压空白');
   assert.deepEqual(parsed.stages[0].capabilities, ['外链表单提报', '自定义必填项'], '阶段能力去重');
-  assert.deepEqual(parsed.integrations, ['OA', '统一认证平台'], '集成系统去重');
-  assert.match(capabilityErrorOf({ ...CAPABILITY_BLUEPRINT, stages: CAPABILITY_BLUEPRINT.stages.slice(0, 2) }), /3~6/, '阶段不足');
+  // v17：平台支撑/系统集成/组织保障不再由模型提供——解析产物只含场景矩阵（+可选 topBand）。
+  assert.ok(!('platformCapabilities' in parsed) && !('integrations' in parsed) && !('assurance' in parsed), '服务端固定分区不出现在模型契约');
+  assert.match(capabilityErrorOf({ ...CAPABILITY_BLUEPRINT, stages: CAPABILITY_BLUEPRINT.stages.slice(0, 4) }), /6~8/, '阶段不足（恒 6~8）');
   assert.match(capabilityErrorOf({ ...CAPABILITY_BLUEPRINT, stages: CAPABILITY_BLUEPRINT.stages.map((stage, index) => index === 0 ? { ...stage, label: '一'.repeat(11) } : stage) }), /超过 10 字宽/, '阶段名超宽');
   assert.match(capabilityErrorOf({ ...CAPABILITY_BLUEPRINT, stages: CAPABILITY_BLUEPRINT.stages.map((stage, index) => index === 0 ? { ...stage, capabilities: ['只有一项'] } : stage) }), /至少 2 项/, '能力不足');
   assert.match(capabilityErrorOf({ ...CAPABILITY_BLUEPRINT, topBand: { kind: 'other', items: ['目标一', '目标二'] } }), /goals 或 core_scenarios/, '顶部类型非法');
-  const guarded = parseCapabilityMapBlueprint({ ...CAPABILITY_BLUEPRINT, assurance: ['CRM 内部数据'] }, { textGuard: caseInternalEvidenceLabel });
+  const guarded = parseCapabilityMapBlueprint({ ...CAPABILITY_BLUEPRINT, stages: CAPABILITY_BLUEPRINT.stages.map((stage, index) => index === 0 ? { ...stage, module: 'CRM 同步' } : stage) }, { textGuard: caseInternalEvidenceLabel });
   assert.ok('error' in guarded && /内部信息/.test(guarded.error), '内部信息禁区命中');
 });
 
@@ -5364,7 +5416,9 @@ test('workbench: renderCapabilityMapSvg creates deterministic adaptive blueprint
   const svg = renderCapabilityMapSvg(CAPABILITY_BLUEPRINT)!;
   assert.match(svg, /viewBox="0 0 1440 720"/, '固定 2:1 画布');
   assert.ok(svg.includes('id="cap-top"') && svg.includes('id="cap-main"') && svg.includes('id="cap-platform"')
-    && svg.includes('id="cap-integrations"') && svg.includes('id="cap-assurance"'), '五个有证据分区均出现');
+    && svg.includes('id="cap-integrations"'), '四个分区均出现（v17 无组织保障侧栏）');
+  assert.ok(!svg.includes('组织保障'), '组织保障分区已移除');
+  assert.ok(svg.includes('平台支撑') && svg.includes('系统集成'), '平台支撑/系统集成底带存在');
   assert.ok(svg.includes(`fill="${CAPABILITY_MAP_PALETTE.primary}"`) && svg.includes(`fill="${CAPABILITY_MAP_PALETTE.module}"`)
     && svg.includes(`fill="${CAPABILITY_MAP_PALETTE.panel}"`), '固定蓝图主题色');
   assert.equal((svg.match(/marker-end="url\(#cap-arrow\)"/g) ?? []).length, CAPABILITY_BLUEPRINT.stages.length - 1, '箭头只连接相邻阶段标题');
@@ -5376,36 +5430,66 @@ test('workbench: renderCapabilityMapSvg creates deterministic adaptive blueprint
   assert.ok(sanitizeCaseSvg(svg), '服务端模板产物通过 SVG 消毒');
   assert.equal(renderCapabilityMapSvg(CAPABILITY_BLUEPRINT), svg, '同输入输出稳定');
 
-  const sparse = renderCapabilityMapSvg({ stages: CAPABILITY_BLUEPRINT.stages.slice(0, 3).map((stage) => ({ ...stage, capabilities: stage.capabilities.slice(0, 2) })) })!;
-  assert.ok(!sparse.includes('id="cap-top"') && !sparse.includes('id="cap-platform"') && !sparse.includes('id="cap-assurance"'), '无证据可选区直接省略');
-  assert.ok(sanitizeCaseSvg(sparse), '稀疏三阶段图合法');
+  // 阶段恒 6~8：少于 6 列直接拒绝渲染（用户拍板：不画空槽、必须写满）。
+  assert.equal(renderCapabilityMapSvg({ stages: CAPABILITY_BLUEPRINT.stages.slice(0, 5).map((stage) => ({ ...stage, capabilities: stage.capabilities.slice(0, 2) })) }), null, '5 阶段拒绝');
+  const sparse = renderCapabilityMapSvg({ stages: CAPABILITY_BLUEPRINT.stages.map((stage) => ({ ...stage, capabilities: stage.capabilities.slice(0, 2) })) })!;
+  assert.ok(!sparse.includes('id="cap-top"') && !sparse.includes('id="cap-platform"') && !sparse.includes('id="cap-integrations"'), '未注入的底带省略');
+  assert.ok(sanitizeCaseSvg(sparse), '纯六阶段矩阵图合法');
   const dense = renderCapabilityMapSvg({ ...CAPABILITY_BLUEPRINT, topBand: { kind: 'core_scenarios', items: ['场景一', '场景二', '场景三', '场景四', '场景五', '场景六'] }, stages: [
     ...CAPABILITY_BLUEPRINT.stages,
     { label: '运营持续改进', module: 'ONES Performance', capabilities: ['交付效能分析', '质量趋势分析', '过程效能分析', '仪表盘展示', '多项目对比', '持续优化复盘'] },
-  ], assurance: ['体系保障一', '体系保障二', '体系保障三', '体系保障四', '体系保障五', '体系保障六'] })!;
-  assert.ok(dense && sanitizeCaseSvg(dense), '六阶段六能力密集图可渲染');
+  ] })!;
+  assert.ok(dense && sanitizeCaseSvg(dense), '七阶段六能力密集图可渲染');
 });
 
 test('workbench: value map blueprint enforces 3~5 paired items and deterministic three-zone render', () => {
-  const item = (index: number) => ({ title: `痛点${index}`, detail: `现状问题说明${index}，需要集中治理` });
-  const value = (index: number) => ({ title: `价值${index}`, detail: `已确认改善结果${index}，便于持续跟踪` });
+  const item = (index: number) => ({ title: `信息割裂${index}`, detail: `现状问题说明${index}，需要集中治理` });
+  const value = (index: number) => ({ title: `效率提升${index}`, detail: `已确认改善结果${index}，便于持续跟踪` });
   const blueprint: ValueMapBlueprint = { painPoints: [1, 2, 3, 4].map(item), values: [1, 2, 3, 4].map(value) };
   const parsed = parseValueMapBlueprint(blueprint);
   assert.ok('blueprint' in parsed, '四条痛点/价值通过校验');
   const svg = renderValueMapSvg((parsed as { blueprint: ValueMapBlueprint }).blueprint)!;
-  assert.match(svg, /viewBox="0 0 1440 720"/);
+  // v17：画布高度动态（以中间嵌入的解决方案架构图为锚），不再固定 720。
+  const dims = svg.match(/viewBox="0 0 1440 (\d+)"/)!;
+  const canvasH = Number(dims[1]);
+  assert.ok(canvasH >= 460 && canvasH < 720, `动态画布高（${canvasH}）：以架构图为锚、消除上下留白`);
   assert.ok(svg.includes('痛点及挑战') && svg.includes('id="value-map-solution-content"'), '三分区标题与方案槽位存在');
-  assert.match(svg, /x="24" y="32" width="300" height="656"/, '痛点栏位于左侧');
-  assert.match(svg, /x="340" y="32" width="760" height="656"/, '方案区位于中间且占比最大');
-  assert.match(svg, /x="1116" y="32" width="300" height="656"/, '价值栏位于右侧');
-  assert.equal((svg.match(/痛点[1-4]/g) ?? []).length, 4);
-  assert.equal((svg.match(/价值[1-4]/g) ?? []).length, 4);
+  const columnHeights = [...svg.matchAll(/x="(24|340|1116)" y="32" width="(300|760)" height="(\d+)"/g)].map((m) => Number(m[3]));
+  assert.equal(columnHeights.length, 3, '三列齐全');
+  assert.ok(new Set(columnHeights).size === 1 && columnHeights[0] === canvasH - 32 - 24, `三列同高且与画布联动（${columnHeights.join(',')}）`);
+  // 行对齐映射：第 i 行痛点卡与第 i 行价值卡 y/height 完全一致（水平对位）。
+  const painCards = [...svg.matchAll(/<rect x="40" y="([\d.]+)" width="268" height="([\d.]+)" rx="8"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+  const valueCards = [...svg.matchAll(/<rect x="1132" y="([\d.]+)" width="268" height="([\d.]+)" rx="7" fill="#FFFFFF"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+  assert.equal(painCards.length, 4, '四张痛点卡');
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal(painCards[index][0], valueCards[index][0], `第 ${index + 1} 行痛点/价值卡 y 对齐`);
+    assert.equal(painCards[index][1], valueCards[index][1], `第 ${index + 1} 行痛点/价值卡行高一致`);
+  }
+  // 列表整列垂直居中：富余空间上下均分（顶部 36 为标题牌设计区、底部 28 为设计留白，容差 1px）。
+  const extraTop = painCards[0][0] - 32 - 36;
+  const extraBottom = 32 + columnHeights[0] - 28 - (painCards[3][0] + painCards[3][1]);
+  assert.ok(Math.abs(extraTop - extraBottom) <= 1, `富余空间上下均分（上 ${extraTop} vs 下 ${extraBottom}）`);
+  assert.equal((svg.match(/信息割裂[1-4]/g) ?? []).length, 4);
+  assert.equal((svg.match(/效率提升[1-4]/g) ?? []).length, 4);
   assert.equal(renderValueMapSvg(blueprint), svg, '同输入输出稳定');
   assert.ok(sanitizeCaseSvg(svg), '确定性模板产物可消毒');
   assert.match((parseValueMapBlueprint({ ...blueprint, painPoints: [1, 2].map(item) }) as { error: string }).error, /3~5/);
   assert.match((parseValueMapBlueprint({ ...blueprint, values: [1, 2, 3].map(value) }) as { error: string }).error, /数量必须相等/);
+  // v17 措辞词库：痛点标题必含负向词、价值标题必含正向词（命中即反馈重试）。
+  const plainPain = { ...blueprint, painPoints: [1, 2, 3, 4].map((index) => ({ title: `现状描述${index}`, detail: `说明${index}` })) };
+  assert.match((parseValueMapBlueprint(plainPain) as { error: string }).error, /负向措辞/, '痛点标题缺负向词拒绝');
+  const plainValue = { ...blueprint, values: [1, 2, 3, 4].map((index) => ({ title: `结果描述${index}`, detail: `说明${index}` })) };
+  assert.match((parseValueMapBlueprint(plainValue) as { error: string }).error, /正向措辞/, '价值标题缺正向词拒绝');
   const five = { painPoints: [1, 2, 3, 4, 5].map(item), values: [1, 2, 3, 4, 5].map(value) };
-  assert.ok(renderValueMapSvg(five), '五条密集图可渲染');
+  const fiveSvg = renderValueMapSvg(five)!;
+  assert.ok(fiveSvg, '五条密集图可渲染');
+  assert.ok(Number(fiveSvg.match(/viewBox="0 0 1440 (\d+)"/)![1]) > canvasH, '五条列表更高时画布随之长高');
+  // 行首标点防御：断行点落在全角标点前时，标点吸附上一行行尾，不落在行首。
+  const punct = { painPoints: [1, 2, 3].map((i) => ({ title: `信息割裂${i}`, detail: `${'一'.repeat(17)}，后续说明${i}` })), values: [1, 2, 3].map((i) => ({ title: `效率提升${i}`, detail: `${'二'.repeat(17)}，对应改善${i}` })) };
+  const punctSvg = renderValueMapSvg((parseValueMapBlueprint(punct) as { blueprint: ValueMapBlueprint }).blueprint)!;
+  for (const line of [...punctSvg.matchAll(/<tspan x="[\d.]+" dy="18">([^<]*)<\/tspan>/g)].map((m) => m[1])) {
+    assert.ok(!/^[，。；、！？：）」』]/.test(line), `换行行首不得出现标点：${line}`);
+  }
 });
 
 // ── 架构图（architecture）v11：内容契约解析 + 服务端确定性模板渲染 ──
@@ -5450,8 +5534,8 @@ test('workbench: parseArchitectureGraph validates content contract (v11)', () =>
   assert.equal(oauthGraph.systems[0].modules.length, 2, '英文混排模块名按字宽通过');
   // 违规矩阵（每类返回可读错误，供重试日志）。
   const base = () => JSON.parse(JSON.stringify(ARCH_GRAPH_OA)) as Record<string, unknown>;
-  assert.match(archErrorOf({ ...base(), systems: [] }), /全空 graph|1~8/, '零系统（素材无对接场景）');
-  assert.match(archErrorOf({ ...base(), systems: Array.from({ length: 9 }, (_, i) => ({ id: `s${i}`, name: `系统${i}`, modules: [] })) }), /1~8/, '系统超上限');
+  assert.match(archErrorOf({ ...base(), systems: [] }), /全空 graph|1~6/, '零系统（素材无对接场景）');
+  assert.match(archErrorOf({ ...base(), systems: Array.from({ length: 7 }, (_, i) => ({ id: `s${i}`, name: `系统${i}`, modules: [] })) }), /1~6/, '系统超上限（v17 上限 6，与集成清单对齐）');
   assert.match(archErrorOf({ ...base(), systems: [{ id: 'ones', name: 'ONES', modules: [] }] }), /保留 id/, '保留 id 不得作外部系统');
   assert.match(archErrorOf({ ...base(), systems: [{ id: 'oa', name: 'OA 系统', modules: [] }, { id: 'oa', name: 'OA 二号', modules: [] }] }), /重复/, 'id 重复');
   assert.match(archErrorOf({ ...base(), systems: [{ id: '数据系统', name: 'OA 系统', modules: [] }] }), /小写字母/, 'id 格式非法');
@@ -5473,6 +5557,12 @@ test('workbench: parseArchitectureGraph validates content contract (v11)', () =>
   withCrm.hubModules[0] = 'CRM 同步';
   const guarded = parseArchitectureGraph(withCrm, { textGuard: caseInternalEvidenceLabel });
   assert.ok('error' in guarded && /内部信息/.test(guarded.error), `禁区词命中拒绝（实际：${'error' in guarded ? guarded.error : '通过'}` + '）');
+  // v17 两图同源：systems 必须与规划期集成系统清单完全一致（名称逐字、数量相等、不得增删）。
+  assert.ok('graph' in parseArchitectureGraph(ARCH_GRAPH_OA, { requiredSystemNames: ['OA 系统'] }), '清单一致通过');
+  const mismatched = parseArchitectureGraph(ARCH_GRAPH_OA, { requiredSystemNames: ['OA 系统', 'ERP 系统'] });
+  assert.ok('error' in mismatched && /集成系统清单完全一致/.test(mismatched.error) && /缺少 ERP 系统/.test(mismatched.error), '清单缺项拒绝');
+  const renamed = parseArchitectureGraph(ARCH_GRAPH_OA, { requiredSystemNames: ['OA'] });
+  assert.ok('error' in renamed && /多出 OA 系统/.test(renamed.error), '名称不一致拒绝（逐字比对）');
 });
 
 /** 从 SVG 提取全部矩形 [x,y,w,h]（按圆角半径分组，用于几何不变量断言）。 */
@@ -5511,8 +5601,9 @@ test('workbench: renderArchitectureSvg deterministic template invariants (v11)',
   assert.equal((svg.match(/marker-end=/g) ?? []).length, ARCH_GRAPH_OA.flows.length, '连线数=流数且必带箭头');
   const coral = ARCHITECTURE_FIGURE_PALETTE.externals[0].solid;
   assert.equal((svg.match(new RegExp(`<path [^>]*stroke="${coral}"`, 'g')) ?? []).length, 3, 'oa 发出流线色=其主题色');
-  assert.equal((svg.match(new RegExp(`rx="6" fill="#FFFFFF" stroke="${coral}"`, 'g')) ?? []).length, 3, '注释框数=流数且描边同色');
-  assert.ok(svg.includes('1、认证信息回传') && svg.includes('3、提交需求'), '编号注释标题存在');
+  // v17：注释卡按系统聚合（一系统一张，垫在其卡下方），流编号写进卡内行。
+  assert.equal((svg.match(new RegExp(`rx="6" fill="#FFFFFF" stroke="${coral}"`, 'g')) ?? []).length, 1, '注释卡数=系统数且描边同色');
+  assert.ok(svg.includes('1、认证信息回传') && svg.includes('3、提交需求'), '编号注释行存在');
   assert.ok(svg.includes('>ONES 平台<'), '枢纽标题牌存在');
   // 模块无重复（视觉评审踩坑：系统上半行 slice 多拿一格导致上下重复出现）。
   for (const label of [...ARCH_GRAPH_OA.systems[0].modules, ...ARCH_GRAPH_OA.hubModules]) {
@@ -5523,7 +5614,7 @@ test('workbench: renderArchitectureSvg deterministic template invariants (v11)',
   assert.ok(sanitized, '渲染产物过 sanitizeCaseSvg');
   assert.equal(sanitizeCaseSvg(sanitized!), sanitized, '消毒幂等');
   // 换行质量：ASCII 词不被拆行（视觉评审：账号ID 拆成 账号I / D）、全角左括号行首。
-  const bodyBlocks = [...svg.matchAll(/font-size="14"[^>]*>(.*?)<\/text>/g)].map((m) => m[1]);
+  const bodyBlocks = [...svg.matchAll(/font-size="13"[^>]*>(.*?)<\/text>/g)].map((m) => m[1]);
   for (const block of bodyBlocks) {
     const lines = [...block.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map((m) => m[1]);
     for (let i = 0; i + 1 < lines.length; i += 1) {
@@ -5536,7 +5627,7 @@ test('workbench: renderArchitectureSvg deterministic template invariants (v11)',
     .filter((line) => line.includes('关联字段')).every((line) => line.startsWith('（')), '（关联字段 整段从行首开始');
 });
 
-test('workbench: renderArchitectureSvg multi-system layout and density fallback (v11)', () => {
+test('workbench: renderArchitectureSvg multi-system layout and density fallback (v17)', () => {
   const graph: ArchitectureGraph = {
     systems: [
       { id: 'erp', name: 'ERP 系统', modules: ['物料主数据', '采购订单', '工单管理', '成本核算'] },
@@ -5545,7 +5636,6 @@ test('workbench: renderArchitectureSvg multi-system layout and density fallback 
       { id: 'pdm', name: 'PDM 系统', modules: ['产品文档', '图纸管理', '变更管理'] },
       { id: 'oa', name: 'OA 系统', modules: ['流程审批', '统一待办', '公告发布'] },
       { id: 'svn', name: 'SVN 系统', modules: [] },
-      { id: 'bi', name: 'BI 系统', modules: [] },
     ],
     hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库'],
     flows: [
@@ -5556,30 +5646,40 @@ test('workbench: renderArchitectureSvg multi-system layout and density fallback 
       { from: 'oa', to: 'ones', label: '审批联动', steps: [{ text: '审批通过自动创建需求与任务' }] },
       { from: 'ones', to: 'oa', label: '待办推送', steps: [{ text: '任务分配与到期提醒推送统一待办' }] },
       { from: 'ones', to: 'svn', label: '代码关联', steps: [{ text: '需求任务关联代码提交记录' }] },
-      { from: 'ones', to: 'bi', label: '数据供数', steps: [{ text: '项目效能数据输出 BI 报表', fields: ['项目ID'] }] },
     ],
   };
   const svg = renderArchitectureSvg(graph)!;
-  assert.ok(svg, '七系统图渲染成功');
+  assert.ok(svg, '六系统图渲染成功');
   const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
   assert.equal(Number(dims[1]), 1440, '系统集成图固定 1440 宽');
-  assert.ok(Number(dims[2]) <= 920, '高度不超上限');
-  // 上下分层系统与枢纽在垂直方向保持净距。
+  assert.equal(Number(dims[2]), 720, '固定 720 高');
+  // 左右两列系统与居中枢纽互不重叠。
   const hub = archRects(svg, '14')[0];
   for (const container of [...archRects(svg, '12'), ...archRects(svg, '8').filter((rect) => rect[2] > 350)]) {
     assert.ok(!rectsOverlap(container, hub), `容器 ${container.join(',')} 与枢纽 ${hub.join(',')} 重叠`);
   }
   // 双向流：ONES 发出的线用枢纽蓝。
   assert.ok(/<path [^>]*stroke="#1665D8"[^>]*marker-end/.test(svg), 'ONES 发出流用枢纽主题色');
-  // 无模块系统 = 实心系统级单块（rx=8、整列宽，区别于窄标题牌）。
-  assert.ok(archRects(svg, '8').length >= 2, 'SVN/BI 画成实心系统块');
-  // 压力规模（8 系统 × 6 模块）在四档密度内仍可渲染——模型按 prompt 上限如实输出不能丢图。
+  // 无模块系统与有模块系统同为「tint 容器 + 标题牌」形态（v17 统一视觉语言，不再画实心色块）。
+  assert.equal(archRects(svg, '12').length, 6, '六系统容器齐全且形态统一');
+  // 1~6 系统全部布局档可渲染（左右两列轮转：1→右、2→1+1、3→2+1、4→2+2、5→3+2、6→3+3）。
+  for (let count = 1; count <= 6; count += 1) {
+    const sized: ArchitectureGraph = {
+      systems: Array.from({ length: count }, (_, i) => ({ id: `sys${i}`, name: `系统${i}`, modules: ['模块一', '模块二', '模块三', '模块四', '模块五', '模块六'] })),
+      hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库'],
+      flows: Array.from({ length: count }, (_, i) => ({ from: i % 2 ? 'ones' : `sys${i}`, to: i % 2 ? `sys${i}` : 'ones', label: `对接${i}`, steps: [{ text: '数据对接内容' }] })),
+    };
+    const sizedSvg = renderArchitectureSvg(sized);
+    assert.ok(sizedSvg, `${count} 系统布局档渲染成功`);
+    assert.equal((sizedSvg!.match(/marker-end=/g) ?? []).length, count, `${count} 系统档连线数=流数`);
+  }
+  // 压力规模（6 系统 × 6 模块）在列预算+密度降档内仍可渲染——模型按 prompt 上限如实输出不能丢图。
   const stress: ArchitectureGraph = {
-    systems: Array.from({ length: 8 }, (_, i) => ({ id: `sys${i}`, name: `系统${i}`, modules: ['模块一', '模块二', '模块三', '模块四', '模块五', '模块六'] })),
+    systems: Array.from({ length: 6 }, (_, i) => ({ id: `sys${i}`, name: `系统${i}`, modules: ['模块一', '模块二', '模块三', '模块四', '模块五', '模块六'] })),
     hubModules: ['项目管理', '需求管理', '测试管理', '工时管理', '效能度量', '知识库', '流水线', '代码库'],
-    flows: Array.from({ length: 10 }, (_, i) => ({ from: i % 2 ? 'ones' : `sys${i}`, to: i % 2 ? `sys${i}` : 'ones', label: `对接${i}`, steps: [{ text: '数据对接内容' }] })),
+    flows: Array.from({ length: 6 }, (_, i) => ({ from: i % 2 ? 'ones' : `sys${i}`, to: i % 2 ? `sys${i}` : 'ones', label: `对接${i}`, steps: [{ text: '数据对接内容' }] })),
   };
-  assert.ok(renderArchitectureSvg(stress), '压力规模渲染成功（密度降档兜底）');
+  assert.ok(renderArchitectureSvg(stress), '压力规模渲染成功（列预算+密度降档兜底）');
 });
 
 test('workbench: renderArchitectureSvg corridor boxes never overlap or exceed canvas (v11.2)', () => {
@@ -5600,7 +5700,8 @@ test('workbench: renderArchitectureSvg corridor boxes never overlap or exceed ca
   const dims = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
   const [, height] = [Number(dims[1]), Number(dims[2])];
   const boxes = archRects(svg, '6');
-  assert.equal(boxes.length, dense.flows.length, '框数=流数');
+  // v17：注释卡按系统聚合（一系统一张，卡内行数按列预算钳制），卡与卡之间天然不叠画。
+  assert.equal(boxes.length, 1, '注释卡数=系统数');
   for (const box of boxes) {
     assert.ok(box[1] + box[3] <= height + 0.6, `框 (${box.join(',')}) 越出画布底部 ${height}`);
   }
@@ -5783,12 +5884,12 @@ test('workbench: milestone figure kind planned for value chapter and validated',
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: figure prompts carry kind-specific rules and ONES capability map (v12)', () => {
-  const base = { customerName: '示例客户', idea: '方案总览', chapterAnchor: '定稿正文', materials: ['[f1] 素材原文'] };
+test('workbench: figure prompts carry kind-specific rules and ONES capability map (v17)', () => {
+  const base = { customerName: '示例客户', idea: '方案总览', chapterAnchor: '定稿正文', materials: ['[f1] 素材原文'], integrationSystems: [] as string[] };
   const architecture = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'architecture' });
   assert.match(architecture, /系统集成架构图/, '架构图 brief 保留（测试路由短语）');
   assert.match(architecture, /不得虚构环节、模块或数字/, '事实边界原句保留');
-  assert.match(architecture, /本图不画 SVG/, 'v11：架构图只提取内容、由服务端模板渲染');
+  assert.match(architecture, /本图不画 SVG/, '架构图只提取内容、由服务端模板渲染');
   assert.match(architecture, /只输出 JSON：\{"caption":"\.\.\.","graph":\{\.\.\.\}/, 'graph 内容契约出厂');
   assert.match(architecture, /from=数据发出方、to=数据接收方/, '流方向语义');
   assert.match(architecture, /每条流必须有一端是 "ones"/, '流必须触达 ONES（kind 业务契约）');
@@ -5797,36 +5898,42 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.match(architecture, /每个不超过 11 字宽/, '模块字宽界');
   assert.match(architecture, /开放 API、单点登录等集成机制按实际采用可列入/, '集成机制可作枢纽模块');
   assert.match(architecture, /关联\/对应字段时放进同条 step 的 fields/, '关联字段写法');
-  assert.match(architecture, /超过 8 家只保留主要集成系统/, '外部系统上限与取舍指引');
+  assert.match(architecture, /必须与下方集成系统清单完全一致/, 'v17：systems 与集成清单同源契约');
+  assert.match(architecture, /集成系统清单为空/, '空清单时注入标准集成指引');
   assert.match(architecture, /【ONES 产品能力图谱/, '架构图注入能力图谱');
   assert.match(architecture, /不构成交付证据/, '图谱护栏');
   assert.ok(!architecture.includes('绘图规范'), '架构图不再携带 SVG 绘图规范');
   assert.ok(!architecture.includes('viewBox'), '架构图不再约束画布/坐标');
   assert.ok(!architecture.includes('tspan'), '架构图不再携带 SVG 文字排版规则');
-  assert.ok(!architecture.includes('需求场景-产品能力映射图'), '与映射图路由短语互斥');
+  assert.ok(!architecture.includes('业务场景矩阵'), '与解决方案架构图路由短语互斥');
+  const withList = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'architecture', integrationSystems: ['OA 系统', 'ERP 系统'] });
+  assert.match(withList, /集成系统清单（规划期从素材提取，唯一事实源）：OA 系统、ERP 系统/, '非空清单逐字注入');
   const capabilityMap = buildCaseFigurePrompt({ ...base, sectionLabel: '业务解决方案', kind: 'capability_map' });
-  assert.match(capabilityMap, /需求场景-产品能力映射图/, '映射图 brief');
-  assert.match(capabilityMap, /本图不画 SVG/, 'v12：映射图只提取内容、由服务端模板渲染');
+  assert.match(capabilityMap, /解决方案架构图/, 'v17 规范图名');
+  assert.match(capabilityMap, /本图不画 SVG/, '解决方案架构图只提取内容、由服务端模板渲染');
   assert.match(capabilityMap, /只输出 JSON：\{"caption":"\.\.\.","blueprint":\{\.\.\.\}/, 'blueprint 内容契约出厂');
-  assert.match(capabilityMap, /stages：按客户真实业务先后顺序排列 3~6 个阶段/, '阶段规模与顺序契约');
-  assert.match(capabilityMap, /platformCapabilities 可选/, '平台支撑可选区');
-  assert.match(capabilityMap, /assurance 可选/, '组织保障可选区');
-  assert.match(capabilityMap, /无证据时输出空数组或省略/, '可选区证据边界');
+  assert.match(capabilityMap, /stages：按客户真实业务先后顺序排列恒 6~8 个阶段/, '阶段规模恒 6~8（不画空槽）');
+  assert.match(capabilityMap, /依据下方 ONES 能力图谱按该客户业务域的典型研发现状补足到 6 个/, '素材不足时按图谱补足');
+  assert.match(capabilityMap, /平台支撑与系统集成两条底带由服务端固定渲染/, '平台支撑/系统集成服务端固定');
+  assert.match(capabilityMap, /topBand 可选/, '顶部带契约保留');
   assert.match(capabilityMap, /字宽口径：文本长度按显示字宽计/, '字宽口径');
-  assert.ok(!capabilityMap.includes('绘图规范'), '映射图不再携带 SVG 绘图规范');
-  assert.ok(!capabilityMap.includes('viewBox'), '映射图不再要求模型处理画布坐标');
-  assert.ok(!capabilityMap.includes('tspan'), '映射图不再要求模型处理 SVG 换行');
-  assert.match(capabilityMap, /【ONES 产品能力图谱/, '映射图注入能力图谱');
+  assert.ok(!capabilityMap.includes('绘图规范'), '解决方案架构图不再携带 SVG 绘图规范');
+  assert.ok(!capabilityMap.includes('viewBox'), '解决方案架构图不再要求模型处理画布坐标');
+  assert.ok(!capabilityMap.includes('tspan'), '解决方案架构图不再要求模型处理 SVG 换行');
+  assert.match(capabilityMap, /【ONES 产品能力图谱/, '解决方案架构图注入能力图谱');
+  assert.match(capabilityMap, /集成系统清单为空/, '空清单时集成带走标准集成兜底');
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
-  assert.match(valueMap, /痛点及挑战/, '全景图顶部标题固定');
-  assert.match(valueMap, /按序一一对位/, '痛点价值编号对位规则');
-  assert.match(valueMap, /痛点标题只写问题本身/, '痛点标题使用问题短语');
-  assert.match(valueMap, /价值标题与对应痛点逐条呼应/, '价值标题与痛点对应');
-  assert.match(valueMap, /从左到右「痛点及挑战｜方案｜价值」三栏/, '全景图左右布局');
-  assert.match(valueMap, /1440×720/, '2:1 横版画布');
+  assert.match(valueMap, /方案价值图/, 'v17 规范图名');
+  assert.match(valueMap, /痛点及挑战/, '价值图顶部标题固定');
+  assert.match(valueMap, /values\[i\] 必须是解决 painPoints\[i\] 的结果/, '痛点价值逐条映射契约');
+  assert.match(valueMap, /负向措辞/, '痛点标题负向词库');
+  assert.match(valueMap, /正向措辞/, '价值标题正向词库');
+  assert.match(valueMap, /从左到右「痛点及挑战｜方案｜价值」三栏/, '价值图左右布局');
+  assert.match(valueMap, /以中间嵌入的解决方案架构图为锚/, '画布比例以架构图为锚');
   assert.match(valueMap, /各 3~5 条且数量必须相等/, '痛点与价值数量契约');
-  assert.match(valueMap, /【ONES 产品能力图谱/, '全景图注入能力图谱');
+  assert.match(valueMap, /【ONES 产品能力图谱/, '价值图注入能力图谱');
   const flow = buildCaseFigurePrompt({ ...base, sectionLabel: '业务现状', kind: 'flow_current' });
+  assert.match(flow, /现状流程图/, 'v17 规范图名（流程现状图→现状流程图）');
   assert.match(flow, /节点总数不超过 10 个/, '流程图维持 v7 规模口径');
   assert.match(flow, /服务端会等比嵌入统一视觉外壳/, '流程图由服务端统一外壳');
   assert.match(flow, /高饱和色安全映射/, '流程图统一蓝色主题');
@@ -5845,11 +5952,12 @@ test('workbench: solution chapter carries capability_map plus architecture when 
       models: { complete: async (_model: unknown, input: any) => {
         const prompt = input.messages[0].content;
         if (prompt.includes('章节配图')) {
-          const isCapability = prompt.includes('需求场景-产品能力映射图');
+          // 路由按内容契约短语（v17：旧「需求场景-产品能力映射图」短语已随改名退役）。
+          const isCapability = prompt.includes('"blueprint"');
           if (isCapability) {
             return { content: [{ type: 'text', text: JSON.stringify(CAPABILITY_BLUEPRINT_RESPONSE) }], stopReason: 'stop' };
           }
-          // v11：架构图模型只供内容 graph，SVG 由服务端模板渲染。
+          // v17：架构图模型只供内容 graph（systems 与集成清单逐字一致），SVG 由服务端模板渲染。
           return { content: [{ type: 'text', text: JSON.stringify({ caption: '集成：多系统对接 ONES', graph: {
             systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录', '需求收集入口'] }],
             hubModules: ['用户与组织架构', '流程自动化', '需求管理', '权限管理'],
@@ -5860,7 +5968,9 @@ test('workbench: solution chapter carries capability_map plus architecture when 
           const base = casePlanContent(CASE_CONTENT, prompt);
           const refs = casePromptContext(prompt).allowed_source_refs as string[];
           const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
-          // 两图制：capability_map 标配 + 素材含集成表述时 architecture 加画，均挂解决方案章。
+          // 两图制：capability_map 标配 + 素材含集成表述时 architecture 加画，均挂解决方案章；
+          // v17：集成系统清单由规划输出（名称逐字来自素材原文），architecture 图随之规划。
+          base.integrationSystems = ['OA 系统'];
           base.figures = [
             { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
             { section: 'solution', kind: 'architecture', idea: '多系统集成架构：SSO 与数据对接', source_refs: [factRef] },
@@ -5875,22 +5985,74 @@ test('workbench: solution chapter carries capability_map plus architecture when 
     await waitForJob(db, result.jobId!);
     const draft = db.listCaseDrafts('crm-c1')[0];
     const figures = (draft.fields as any).figures ?? [];
-    assert.equal(figures.length, 2, '解决方案章两图共存（映射+架构）');
+    assert.equal(figures.length, 2, '解决方案章两图共存（架构+集成）');
     assert.ok(figures.every((figure: any) => figure.section === 'solution' && figure.svg.includes('viewBox')), '两图均挂解决方案章且为消毒后 SVG');
     const architectureFigure = figures.find((figure: any) => figure.kind === 'architecture');
     assert.ok(architectureFigure, '架构图存在');
     assert.ok(architectureFigure.svg.includes('ONES 平台'), '架构图为服务端模板渲染产物（graph→SVG）');
-    assert.ok(architectureFigure.svg.includes('1、认证信息回传'), '编号注释框由服务端生成');
-    assert.equal(architectureFigure.caption, '集成：多系统对接 ONES', '图注透传');
+    assert.ok(architectureFigure.svg.includes('1、认证信息回传'), '编号注释行由服务端生成');
+    assert.equal(architectureFigure.caption, '系统集成架构图', 'v17 图注确定性覆盖为规范图名');
     const markdown = renderCaseMarkdown(draft);
     const solutionStart = markdown.indexOf('（三）业务解决方案');
     const valueStart = markdown.indexOf('## 三、方案价值概述');
-    for (const caption of ['映射：需求场景对应产品能力', '集成：多系统对接 ONES']) {
+    for (const caption of ['解决方案架构图', '系统集成架构图']) {
       const noteIndex = markdown.indexOf(`> 图：${caption}`);
       assert.ok(noteIndex > -1, `图注存在: ${caption}`);
       assert.ok(solutionStart < noteIndex && noteIndex < valueStart, `图注在解决方案小节内: ${caption}`);
     }
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: integration systems plan contract validates provenance and gates architecture figure (v17)', async () => {
+  // 规划前三轮输出未在素材原文出现的系统名（逐字包含性校验拒绝+重试），末轮打捞丢弃非法名照常成稿；
+  // 清单为空时 architecture 图按规则不画（解决方案架构图系统集成带落 ONES 标准集成兜底）。
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-intsys-'));
+  const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = caseModelRetryDelays.baseMs;
+  caseModelRetryDelays.baseMs = 1;
+  try {
+    seedCaseCustomer(db);
+    let planCalls = 0;
+    let archFigurePromptSeen = false;
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_model: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          planCalls += 1;
+          const base = casePlanContent(CASE_CONTENT, prompt);
+          const refs = casePromptContext(prompt).allowed_source_refs as string[];
+          const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.integrationSystems = ['虚构门户系统'];
+          base.figures = [
+            { section: 'solution', kind: 'capability_map', idea: '方案蓝图', source_refs: [factRef] },
+            { section: 'solution', kind: 'architecture', idea: '集成架构', source_refs: [factRef] },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(base) }], stopReason: 'stop' };
+        }
+        if (prompt.includes('章节配图')) {
+          if (prompt.includes('"graph"')) archFigurePromptSeen = true;
+          return { content: [{ type: 'text', text: JSON.stringify(CAPABILITY_BLUEPRINT_RESPONSE) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const result = service.generate('crm-c1');
+    await waitForJob(db, result.jobId!);
+    assert.equal(planCalls, 4, '素材外系统名前三轮严格拒绝 + 末轮打捞');
+    assert.ok(!archFigurePromptSeen, '清单为空（打捞后丢弃）时 architecture 图不再规划/生成');
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const figures = (draft.fields as any).figures ?? [];
+    assert.equal(figures.length, 1, '只剩解决方案架构图');
+    const capabilityFigure = figures.find((figure: any) => figure.kind === 'capability_map');
+    assert.ok(capabilityFigure, '解决方案架构图存在');
+    assert.equal(capabilityFigure.caption, '解决方案架构图', 'v17 规范图名');
+    assert.ok(capabilityFigure.svg.includes('平台支撑') && capabilityFigure.svg.includes('权限管理') && capabilityFigure.svg.includes('审批中心'), '平台支撑固定词表渲染');
+    assert.ok(capabilityFigure.svg.includes('系统集成') && capabilityFigure.svg.includes('企业微信') && capabilityFigure.svg.includes('LDAP/AD'), '空清单落 ONES 标准集成兜底');
+    assert.ok(!capabilityFigure.svg.includes('组织保障'), '组织保障分区不再渲染');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('集成系统名称未通过校验')), '打捞丢弃轨迹进 unknowns');
+  } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: value_map merges pain/value anchors and embeds capability_map figure (v10)', async () => {
@@ -5905,19 +6067,19 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
         const prompt = input.messages[0].content;
         prompts.push(prompt);
         if (prompt.includes('章节配图')) {
-          // 分发须先判全景图：其 brief 也提到「需求场景-产品能力映射图」（方案区嵌入来源）。
-          if (prompt.includes('痛点-方案-价值全景图')) {
+          // 分发须先判价值图（v17：其专属规范含「解决方案架构图」字样，与解决方案架构图互串）。
+          if (prompt.includes('方案价值图：')) {
             return { content: [{ type: 'text', text: JSON.stringify({
               caption: '全景：三痛点对三价值收束',
               painPoints: [
                 { title: '进度信息分散', detail: '项目进展依赖人工汇总，延期风险暴露较晚' },
-                { title: '质量验收不稳', detail: '交付标准缺少统一留痕，问题反复沟通' },
-                { title: '资源投入难看清', detail: '预算、工时和资源使用缺乏统一视图' },
+                { title: '质量过程失控', detail: '交付标准缺少统一留痕，问题反复沟通' },
+                { title: '资源投入不透明', detail: '预算、工时和资源使用缺乏统一视图' },
               ],
               values: [
                 { title: '项目进度可控', detail: '排期、工时与实际进展集中呈现，及时调整' },
-                { title: '质量要求不跑偏', detail: '交付标准线上提交与核准，过程记录可追溯' },
-                { title: '资源投入有节奏', detail: '预算、工时与资源饱和度统一查看，提前调度' },
+                { title: '质量过程规范', detail: '交付标准线上提交与核准，过程记录可追溯' },
+                { title: '资源投入透明', detail: '预算、工时与资源饱和度统一查看，提前调度' },
               ],
             }) }], stopReason: 'stop' };
           }
@@ -5929,7 +6091,7 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
           const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
           base.figures = [
             { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
-            { section: 'value', kind: 'value_map', idea: '痛点-方案-价值全景图', source_refs: [factRef] },
+            { section: 'value', kind: 'value_map', idea: '方案价值图', source_refs: [factRef] },
             { section: 'solution', kind: 'value_map', idea: '非法组合（value_map 只挂价值章）', source_refs: [factRef] },
             { section: 'value', kind: 'capability_map', idea: '非法组合（capability_map 只挂解决方案章）', source_refs: [factRef] },
           ];
@@ -5950,11 +6112,11 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
     const valueMapFigure = figures.find((figure: any) => figure.kind === 'value_map');
     assert.ok(capabilityFigure && capabilityFigure.section === 'solution', '映射图挂解决方案章');
     assert.ok(valueMapFigure && valueMapFigure.section === 'value', '全景图挂价值章');
-    const capabilityPrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('需求场景-产品能力映射图'))!;
+    const capabilityPrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('"blueprint"'))!;
     assert.ok(capabilityPrompt, 'capability_map 逐图调用存在');
     assert.match(capabilityPrompt, /只输出 JSON：\{"caption":"\.\.\.","blueprint":\{\.\.\.\}/, '映射图 blueprint 内容契约');
     assert.match(capabilityPrompt, /【ONES 产品能力图谱/, '映射图注入能力图谱');
-    const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('痛点-方案-价值全景图'))!;
+    const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图') && prompt.includes('方案价值图：'))!;
     assert.ok(figurePrompt, 'value_map 逐图调用存在');
     // 锚点：痛点（现状/诉求）+ 价值两段注入；方案正文不再注入（方案区由服务端拼装）。
     assert.match(figurePrompt, /【痛点素材·业务现状】/, '锚点含业务现状定稿');
@@ -5963,29 +6125,30 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
     assert.ok(!figurePrompt.includes('【方案正文·业务解决方案】'), '方案正文不再注入锚点');
     assert.match(figurePrompt, /痛点及挑战/, '顶部标题固定');
     assert.match(figurePrompt, /各 3~5 条且数量必须相等/, '痛点与价值数量契约');
-    assert.match(figurePrompt, /【ONES 产品能力图谱/, '全景图注入能力图谱');
-    // 服务端拼装：value_map 落库 SVG 嵌入「方案」分区框+标题牌+映射图本体（含其标识内容）。
+    assert.match(figurePrompt, /【ONES 产品能力图谱/, '价值图注入能力图谱');
+    // 服务端拼装：value_map 落库 SVG 嵌入「方案」分区框+标题牌+解决方案架构图本体（含其标识内容）。
     assert.ok(valueMapFigure.svg.includes('方案'), '方案区标题牌');
-    assert.ok(valueMapFigure.svg.includes('<svg x="348" y="40"'), '映射图以中间方案区嵌套 svg 嵌入');
-    assert.ok(valueMapFigure.svg.includes('需求收集') && valueMapFigure.svg.includes('ONES Project'), '嵌入的是解决方案章映射图本体');
+    assert.ok(valueMapFigure.svg.includes('<svg x="348" y="68" width="744" height="372"'), '架构图以中间方案区嵌套 svg 等比嵌入（动态几何）');
+    assert.ok(valueMapFigure.svg.includes('需求收集') && valueMapFigure.svg.includes('ONES Project'), '嵌入的是解决方案章架构图本体');
     assert.ok(valueMapFigure.svg.includes('preserveAspectRatio="xMidYMid meet"'), '等比嵌入');
+    assert.equal(valueMapFigure.caption, '方案价值图', 'v17 图注确定性覆盖为规范图名');
     // Markdown 占位固定在价值章末尾（价值成效之后、项目总结之前）。
     const markdown = renderCaseMarkdown(draft);
-    const noteIndex = markdown.indexOf('> 图：全景：三痛点对三价值收束（图示详见工作台）');
-    assert.ok(noteIndex > -1, '全景图注占位存在');
+    const noteIndex = markdown.indexOf('> 图：方案价值图（图示详见工作台）');
+    assert.ok(noteIndex > -1, '价值图注占位存在');
     assert.ok(markdown.indexOf('### 价值成效') < noteIndex, '占位在价值成效之后');
     assert.ok(noteIndex < markdown.indexOf('## 四、项目总结'), '占位在项目总结之前');
-    const capabilityNoteIndex = markdown.indexOf('> 图：映射：需求场景对应产品能力（图示详见工作台）');
-    assert.ok(capabilityNoteIndex > -1, '映射图注占位存在');
-    assert.ok(markdown.indexOf('（三）业务解决方案') < capabilityNoteIndex && capabilityNoteIndex < markdown.indexOf('## 三、方案价值概述'), '映射图占位在解决方案小节内');
-    // docx 导出同位：全景图图注在「四、项目总结」之前。
+    const capabilityNoteIndex = markdown.indexOf('> 图：解决方案架构图（图示详见工作台）');
+    assert.ok(capabilityNoteIndex > -1, '架构图注占位存在');
+    assert.ok(markdown.indexOf('（三）业务解决方案') < capabilityNoteIndex && capabilityNoteIndex < markdown.indexOf('## 三、方案价值概述'), '架构图占位在解决方案小节内');
+    // docx 导出同位：价值图图注在「四、项目总结」之前。
     const exported = await service.exportDocx(draft.id)!;
     assert.ok(exported, '导出必须成功');
     const Zip = (await import('jszip')).default;
     const zip = await Zip.loadAsync(exported.buffer);
     const documentXml = await zip.file('word/document.xml')!.async('string');
-    const docxNoteIndex = documentXml.indexOf('全景：三痛点对三价值收束');
-    assert.ok(docxNoteIndex > -1, 'docx 含全景图注');
+    const docxNoteIndex = documentXml.indexOf('图：方案价值图');
+    assert.ok(docxNoteIndex > -1, 'docx 含价值图规范图注');
     assert.ok(docxNoteIndex < documentXml.indexOf('四、项目总结'), 'docx 图注在项目总结之前');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -6026,7 +6189,7 @@ test('workbench: case model slots release during retry backoff so queued chapter
       models: { complete: async (_model: unknown, input: any) => {
         const prompt = input.messages[0].content;
         if (prompt.includes('章节配图')) {
-          if (prompt.includes('需求场景-产品能力映射图')) {
+          if (prompt.includes('"blueprint"')) {
             capAttempts += 1;
             events.push(`figure:cap#${capAttempts}`);
             if (capAttempts === 1) { await nap(40); return { stopReason: 'error', errorMessage: 'relay stall', content: [] }; }
@@ -6034,7 +6197,7 @@ test('workbench: case model slots release during retry backoff so queued chapter
           }
           events.push('figure:arch');
           await nap(200);
-          // v11：架构图模型只供内容 graph，SVG 由服务端模板渲染。
+          // v17：架构图模型只供内容 graph（systems 与集成清单逐字一致），SVG 由服务端模板渲染。
           return { content: [{ type: 'text', text: JSON.stringify({ caption: '集成：多系统对接 ONES', graph: {
             systems: [{ id: 'oa', name: 'OA 系统', modules: ['单点认证', '通讯录用户目录'] }],
             hubModules: ['用户与组织架构', '流程自动化', '需求管理'],
@@ -6046,6 +6209,7 @@ test('workbench: case model slots release during retry backoff so queued chapter
           const base = casePlanContent(CASE_CONTENT, prompt);
           const refs = casePromptContext(prompt).allowed_source_refs as string[];
           const factRef = refs.find((ref: string) => !ref.startsWith('customer:')) ?? refs[0];
+          base.integrationSystems = ['OA 系统'];
           base.figures = [
             { section: 'solution', kind: 'capability_map', idea: '需求场景与产品能力映射', source_refs: [factRef] },
             { section: 'solution', kind: 'architecture', idea: '多系统集成架构', source_refs: [factRef] },
@@ -6081,8 +6245,8 @@ test('workbench: case figures start per finished chapter instead of waiting for 
       models: { complete: async (_model: unknown, input: any) => {
         const prompt = input.messages[0].content;
         if (prompt.includes('章节配图')) {
-          events.push(prompt.includes('流程现状图') ? 'figure:flow_current' : 'figure:flow_target');
-          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG, caption: prompt.includes('流程现状图') ? '客户现状：三套系统并行' : '目标：统一平台流转' }) }], stopReason: 'stop' };
+          events.push(prompt.includes('现状流程图') ? 'figure:flow_current' : 'figure:flow_target');
+          return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG, caption: prompt.includes('现状流程图') ? '客户现状：三套系统并行' : '目标：统一平台流转' }) }], stopReason: 'stop' };
         }
         if (prompt.includes('规划客户成功案例草稿的章节结构')) {
           const base = casePlanContent(CASE_CONTENT, prompt);
@@ -6135,7 +6299,7 @@ test('workbench: case enrichment runs parallel to remaining figures and reuses g
       models: { complete: async (_model: unknown, input: any) => {
         const prompt = input.messages[0].content;
         prompts.push(prompt);
-        if (prompt.includes('章节配图') && prompt.includes('需求场景-产品能力映射图')) {
+        if (prompt.includes('章节配图') && prompt.includes('"blueprint"')) {
           events.push('figure:cap');
           await nap(300);
           events.push('figure:cap:end');
@@ -6176,7 +6340,7 @@ test('workbench: case enrichment runs parallel to remaining figures and reuses g
     assert.ok(lines.length >= 2, 'progress 多行滚动');
     assert.ok(lines.every((line) => line.trim().length > 0), '无空行');
     assert.ok(String(job.progress).includes('补充完善调用（输入 ~'), '补写尺寸观测行保留');
-    assert.ok(String(job.progress).includes('配图「需求场景-产品能力映射图」调用'), '配图尺寸观测行保留');
+    assert.ok(String(job.progress).includes('配图「解决方案架构图」调用'), '配图尺寸观测行保留（v17 规范图名）');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

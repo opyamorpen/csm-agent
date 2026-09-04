@@ -30,3 +30,28 @@ export const ONES_CAPABILITY_MAP = [
   '- 数据迁移：Jira 迁移工具（史诗/故事/缺陷/任务映射）、Confluence 空间迁移、CSV/Excel 批量导入工作项',
   '【图谱边界】以上仅用于准确命名 ONES 产品模块与集成机制；某能力是否已为客户交付/配置/打通，必须以案例素材证据为准，图谱本身不构成交付证据。',
 ].join('\n');
+
+/**
+ * ONES 平台支撑能力清单（v17）：解决方案架构图「平台支撑」带的确定性渲染词表，模型不参与。
+ *
+ * 只收录平台底层配置/管理性质能力（用户拍板：一定是 ONES 支持的底层能力），全部词条源自
+ * ones-product-knowledge 技能库 SKILL.md（2026-05-12 版）2.7 账号与安全、2.1 基础能力、
+ * 2.2.6 页面审批、5.4 开放 API 与第九章部署运维；用户举例的「审批引擎」在产品中的真名是
+ * 「审批中心」（页面审批/变更审批），按产品真名收录。全客户恒定展示，不依赖客户素材证据。
+ */
+export const ONES_PLATFORM_CAPABILITIES: ReadonlyArray<{ title: string; detail: string }> = [
+  { title: '权限管理', detail: '五级权限·角色模板' },
+  { title: '流程自定义', detail: '工作流与状态流转' },
+  { title: '字段自定义', detail: '自定义字段与表单' },
+  { title: '流程自动化', detail: '事件触发流转通知' },
+  { title: '审批中心', detail: '页面与变更审批' },
+  { title: '单点登录', detail: '企微/钉钉/飞书/LDAP' },
+  { title: '开放 API', detail: 'OpenAPI·OAuth 2.0' },
+  { title: '报表仪表盘', detail: '多维报表与仪表盘' },
+];
+
+/**
+ * ONES 开箱即用标准集成（v17）：规划期未从素材识别到集成系统时，解决方案架构图「系统集成」带
+ * 的确定性兜底清单（用户拍板），此时不画系统集成架构图。均为 ONES 标准连接能力，无需客户素材证据。
+ */
+export const ONES_STANDARD_INTEGRATIONS: readonly string[] = ['企业微信', '钉钉', '飞书', 'LDAP/AD'];

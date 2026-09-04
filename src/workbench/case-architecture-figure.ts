@@ -1,10 +1,10 @@
 /**
- * 案例配图·系统集成架构图（architecture）——内容契约解析 + 服务端确定性模板渲染（case-v13）。
+ * 案例配图·系统集成架构图（architecture）——内容契约解析 + 服务端确定性模板渲染（v17 重排）。
  *
- * 设计原则：模板固定「形态」（画布、主题色表、中心枢纽、星形走线、编号注释框、三级字号），
- * 客户间差异（外部系统数量/名称/模块/流向）全部由模型输出的内容 graph 吸收——多系统围枢纽
- * 与单系统对接（OA+ONES）是同一骨架的两个实例。模型不再手绘 SVG（v9/v10 实测：主题色、
- * 占满画布等软约束屡被无视），渲染产物仍过 sanitizeCaseSvg 兜底（服务端产物当防御，非裁判）。
+ * 设计原则：模板固定「形态」（画布、主题色表、中心枢纽、左右两列夹峙布局、水平直线走线、
+ * 系统就近注释卡、三级字号），客户间差异（外部系统数量/名称/模块/流向）全部由模型输出的
+ * 内容 graph 吸收。v17 起 systems 必须与规划期提取的集成系统清单完全一致（requiredSystemNames
+ * 校验，两图同源），上限 6 家。模型不再手绘 SVG，渲染产物仍过 sanitizeCaseSvg 兜底。
  */
 
 export interface ArchitectureFlowStep {
@@ -37,7 +37,8 @@ export type ArchitectureGraphParse = { graph: ArchitectureGraph } | { error: str
 export const ARCHITECTURE_HUB_KEY = 'ones';
 
 export const ARCHITECTURE_LIMITS = {
-  systems: 8,
+  /** v17：集成系统上限与规划期提取的集成清单对齐（≤6）。 */
+  systems: 6,
   systemModules: 6,
   /** 文本长度界按显示宽度（em）：汉字计 1、英文/数字约计 0.6（widthEm）。 */
   nameWidthEm: 12,
@@ -100,7 +101,7 @@ function cleanText(value: unknown): string | null {
  * 文本长度界与禁区词（textGuard 由调用方注入，复用案例正文内部证据检查）。
  * 重复模块/字段静默去重；规模轻微超限静默截断（长度/引用类错误才拒绝）。
  */
-export function parseArchitectureGraph(value: unknown, opts: { textGuard?: (text: string) => string | null } = {}): ArchitectureGraphParse {
+export function parseArchitectureGraph(value: unknown, opts: { textGuard?: (text: string) => string | null; requiredSystemNames?: readonly string[] } = {}): ArchitectureGraphParse {
   const guard = opts.textGuard ?? (() => null);
   const errors: string[] = [];
   const push = (message: string) => {
@@ -139,6 +140,19 @@ export function parseArchitectureGraph(value: unknown, opts: { textGuard?: (text
     systems.push({ id, name, modules: modules.slice(0, ARCHITECTURE_LIMITS.systemModules) });
   }
   if (!systems.length) return { error: `systems 无合法条目（${errors[0] ?? '结构错误'}）` };
+  // v17：systems 必须与规划期提取的集成系统清单完全一致（两图同源契约，名称逐字、数量相等）。
+  if (opts.requiredSystemNames?.length) {
+    const required = [...new Set(opts.requiredSystemNames)];
+    const actual = systems.map((system) => system.name);
+    const missing = required.filter((name) => !actual.includes(name));
+    const extra = actual.filter((name) => !required.includes(name));
+    if (missing.length || extra.length) {
+      const parts: string[] = [];
+      if (missing.length) parts.push(`缺少 ${missing.join('、')}`);
+      if (extra.length) parts.push(`多出 ${extra.join('、')}`);
+      return { error: `systems 必须与集成系统清单完全一致（清单：${required.join('、')}；${parts.join('；')}）——名称逐字使用清单原文、数量相等、不得增删` };
+    }
+  }
 
   const hubModules = [...new Set((Array.isArray(raw.hubModules) ? raw.hubModules : []).map((module) => cleanText(module) ?? '').filter(Boolean))];
   if (hubModules.length < ARCHITECTURE_LIMITS.hubModulesMin || hubModules.length > ARCHITECTURE_LIMITS.hubModules) {
@@ -195,23 +209,31 @@ export function parseArchitectureGraph(value: unknown, opts: { textGuard?: (text
 /* ---------------------------------- 渲染 ---------------------------------- */
 
 /**
- * 系统集成图固定为 2:1 蓝图画布。外部系统上下分层，中央 ONES 是视觉重心，
- * 注释卡放在左右信息栏而不是挤在系统与枢纽之间的狭窄走廊。布局只由 graph 决定，
- * 因而同一 graph 每次都会得到相同的 SVG。
+ * 系统集成架构图固定为 2:1 蓝图画布（v17：1~6 系统按左右两列夹峙中心 ONES 枢纽的工程化布局）。
+ * 外部系统按业务重要性左右轮转入列（1→右；2→左右各一；3→左2右1；4→2+2；5→3+2；6→3+3），
+ * 每列按系统数分配模块卡与注释行预算（列内 1/2/3 家 → 模块 ≤6/≤4/≤2、注释 ≤8/≤6/≤4 行），
+ * 三档密度兜底。走线为「系统卡侧缘 ↔ 枢纽侧缘」的水平直线（每系统一行、天然无交叉，同系统
+ * 多条流以 ±8/±12px 平行错开；卡片中心落在枢纽纵向范围外时经走廊中点正交折转）；注释卡直接
+ * 垫在所属系统卡下方（就近可读），不再使用左右独立注释栏。
  */
 const CANVAS_W = 1440;
 const CANVAS_H = 720;
 const MARGIN_X = 24;
 const MARGIN_Y = 24;
-const EXTERNAL_X0 = 340;
-const EXTERNAL_X1 = 1100;
-const HUB_X = 430;
-const HUB_W = 580;
+const COL_W = 320;
+const LEFT_X = MARGIN_X;
+const RIGHT_X = CANVAS_W - MARGIN_X - COL_W;
+const HUB_W = 600;
+const HUB_X = Math.round((CANVAS_W - HUB_W) / 2);
 const HUB_MIN_H = 176;
 const CARD_FILL = '#FFFFFF';
 const CARD_STROKE = '#C8D9EE';
 const CARD_TEXT = '#1F2329';
 const LINE_GAP = 18;
+const ANN_PAD = 10;
+const ANN_LINE_H = 16;
+const STACK_GAP = 10;
+const SYSTEM_GAP = 16;
 const TRAILING_PUNCTUATION = new Set(['）', '」', '』', '、', '，', '。', '；', '：', '！', '？', '>']);
 
 interface DensitySpec {
@@ -230,6 +252,13 @@ const DENSITY_LEVELS: DensitySpec[] = [
   { cardH: 44, cardGap: 7, pad: 10, titleH: 44, hubCardH: 38, hubGap: 10, hubPad: 16, hubTitleH: 44 },
   { cardH: 40, cardGap: 6, pad: 8, titleH: 40, hubCardH: 34, hubGap: 8, hubPad: 12, hubTitleH: 40 },
 ];
+
+/** 每列系统数 → 模块卡预算与注释行预算（列越挤预算越紧，保证任何 1~6 系统都装得下 720 高画布）。 */
+const COLUMN_BUDGETS: Record<number, { modules: number; annLines: number }> = {
+  1: { modules: 6, annLines: 8 },
+  2: { modules: 4, annLines: 6 },
+  3: { modules: 2, annLines: 4 },
+};
 
 const esc = (text: string): string => text.replace(/[&<>"']/g, (char) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[char] as string
@@ -265,10 +294,11 @@ function wrapMeasured(text: string, maxWidth: number, fontSize: number): string[
 }
 
 interface Box { x: number; y: number; w: number; h: number; label: string }
-interface LaidOutSystem { node: ArchitectureSystemNode; x: number; y: number; w: number; h: number; titleY: number; modules: Box[]; solid: boolean; row: 'top' | 'bottom'; }
-interface FlowLane { index: number; flow: ArchitectureFlow; system: LaidOutSystem; side: 'left' | 'right'; sourceX: number; sourceY: number; hubX: number; hubY: number; routeY: number; }
-interface Annotation { lane: FlowLane; x: number; y: number; w: number; h: number; titleLines: string[]; bodyLines: string[]; }
-interface CanvasLayout { width: number; height: number; hub: { x: number; y: number; w: number; h: number; modules: Box[]; titleY: number; titleH: number }; systems: LaidOutSystem[]; lanes: FlowLane[]; annotations: Annotation[]; density: DensitySpec; }
+interface LaidOutSystem { node: ArchitectureSystemNode; x: number; y: number; w: number; h: number; titleY: number; modules: Box[]; side: 'left' | 'right' }
+interface AnnotationCard { system: LaidOutSystem; x: number; y: number; w: number; h: number; header: string; lines: string[] }
+/** 走线：卡片侧缘(卡片中心高) ⇄ 走廊中点(竖直折转) ⇄ 枢纽侧缘(laneY)。cardY≠laneY 时三段正交折线。 */
+interface FlowLane { index: number; flow: ArchitectureFlow; system: LaidOutSystem; cardY: number; laneY: number; corridorX: number; cardX: number; hubX: number }
+interface CanvasLayout { width: number; height: number; hub: { x: number; y: number; w: number; h: number; modules: Box[]; titleY: number; titleH: number }; systems: LaidOutSystem[]; lanes: FlowLane[]; annotations: AnnotationCard[]; density: DensitySpec }
 
 function centeredBoxes(labels: string[], x: number, y: number, w: number, cardW: number, cardH: number, gap: number): Box[] {
   const rowW = labels.length * cardW + Math.max(0, labels.length - 1) * gap;
@@ -276,33 +306,38 @@ function centeredBoxes(labels: string[], x: number, y: number, w: number, cardW:
   return labels.map((label, index) => ({ x: start + index * (cardW + gap), y, w: cardW, h: cardH, label }));
 }
 
-function layoutSystem(node: ArchitectureSystemNode, x: number, y: number, w: number, d: DensitySpec, row: 'top' | 'bottom'): LaidOutSystem {
-  if (!node.modules.length) return { node, x, y, w, h: d.titleH + 20, titleY: y + 10, modules: [], solid: true, row };
+/** 系统块布局（y 一律先按 0 计算，列内堆叠定位后再整体平移 y/titleY/modules——vision 验收教训：
+ * 只赋 system.y 不平移内部坐标会把标题牌与模块卡全部画到画布顶部）。无模块系统同样画
+ * 「tint 容器 + 标题牌」的统一形态（不再画实心色块，跨客户视觉语言一致）。 */
+function layoutSystem(node: ArchitectureSystemNode, x: number, y: number, w: number, d: DensitySpec, side: 'left' | 'right'): LaidOutSystem {
+  if (!node.modules.length) return { node, x, y, w, h: d.pad + d.titleH + d.pad, titleY: y + d.pad, modules: [], side };
   const cardW = (w - 2 * d.pad - d.cardGap) / 2;
   const rows = Math.ceil(node.modules.length / 2);
   const modules: Box[] = [];
   for (let index = 0; index < rows; index += 1) {
     modules.push(...centeredBoxes(node.modules.slice(index * 2, index * 2 + 2), x + d.pad, y + d.pad + d.titleH + index * (d.cardH + d.cardGap), w - 2 * d.pad, cardW, d.cardH, d.cardGap));
   }
-  return { node, x, y, w, h: 2 * d.pad + d.titleH + rows * d.cardH + (rows - 1) * d.cardGap, titleY: y + d.pad, modules, solid: false, row };
+  return { node, x, y, w, h: 2 * d.pad + d.titleH + rows * d.cardH + (rows - 1) * d.cardGap, titleY: y + d.pad, modules, side };
+}
+
+/** 系统注释卡：该系统全部数据流收进一张卡（编号+方向+数据内容），行数按列预算钳制。 */
+function buildAnnotation(system: LaidOutSystem, flows: Array<{ index: number; flow: ArchitectureFlow }>, annLines: number): AnnotationCard {
+  const innerW = COL_W - ANN_PAD * 2 - 8;
+  const lines: string[] = [];
+  for (const entry of flows) {
+    const direction = entry.flow.from === ARCHITECTURE_HUB_KEY ? `ONES → ${system.node.name}` : `${system.node.name} → ONES`;
+    lines.push(...wrapMeasured(`${entry.index + 1}、${entry.flow.label}（${direction}）`, innerW, 13).slice(0, 1));
+    const body = entry.flow.steps.map((step) => step.text + (step.fields?.length ? `（关联字段：${step.fields.join('、')}）` : '')).join('；');
+    lines.push(...wrapMeasured(body, innerW, 13).slice(0, 2));
+  }
+  const kept = lines.length > annLines ? [...lines.slice(0, Math.max(1, annLines - 1)), '…'] : lines;
+  return { system, x: system.x, y: 0, w: COL_W, h: ANN_PAD * 2 + 18 + kept.length * ANN_LINE_H + 4, header: system.node.name, lines: kept };
 }
 
 function layoutCanvas(graph: ArchitectureGraph, d: DensitySpec): CanvasLayout | null {
   const count = graph.systems.length;
-  const topCount = Math.ceil(count / 2);
-  const bottomCount = count - topCount;
-  const gap = 16;
-  const rowLayout = (nodes: ArchitectureSystemNode[], row: 'top' | 'bottom'): LaidOutSystem[] => {
-    if (!nodes.length) return [];
-    const available = EXTERNAL_X1 - EXTERNAL_X0;
-    const w = Math.min(360, (available - (nodes.length - 1) * gap) / nodes.length);
-    const start = EXTERNAL_X0 + (available - (nodes.length * w + (nodes.length - 1) * gap)) / 2;
-    const heights = nodes.map((node) => layoutSystem(node, 0, 0, w, d, row).h);
-    const maxH = Math.max(...heights);
-    const y = row === 'top' ? MARGIN_Y : CANVAS_H - MARGIN_Y - maxH;
-    return nodes.map((node, index) => layoutSystem(node, start + index * (w + gap), y, w, d, row));
-  };
-  const systems = [...rowLayout(graph.systems.slice(0, topCount), 'top'), ...rowLayout(graph.systems.slice(topCount), 'bottom')];
+  if (count < 1 || count > ARCHITECTURE_LIMITS.systems) return null;
+  // 枢纽（恒居中）。
   const hubCols = graph.hubModules.length > 6 ? 4 : graph.hubModules.length > 3 ? 3 : 2;
   const hubCardW = (HUB_W - 2 * d.hubPad - (hubCols - 1) * d.hubGap) / hubCols;
   const hubRows = Math.ceil(graph.hubModules.length / hubCols);
@@ -312,51 +347,74 @@ function layoutCanvas(graph: ArchitectureGraph, d: DensitySpec): CanvasLayout | 
   for (let index = 0; index < hubRows; index += 1) {
     hubModules.push(...centeredBoxes(graph.hubModules.slice(index * hubCols, index * hubCols + hubCols), HUB_X + d.hubPad, hubY + d.hubPad + d.hubTitleH + 12 + index * (d.hubCardH + d.hubGap), HUB_W - 2 * d.hubPad, hubCardW, d.hubCardH, d.hubGap));
   }
-  const maxSystemH = Math.max(...systems.map((system) => system.h));
-  if (MARGIN_Y + maxSystemH >= hubY - 12 || CANVAS_H - MARGIN_Y - maxSystemH <= hubY + hubH + 12) return null;
 
-  const perSystem = new Map<string, number>();
-  const lanes: FlowLane[] = [];
-  const flowSideCounts = { left: 0, right: 0 };
+  // 数据流按系统归组（保持 graph 顺序，编号即注释卡里的序号）。
+  const flowsBySystem = new Map<string, Array<{ index: number; flow: ArchitectureFlow }>>();
   for (const [index, flow] of graph.flows.entries()) {
     const id = flow.from === ARCHITECTURE_HUB_KEY ? flow.to : flow.from;
-    const system = systems.find((item) => item.node.id === id);
-    if (!system) continue;
-    const seq = perSystem.get(id) ?? 0; perSystem.set(id, seq + 1);
-    const desiredSide: 'left' | 'right' = system.x + system.w / 2 < CANVAS_W / 2 ? 'left' : 'right';
-    const side = flowSideCounts[desiredSide] <= flowSideCounts[desiredSide === 'left' ? 'right' : 'left'] + 2 ? desiredSide : desiredSide === 'left' ? 'right' : 'left';
-    flowSideCounts[side] += 1;
-    const sourceX = Math.round(system.x + system.w / 2);
-    const sourceY = system.row === 'top' ? Math.round(system.y + system.h) : Math.round(system.y);
-    const hubYEdge = system.row === 'top' ? hubY : hubY + hubH;
-    const hubX = Math.round(HUB_X + 46 + ((seq + index) % Math.max(1, Math.floor((HUB_W - 92) / 92))) * 92);
-    lanes.push({ index, flow, system, side, sourceX, sourceY, hubX: Math.min(HUB_X + HUB_W - 32, hubX), hubY: hubYEdge, routeY: system.row === 'top' ? hubY - 18 : hubY + hubH + 18 });
+    const bucket = flowsBySystem.get(id) ?? [];
+    bucket.push({ index, flow });
+    flowsBySystem.set(id, bucket);
   }
 
-  const makeAnnotation = (lane: FlowLane): Annotation => {
-    const x = lane.side === 'left' ? MARGIN_X : CANVAS_W - MARGIN_X - 300;
-    const titleLines = wrapMeasured(`${lane.index + 1}、${lane.flow.label}`, 276, 15).slice(0, 2);
-    const bodyLines: string[] = [];
-    for (const step of lane.flow.steps) {
-      bodyLines.push(...wrapMeasured(step.text, 276, 14));
-      if (step.fields?.length) bodyLines.push(...wrapMeasured(`（关联字段：${step.fields.join('、')}）`, 276, 14));
-    }
-    const kept = bodyLines.length > 5 ? [...bodyLines.slice(0, 4), '…'] : bodyLines;
-    return { lane, x, y: 0, w: 300, h: 18 + titleLines.length * 19 + 18 + 14 + kept.length * LINE_GAP, titleLines, bodyLines: kept };
-  };
-  const annotations = lanes.map(makeAnnotation);
+  // 左右轮转入列：重要者先占左列上位（1 家时只占右列）。预算按【最终列内数量】统一切块——
+  // 若按推送时的列内序号取预算，先入列的系统会按 k=1 的宽松预算带满 6 模块，列总高必然超限。
+  const columnOf = (index: number): 'left' | 'right' => (count === 1 ? 'right' : index % 2 === 0 ? 'left' : 'right');
+  const columns: Record<'left' | 'right', LaidOutSystem[]> = { left: [], right: [] };
+  const annotations: AnnotationCard[] = [];
+  const columnCounts = { left: graph.systems.filter((_item, seat) => columnOf(seat) === 'left').length, right: graph.systems.filter((_item, seat) => columnOf(seat) === 'right').length };
+  for (const [index, node] of graph.systems.entries()) {
+    const side = columnOf(index);
+    const budget = COLUMN_BUDGETS[Math.min(3, columnCounts[side])];
+    columns[side].push(layoutSystem({ ...node, modules: node.modules.slice(0, budget.modules) }, side === 'left' ? LEFT_X : RIGHT_X, 0, COL_W, d, side));
+  }
+
+  const lanes: FlowLane[] = [];
+  const systems: LaidOutSystem[] = [];
   for (const side of ['left', 'right'] as const) {
-    const entries = annotations.filter((item) => item.lane.side === side).sort((a, b) => a.lane.index - b.lane.index);
-    let cursor = MARGIN_Y;
-    for (const entry of entries) { entry.y = cursor; cursor += entry.h + 12; }
-    if (cursor > CANVAS_H - MARGIN_Y) {
-      let floor = CANVAS_H - MARGIN_Y;
-      for (let index = entries.length - 1; index >= 0; index -= 1) { floor -= entries[index].h; entries[index].y = floor; floor -= 12; }
+    const laid = columns[side];
+    if (!laid.length) continue;
+    const budget = COLUMN_BUDGETS[laid.length];
+    const anns = laid.map((system) => buildAnnotation(system, flowsBySystem.get(system.node.id) ?? [], budget.annLines));
+    const total = laid.reduce((sum, system, index) => sum + system.h + STACK_GAP + anns[index].h, 0) + (laid.length - 1) * SYSTEM_GAP;
+    if (total > CANVAS_H - MARGIN_Y * 2) return null; // 该档密度装不下 → 降档重排
+    let y = Math.round((CANVAS_H - total) / 2);
+    for (const [index, system] of laid.entries()) {
+      // 列内定位后整体平移内部坐标（titleY/modules 均按 y=0 布局计算）。
+      system.titleY += y;
+      for (const box of system.modules) box.y += y;
+      system.y = y;
+      anns[index].y = y + system.h + STACK_GAP;
+      y += system.h + STACK_GAP + anns[index].h + SYSTEM_GAP;
+    }
+    systems.push(...laid);
+    annotations.push(...anns);
+    // 走线锚点：卡片侧缘取卡片中心（同系统多流 ±8/±12 平行错开）；枢纽侧缘 laneY 也按流序
+    // 错开（同系统双向对线不共用锚点，防末段共线压箭头），撞点向枢纽内逐级错开防共线重叠；
+    // 竖直折转段走走廊中点附近。
+    const usedLaneY = new Set<number>();
+    for (const system of laid) {
+      const sysFlows = flowsBySystem.get(system.node.id) ?? [];
+      const cardX = system.side === 'left' ? system.x + system.w : system.x;
+      const hubEdgeX = system.side === 'left' ? HUB_X : HUB_X + HUB_W;
+      const corridorBase = Math.round((cardX + hubEdgeX) / 2);
+      const cardCenter = Math.round(system.y + system.h / 2);
+      const laneBase = Math.min(Math.max(cardCenter, hubY + 24), hubY + hubH - 24);
+      for (const [ordinal, entry] of sysFlows.entries()) {
+        const offset = sysFlows.length === 1 ? 0 : sysFlows.length === 2 ? (ordinal === 0 ? -8 : 8) : [-12, 0, 12][ordinal % 3];
+        const cardY = cardCenter + offset;
+        const clampLane = (value: number) => Math.min(Math.max(value, hubY + 20), hubY + hubH - 20);
+        let laneY = sysFlows.length > 1 ? clampLane(laneBase + (ordinal % 2 === 0 ? -7 : 7)) : laneBase;
+        // 同侧任意已用锚点距离 <10px 即继续下移（箭头三角高 11px，靠太近会咬合）。
+        while ([...usedLaneY].some((used) => Math.abs(used - laneY) < 10) && laneY < hubY + hubH - 20) laneY += 12;
+        usedLaneY.add(laneY);
+        const corridorX = corridorBase + (sysFlows.length === 1 ? 0 : ordinal % 2 === 0 ? -14 : 14);
+        lanes.push({ index: entry.index, flow: entry.flow, system, cardY, laneY, corridorX, cardX, hubX: hubEdgeX });
+      }
     }
   }
   return { width: CANVAS_W, height: CANVAS_H, hub: { x: HUB_X, y: hubY, w: HUB_W, h: hubH, modules: hubModules, titleY: hubY + d.hubPad, titleH: d.hubTitleH }, systems, lanes, annotations, density: d };
 }
-
 function textBlock(parts: string[], x: number, y: number, lines: string[], size: number, color: string, weight = 'normal', anchor = 'start', lineGap = LINE_GAP): void {
   if (!lines.length) return;
   if (lines.length === 1) { parts.push(`<text x="${r1(x)}" y="${r1(y)}" text-anchor="${anchor}" font-size="${size}" font-weight="${weight}" fill="${color}">${esc(lines[0])}</text>`); return; }
@@ -401,37 +459,38 @@ function drawCanvas(canvas: CanvasLayout): string {
 
   for (const system of allSystems) {
     const theme = themeOf(system.node.id);
-    if (system.solid) {
-      parts.push(`<rect x="${r1(system.x)}" y="${r1(system.y)}" width="${r1(system.w)}" height="${r1(system.h)}" rx="8" fill="${theme.solid}"/>`);
-      textBlock(parts, system.x + system.w / 2, system.y + system.h / 2 + 6, wrapMeasured(system.node.name, system.w - 20, 20).slice(0, 2), 20, '#FFFFFF', 'bold', 'middle', 21);
-    } else {
-      parts.push(`<rect x="${r1(system.x)}" y="${r1(system.y)}" width="${r1(system.w)}" height="${r1(system.h)}" rx="12" fill="${theme.tint}" stroke="${theme.solid}" stroke-width="1" stroke-opacity="0.45"/>`);
-      for (const box of system.modules) drawCard(box, 15);
-      drawTitle(system.x + system.w / 2, system.titleY, system.node.name, theme.solid, system.w - 14, canvas.density.titleH, 20);
-    }
+    parts.push(`<rect x="${r1(system.x)}" y="${r1(system.y)}" width="${r1(system.w)}" height="${r1(system.h)}" rx="12" fill="${theme.tint}" stroke="${theme.solid}" stroke-width="1" stroke-opacity="0.45"/>`);
+    for (const box of system.modules) drawCard(box, 15);
+    drawTitle(system.x + system.w / 2, system.titleY, system.node.name, theme.solid, system.w - 14, canvas.density.titleH, 20);
   }
 
+  // 走线：卡片中心落在枢纽纵向范围内时水平直连；否则经走廊中点三段正交折转
+  // （起终点分别精确锚在卡片侧缘中心与枢纽侧缘，杜绝悬空起点/箭头扎进注释卡）。
   const colors = [...new Set(canvas.lanes.map((lane) => themeOf(lane.flow.from).solid))];
   const defs = colors.map((color, index) => `<marker id="arch-arrow-${index}" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5.5 L0,11 Z" fill="${color}"/></marker>`).join('');
   for (const lane of canvas.lanes) {
     const theme = themeOf(lane.flow.from);
     const fromSystem = lane.flow.from !== ARCHITECTURE_HUB_KEY;
-    const startX = fromSystem ? lane.sourceX : lane.hubX;
-    const endX = fromSystem ? lane.hubX : lane.sourceX;
-    const startY = fromSystem ? lane.sourceY : lane.hubY;
-    const endY = fromSystem ? lane.hubY : lane.sourceY;
-    const path = `M ${startX},${startY} L ${startX},${lane.routeY} L ${endX},${lane.routeY} L ${endX},${endY}`;
+    // 近水平（|Δy|≤4）时强制两端同 y——严格水平线，杜绝细斜线与端点错位。
+    const cardY = Math.abs(lane.laneY - lane.cardY) <= 4 ? lane.laneY : lane.cardY;
+    const straight = cardY === lane.laneY;
+    const path = straight
+      ? (fromSystem
+        ? `M ${lane.cardX},${cardY} L ${lane.hubX},${lane.laneY}`
+        : `M ${lane.hubX},${lane.laneY} L ${lane.cardX},${cardY}`)
+      : (fromSystem
+        ? `M ${lane.cardX},${cardY} L ${lane.corridorX},${cardY} L ${lane.corridorX},${lane.laneY} L ${lane.hubX},${lane.laneY}`
+        : `M ${lane.hubX},${lane.laneY} L ${lane.corridorX},${lane.laneY} L ${lane.corridorX},${cardY} L ${lane.cardX},${cardY}`);
     parts.push(`<path d="${path}" fill="none" stroke="${theme.solid}" stroke-width="2" stroke-linecap="round" marker-end="url(#arch-arrow-${colors.indexOf(theme.solid)})"/>`);
   }
 
   for (const annotation of canvas.annotations) {
-    const theme = themeOf(annotation.lane.flow.from);
+    const theme = themeOf(annotation.system.node.id);
     parts.push(`<rect x="${r1(annotation.x)}" y="${r1(annotation.y)}" width="${r1(annotation.w)}" height="${r1(annotation.h)}" rx="6" fill="#FFFFFF" stroke="${theme.solid}" stroke-width="1.5"/>`);
-    textBlock(parts, annotation.x + 12, annotation.y + 22, annotation.titleLines, 15, theme.solid, 'bold', 'start', 18);
-    const direction = annotation.lane.flow.from === ARCHITECTURE_HUB_KEY ? `ONES → ${annotation.lane.system.node.name}` : `${annotation.lane.system.node.name} → ONES`;
-    const directionY = annotation.y + 22 + (annotation.titleLines.length - 1) * 18 + 17;
-    textBlock(parts, annotation.x + 12, directionY, [direction], 13, '#5B6675');
-    textBlock(parts, annotation.x + 12, directionY + 19, annotation.bodyLines, 14, CARD_TEXT, 'normal', 'start', LINE_GAP);
+    textBlock(parts, annotation.x + ANN_PAD + 4, annotation.y + ANN_PAD + 14, [annotation.header], 14, theme.solid, 'bold', 'start', 0);
+    if (annotation.lines.length) {
+      textBlock(parts, annotation.x + ANN_PAD + 4, annotation.y + ANN_PAD + 32, annotation.lines, 13, CARD_TEXT, 'normal', 'start', ANN_LINE_H);
+    }
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" font-family="PingFang SC, Microsoft YaHei, sans-serif">${defs ? `<defs>${defs}</defs>` : ''}<g>${parts.join('')}</g></svg>`;
 }
