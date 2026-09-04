@@ -523,3 +523,8 @@ test('help and capabilities expose the auth command group for multi-user deploym
     assert.ok(commands.has(name), `capabilities 缺少命令: ${name}`);
   }
 });
+
+test('users bind-wecom is documented for wecom QR login', () => {
+  const help = runCli('help');
+  assert.match(help.stdout, /bind-wecom <用户名> <企微 userid>/);
+});

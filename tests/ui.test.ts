@@ -2186,3 +2186,17 @@ test('settings split personal connections from admin-only global config', () => 
   assert.match(source, /llmSettingsSection/);
   assert.match(source, /if \(isAdmin\(\)\) \{/);
 });
+
+test('wecom QR login entry appears only when configured', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  assert.match(html, /id="wecomLoginBtn"/);
+  // 前端按 /api/auth/wecom/status 决定显隐；回调错误参数展示在登录门。
+  assert.match(source, /\/api\/auth\/wecom\/status/);
+  assert.match(source, /\/api\/auth\/wecom\/login-url/);
+  assert.match(source, /wecom_login_error/);
+  // 服务端三端点：status/login-url/callback（免鉴权白名单）+ 绑定匹配 users.wecom_userid。
+  assert.match(server, /\/api\/auth\/wecom\/status/);
+  assert.match(server, /candidate\.wecomUserid === result\.userid/);
+});

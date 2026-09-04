@@ -311,3 +311,33 @@ export function saveSearchConfig(cfg: SearchConfig): void {
   mkdirSync(userConfigDir(), { recursive: true, mode: 0o700 });
   atomicWriteYaml(userConfigPath('search.user.yaml'), out);
 }
+
+// ── 企业微信扫码登录（接入层：配置齐备即启用；未配置时登录页只显示密码） ──
+
+export interface WecomConfig {
+  /** 企业 ID（企微管理后台「我的企业」页）。 */
+  corpid: string;
+  /** 自建应用的 AgentId。 */
+  agentid: string;
+  /** 自建应用的 Secret（只写不读，GET 接口不回显）。 */
+  secret: string;
+}
+
+/**
+ * 读取企微登录配置（config/wecom.user.yaml）。三字段齐备才视为已配置；
+ * 任何缺失返回 null（登录页自动隐藏扫码入口）。
+ */
+export function loadWecomConfig(): WecomConfig | null {
+  try {
+    const path = userConfigPath('wecom.user.yaml');
+    if (!existsSync(path)) return null;
+    const raw = yaml.load(readFileSync(path, 'utf8')) as Partial<WecomConfig> | null;
+    const corpid = typeof raw?.corpid === 'string' ? raw.corpid.trim() : '';
+    const agentid = typeof raw?.agentid === 'string' ? raw.agentid.trim() : '';
+    const secret = typeof raw?.secret === 'string' ? raw.secret.trim() : '';
+    if (!corpid || !agentid || !secret) return null;
+    return { corpid, agentid, secret };
+  } catch {
+    return null;
+  }
+}

@@ -1421,3 +1421,5 @@ header, #sidebar, #records { -webkit-backdrop-filter: blur(14px) saturate(1.25);
 .login-card .primary-command:disabled { opacity: 0.6; cursor: wait; }
 .user-chip { display: flex; align-items: center; gap: 6px; flex: none; }
 .user-chip #userLabel { font-size: 13px; color: var(--header-text); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.wecom-login-btn { margin-top: 2px; }

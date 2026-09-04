@@ -23,6 +23,8 @@ import {
   USERNAME_PATTERN, LoginRateLimiter, cookieValue, SESSION_COOKIE, sessionCookieHeader, clearSessionCookieHeader,
   sessionExpiry, SESSION_TTL_MS, ensureBootstrapAdmin,
 } from './auth.js';
+import { loadWecomConfig } from './config.js';
+import { wecomUseridForCode, wecomLoginUrl, newWecomState, registerWecomState, consumeWecomState } from './wecom.js';
 import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync, type SyncUser } from './workbench/sync.js';
@@ -769,6 +771,42 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         workbench.db.audit(found.username, 'auth.login', 'user', String(found.id), { via: 'cookie' }, found.id);
         res.setHeader('Set-Cookie', sessionCookieHeader(token, Math.floor(SESSION_TTL_MS / 1000)));
         return json(res, 200, { user: publicUser(found) });
+      }
+
+      // ── 企业微信扫码（接入层：配置齐备即启用；三个端点均属登录前流程，免鉴权白名单） ──
+      if (req.method === 'GET' && path === '/api/auth/wecom/status') {
+        return json(res, 200, { configured: loadWecomConfig() !== null });
+      }
+      if (req.method === 'GET' && path === '/api/auth/wecom/login-url') {
+        const wecom = loadWecomConfig();
+        if (!wecom) return json(res, 404, { error: '企业微信登录未配置（config/wecom.user.yaml 需要 corpid/agentid/secret）' });
+        const state = newWecomState();
+        registerWecomState(state);
+        const base = `${req.headers['x-forwarded-proto'] ?? 'http'}://${req.headers.host}`;
+        return json(res, 200, { url: wecomLoginUrl(wecom, `${base}/api/auth/wecom/callback`, state) });
+      }
+      if (req.method === 'GET' && path === '/api/auth/wecom/callback') {
+        const wecom = loadWecomConfig();
+        if (!wecom) return json(res, 404, { error: '企业微信登录未配置' });
+        const code = url.searchParams.get('code') ?? '';
+        const state = url.searchParams.get('state') ?? '';
+        const redirectError = (message: string) => {
+          res.writeHead(302, { Location: `/?wecom_login_error=${encodeURIComponent(message)}` });
+          return res.end();
+        };
+        if (!code || !state || !consumeWecomState(state)) return redirectError('登录会话已过期，请重新扫码');
+        const result = await wecomUseridForCode(wecom, code, fetch);
+        if (!result.ok || !result.userid) {
+          return redirectError(result.externalUserid ? '企业微信外部联系人不能登录，请使用企业成员账号' : (result.error ?? '企业微信身份校验失败'));
+        }
+        const user = workbench.db.listUsers().find((candidate) => candidate.wecomUserid === result.userid);
+        if (!user) return redirectError(`企业微信账号未绑定系统用户（${result.userid}），请联系管理员执行 csm-agent users bind-wecom 绑定`);
+        if (user.status === 'disabled') return redirectError('账号已被禁用，请联系管理员');
+        const { token, tokenHash } = issueToken();
+        workbench.db.createAuthSession(tokenHash, user.id, new Date(Date.now() + SESSION_TTL_MS).toISOString());
+        workbench.db.audit(user.username, 'auth.login', 'user', String(user.id), { via: 'wecom' }, user.id);
+        res.writeHead(302, { Location: '/', 'Set-Cookie': sessionCookieHeader(token, Math.floor(SESSION_TTL_MS / 1000)) });
+        return res.end();
       }
 
       // ── 鉴权门：除上方白名单外，所有 /api/* 必须携带有效凭证（cookie 会话或 Bearer）──

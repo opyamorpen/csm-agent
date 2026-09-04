@@ -89,7 +89,7 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
   { command: 'login', workflow: 'auth', access: 'write', api: ['POST /api/auth/login'], notes: '多人共用部署的密码登录（logout 退出并吊销凭证、whoami 查看当前身份）；凭证按服务地址存于 ~/.csm-agent/cli-auth.json（0600），此后所有命令自动附带 Bearer。服务端 API 已全部要求登录；首启会创建 admin（CSM_ADMIN_PASSWORD 或随机生成打印一次）' },
-  { command: 'users', workflow: 'user-admin', access: 'write', api: ['GET /api/users', 'POST /api/users', 'PATCH /api/users/:id', 'POST /api/users/:id/reset-password'], notes: '管理员管理账号：list 列出、create 建号（缺省生成初始密码仅显示一次）、reset-password 重置（收回该用户在线会话）、set-role/enable/disable；最后一名管理员不可降级或禁用' },
+  { command: 'users', workflow: 'user-admin', access: 'write', api: ['GET /api/users', 'POST /api/users', 'PATCH /api/users/:id', 'POST /api/users/:id/reset-password'], notes: '管理员管理账号：list 列出、create 建号（缺省生成初始密码仅显示一次）、reset-password 重置（收回该用户在线会话）、set-role/bind-wecom（绑定企微 userid 供扫码登录）/enable/disable；最后一名管理员不可降级或禁用' },
   { command: 'token', workflow: 'auth', access: 'write', api: ['POST /api/auth/tokens', 'GET /api/auth/tokens', 'DELETE /api/auth/tokens/:id'], notes: '个人访问令牌（PAT，无过期可吊销）: create 生成（明文仅显示一次）、list 查看、revoke 吊销；适合脚本/CI 以 Bearer 调用 API' },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm', '/api/config/mcp'], notes: 'llm 为管理员维护的全局模型配置；mcp 查看本人「我的连接」（每人各自的 CRM/ONES/Hemory 凭证，会话与外部写走本人凭证，保存走网页设置页）' },
@@ -190,7 +190,8 @@ function help(): void {
     （查看当前服务地址与登录身份）
   csm-agent users list|create|reset-password|set-role|enable|disable ...（需管理员）
     （create <用户名> [--display-name=X] [--role=admin|member] [--password=X]，缺省生成初始密码仅显示一次；
-     reset-password <用户名> [--password=X]；set-role <用户名> admin|member；enable/disable <用户名>）
+     reset-password <用户名> [--password=X]；set-role <用户名> admin|member；bind-wecom <用户名> <企微 userid>；
+     enable/disable <用户名>）
   csm-agent token create|list|revoke
     （个人访问令牌（PAT，脚本/CI 用）: create [--name=X] 明文仅显示一次；revoke <令牌ID>）
   csm-agent config mcp [--json]
@@ -2026,12 +2027,19 @@ async function usersCommand(subcommand: string, values: string[]): Promise<void>
     console.log(`${username} 已设为${role === 'admin' ? '管理员' : '成员'}`);
     return;
   }
+  if (subcommand === 'bind-wecom') {
+    const wecomUserid = values.shift() ?? '';
+    if (!username || !wecomUserid) throw new Error('用法: users bind-wecom <用户名> <企微 userid>（企微管理后台通讯录成员账号）');
+    await request(`/api/users/${target.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wecomUserid }) });
+    console.log(`已绑定 ${username} ↔ 企微 userid ${wecomUserid}（扫码登录即入该账号）`);
+    return;
+  }
   if (subcommand === 'enable' || subcommand === 'disable') {
     await request(`/api/users/${target.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: subcommand === 'enable' ? 'active' : 'disabled' }) });
     console.log(`${username} 已${subcommand === 'enable' ? '启用' : '禁用（其在线会话已收回）'}`);
     return;
   }
-  throw new Error(`未知 users 子命令: ${subcommand}（可用: list/create/reset-password/set-role/enable/disable）`);
+  throw new Error(`未知 users 子命令: ${subcommand}（可用: list/create/reset-password/set-role/bind-wecom/enable/disable）`);
 }
 
 async function tokenCommand(subcommand: string, values: string[]): Promise<void> {

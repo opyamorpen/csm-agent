@@ -265,6 +265,32 @@
     location.reload();
   };
 
+  // 企业微信扫码（配置驱动）：配置齐备才显示入口，点击跳企微 Web 登录扫码页，回调由服务端建会话后带回。
+  fetch('/api/auth/wecom/status').then((r) => r.json()).then((d) => {
+    if (!d || d.configured !== true) return;
+    const btn = document.getElementById('wecomLoginBtn');
+    if (!btn) return;
+    btn.classList.remove('hidden');
+    btn.onclick = async () => {
+      try {
+        const response = await fetch('/api/auth/wecom/login-url');
+        const data = await response.json();
+        if (data.url) location.href = data.url;
+        else { loginError.textContent = data.error || '获取扫码地址失败'; loginError.classList.remove('hidden'); }
+      } catch (error) {
+        loginError.textContent = '网络错误：' + error.message;
+        loginError.classList.remove('hidden');
+      }
+    };
+  }).catch(() => { /* 状态查询失败按未配置处理 */ });
+  // 扫码回调失败带回 ?wecom_login_error=：在登录门上显示并清掉地址参数。
+  const wecomCallbackError = new URLSearchParams(location.search).get('wecom_login_error');
+  if (wecomCallbackError) {
+    loginError.textContent = wecomCallbackError;
+    loginError.classList.remove('hidden');
+    history.replaceState(null, '', '/');
+  }
+
   function formatDate(value) {
     if (!value) return '未知';
     const date = new Date(value);
