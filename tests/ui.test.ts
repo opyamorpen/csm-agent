@@ -2146,3 +2146,29 @@ test('customer overview renders alias chips with an editor bound to the aliases 
   assert.match(styles, /\.alias-chip \{[^}]*var\(--border\)/);
   assert.match(styles, /\.alias-chip \{[^}]*var\(--panel-2\)/);
 });
+
+test('login gate blocks the app until authenticated and the user chip exposes logout', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 登录门元素齐备（密码框必须 type=password；登录错误区有 role=alert）。
+  assert.match(html, /id="loginGate"/);
+  assert.match(html, /id="loginForm"/);
+  assert.match(html, /id="loginUser"/);
+  assert.match(html, /id="loginPass" type="password"/);
+  assert.match(html, /id="loginError"/);
+  // 顶栏用户 chip 与退出。
+  assert.match(html, /id="userChip"/);
+  assert.match(html, /id="logoutBtn"/);
+  // 401 统一揭示登录门；登录提交打 /api/auth/login、成功整页重载；退出吊销凭证后重载。
+  assert.match(source, /if \(response\.status === 401\) showLoginGate\(\)/);
+  assert.match(source, /fetch\('\/api\/auth\/login'/);
+  assert.match(source, /location\.reload\(\)/);
+  assert.match(source, /fetch\('\/api\/auth\/logout'/);
+  // 启动先验身份（/api/auth/me），未登录不加载任何业务数据。
+  assert.match(source, /api\('\/api\/auth\/me'\)/);
+  // 登录样式只允许主题 token（双主题契约：登录块内不得出现硬编码色值）。
+  const loginBlock = styles.slice(styles.indexOf('.login-gate'));
+  assert.ok(loginBlock.includes('.login-card'), '登录卡片样式缺失');
+  assert.doesNotMatch(loginBlock.slice(0, loginBlock.indexOf('\n.user-chip') > 0 ? loginBlock.indexOf('\n.user-chip') : undefined), /#[0-9a-fA-F]{3,8}\b/);
+});

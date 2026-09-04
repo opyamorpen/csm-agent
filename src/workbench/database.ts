@@ -236,6 +236,36 @@ function alertFromRow(row: Row): CustomerAlert {
   };
 }
 
+/** 登录用户（密码哈希只在 getUserByUsername 里随行带出，其余出口不携带）。 */
+export interface AuthUser {
+  id: number;
+  username: string;
+  displayName: string;
+  role: 'admin' | 'member';
+  wecomUserid: string | null;
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+/** CLI/CI 个人访问令牌（PAT）的元信息视图：令牌本体只在创建时返回一次。 */
+export interface AuthTokenRecord {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+function userFromRow(row: Row): AuthUser & { passwordHash?: string } {
+  return {
+    id: Number(row.id), username: String(row.username), displayName: String(row.display_name ?? ''),
+    role: String(row.role) === 'admin' ? 'admin' : 'member',
+    wecomUserid: row.wecom_userid == null ? null : String(row.wecom_userid),
+    status: String(row.status) === 'disabled' ? 'disabled' : 'active',
+    createdAt: String(row.created_at),
+    ...(row.password_hash != null ? { passwordHash: String(row.password_hash) } : {}),
+  };
+}
+
 export class WorkbenchDatabase {
   readonly path: string;
   private readonly db: DatabaseSync;
@@ -586,12 +616,49 @@ export class WorkbenchDatabase {
         entity_type TEXT NOT NULL,
         entity_id TEXT NOT NULL,
         details_json TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        user_id INTEGER
       );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL DEFAULT '',
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        wecom_userid TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+
+      CREATE TABLE IF NOT EXISTS auth_tokens (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
     `);
     const sourceEventColumns = this.db.prepare('PRAGMA table_info(source_events)').all() as Row[];
     if (!sourceEventColumns.some((column) => String(column.name) === 'display_id')) {
       this.db.exec('ALTER TABLE source_events ADD COLUMN display_id TEXT;');
+    }
+    // 存量库补 audit_log.user_id（新库建表已带；审批与人工操作此后记录登录用户）
+    const auditColumns = this.db.prepare('PRAGMA table_info(audit_log)').all() as Row[];
+    if (!auditColumns.some((column) => String(column.name) === 'user_id')) {
+      this.db.exec('ALTER TABLE audit_log ADD COLUMN user_id INTEGER;');
     }
     const draftJobColumns = this.db.prepare('PRAGMA table_info(draft_generation_jobs)').all() as Row[];
     if (!draftJobColumns.some((column) => String(column.name) === 'kind')) {
@@ -2003,9 +2070,111 @@ export class WorkbenchDatabase {
     this.db.prepare('UPDATE draft_batches SET status=?,updated_at=? WHERE id=?').run(status, nowIso(), batchId);
   }
 
-  audit(actor: string, action: string, entityType: string, entityId: string, details: Record<string, unknown> = {}): void {
-    this.db.prepare('INSERT INTO audit_log(id,actor,action,entity_type,entity_id,details_json,created_at) VALUES(?,?,?,?,?,?,?)')
-      .run(randomUUID(), actor, action, entityType, entityId, json(details), nowIso());
+  audit(actor: string, action: string, entityType: string, entityId: string, details: Record<string, unknown> = {}, userId?: number): void {
+    this.db.prepare('INSERT INTO audit_log(id,actor,action,entity_type,entity_id,details_json,created_at,user_id) VALUES(?,?,?,?,?,?,?,?)')
+      .run(randomUUID(), actor, action, entityType, entityId, json(details), nowIso(), userId ?? null);
+  }
+
+  // ── 用户与登录凭证（多人共用：密码登录 + CLI 令牌；企微扫码在 users.wecom_userid 上对接）──
+
+  countUsers(): number {
+    return Number((this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as Row).n);
+  }
+
+  createUser(input: { username: string; displayName?: string; passwordHash: string; role?: 'admin' | 'member'; wecomUserid?: string }): AuthUser {
+    const now = nowIso();
+    const result = this.db.prepare('INSERT INTO users(username,display_name,password_hash,role,wecom_userid,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+      .run(input.username, input.displayName ?? input.username, input.passwordHash, input.role ?? 'member', input.wecomUserid ?? null, 'active', now, now);
+    return this.getUserById(Number(result.lastInsertRowid))!;
+  }
+
+  getUserByUsername(username: string): (AuthUser & { passwordHash: string }) | undefined {
+    const row = this.db.prepare('SELECT * FROM users WHERE username=?').get(username) as Row | undefined;
+    if (!row) return undefined;
+    // SELECT * 必含 password_hash；显式覆写把可选类型收窄成必带。
+    return { ...userFromRow(row), passwordHash: String(row.password_hash) };
+  }
+
+  getUserById(id: number): AuthUser | undefined {
+    const row = this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as Row | undefined;
+    return row ? userFromRow(row) : undefined;
+  }
+
+  listUsers(): AuthUser[] {
+    // 显式列：用户名册永不携带密码哈希。
+    return (this.db.prepare('SELECT id,username,display_name,role,wecom_userid,status,created_at FROM users ORDER BY id').all() as Row[])
+      .map((row) => userFromRow(row));
+  }
+
+  updateUser(id: number, patch: { displayName?: string; role?: 'admin' | 'member'; status?: 'active' | 'disabled'; wecomUserid?: string | null; passwordHash?: string }): AuthUser | undefined {
+    const current = this.getUserById(id);
+    if (!current) return undefined;
+    this.db.prepare('UPDATE users SET display_name=?,role=?,status=?,wecom_userid=?,password_hash=?,updated_at=? WHERE id=?')
+      .run(patch.displayName ?? current.displayName, patch.role ?? current.role, patch.status ?? current.status,
+        patch.wecomUserid === undefined ? current.wecomUserid : patch.wecomUserid,
+        patch.passwordHash ?? this.getPasswordHash(id), nowIso(), id);
+    return this.getUserById(id);
+  }
+
+  private getPasswordHash(id: number): string {
+    return String((this.db.prepare('SELECT password_hash FROM users WHERE id=?').get(id) as Row).password_hash);
+  }
+
+  createAuthSession(tokenHash: string, userId: number, expiresAt: string): void {
+    const now = nowIso();
+    this.db.prepare('INSERT INTO auth_sessions(token_hash,user_id,created_at,last_seen_at,expires_at) VALUES(?,?,?,?,?)')
+      .run(tokenHash, userId, now, now, expiresAt);
+  }
+
+  findAuthSession(tokenHash: string): { user: AuthUser; expiresAt: string; lastSeenAt: string } | null {
+    const row = this.db.prepare(
+      'SELECT s.expires_at AS expires_at, s.last_seen_at AS last_seen_at, u.id AS id, u.username AS username, u.display_name AS display_name, u.role AS role, u.status AS status, u.wecom_userid AS wecom_userid, u.created_at AS created_at FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?'
+    ).get(tokenHash) as Row | undefined;
+    return row ? { user: userFromRow(row), expiresAt: String(row.expires_at), lastSeenAt: String(row.last_seen_at) } : null;
+  }
+
+  touchAuthSession(tokenHash: string, expiresAt: string): void {
+    this.db.prepare('UPDATE auth_sessions SET last_seen_at=?,expires_at=? WHERE token_hash=?').run(nowIso(), expiresAt, tokenHash);
+  }
+
+  deleteAuthSession(tokenHash: string): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE token_hash=?').run(tokenHash);
+  }
+
+  deleteUserAuthSessions(userId: number): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE user_id=?').run(userId);
+  }
+
+  createAuthToken(tokenHash: string, userId: number, name: string): AuthTokenRecord {
+    const now = nowIso();
+    const id = randomUUID();
+    this.db.prepare('INSERT INTO auth_tokens(id,token_hash,user_id,name,created_at,last_used_at) VALUES(?,?,?,?,?,?)')
+      .run(id, tokenHash, userId, name, now, now);
+    return { id, name, createdAt: now, lastUsedAt: now };
+  }
+
+  findAuthToken(tokenHash: string): AuthUser | null {
+    const row = this.db.prepare(
+      'SELECT u.id AS id, u.username AS username, u.display_name AS display_name, u.role AS role, u.status AS status, u.wecom_userid AS wecom_userid, u.created_at AS created_at FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=?'
+    ).get(tokenHash) as Row | undefined;
+    return row ? userFromRow(row) : null;
+  }
+
+  touchAuthToken(tokenHash: string): void {
+    this.db.prepare('UPDATE auth_tokens SET last_used_at=? WHERE token_hash=?').run(nowIso(), tokenHash);
+  }
+
+  listAuthTokens(userId: number): AuthTokenRecord[] {
+    return (this.db.prepare('SELECT id,name,created_at,last_used_at FROM auth_tokens WHERE user_id=? ORDER BY created_at DESC').all(userId) as Row[])
+      .map((row) => ({ id: String(row.id), name: String(row.name), createdAt: String(row.created_at), lastUsedAt: String(row.last_used_at) }));
+  }
+
+  deleteAuthToken(id: string, userId: number): boolean {
+    return this.db.prepare('DELETE FROM auth_tokens WHERE id=? AND user_id=?').run(id, userId).changes > 0;
+  }
+
+  deleteAuthTokenByHash(tokenHash: string): void {
+    this.db.prepare('DELETE FROM auth_tokens WHERE token_hash=?').run(tokenHash);
   }
 
   /**

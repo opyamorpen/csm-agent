@@ -11,11 +11,12 @@ async function main(): Promise<void> {
 
   const runtime = await createRuntime();
   const port = Number(process.env.CSM_PORT ?? 3210);
+  const host = process.env.CSM_HOST ?? '127.0.0.1';
 
   // Start the HTTP server first so the UI is available immediately; connect
   // MCP servers in the background (slow OAuth flows must not block startup).
   await startServer(runtime, port);
-  console.log(`CSM Agent 已启动: http://127.0.0.1:${port}`);
+  console.log(`CSM Agent 已启动: http://${host}:${port}`);
 
   void (async () => {
     try {

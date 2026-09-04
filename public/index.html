@@ -20,9 +20,21 @@
 </head>
 <body>
   <div id="buildStaleBanner" class="build-stale-banner hidden"></div>
+  <!-- 登录门：全屏遮罩。所有 /api 需登录凭证；JS 收到 401 时揭示本层并挡住工作台，登录成功整页重载。 -->
+  <div id="loginGate" class="login-gate hidden">
+    <form id="loginForm" class="login-card">
+      <h1>客户成功工作台</h1>
+      <p class="login-sub">请使用账号登录；账号由管理员创建（csm-agent users create）</p>
+      <label class="login-field"><span>用户名</span><input id="loginUser" autocomplete="username" required /></label>
+      <label class="login-field"><span>密码</span><input id="loginPass" type="password" autocomplete="current-password" required /></label>
+      <div id="loginError" class="login-error hidden" role="alert"></div>
+      <button id="loginSubmit" class="primary-command" type="submit">登录</button>
+    </form>
+  </div>
   <header>
     <div class="brand">客户成功工作台 <span class="sub">CSM Agent</span></div>
     <div class="right">
+      <div id="userChip" class="user-chip hidden"><span id="userLabel"></span><button id="logoutBtn" class="quiet-command" type="button">退出</button></div>
       <button id="globalSync" class="quiet-command">同步数据</button>
       <button id="themeToggle" class="quiet-command theme-toggle" type="button" title="切换深浅主题" aria-label="切换深浅主题">☾ 深色</button>
       <button id="cursorFxToggle" class="quiet-command" type="button" title="切换光标涟漪动效" aria-label="切换光标涟漪动效">✦ 开动效</button>

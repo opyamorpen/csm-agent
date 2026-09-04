@@ -1380,3 +1380,44 @@ header, #sidebar, #records { -webkit-backdrop-filter: blur(14px) saturate(1.25);
   /* 页脚在移动端 sticky 钉底，浮动条上移避让，不遮住页脚内容。 */
   .draft-selection-bar { bottom: 46px; }
 }
+
+/* ── 登录门与用户菜单（多人共用：401 全屏遮罩；全部走主题 token，双主题零硬编码） ── */
+.login-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.login-card {
+  width: min(360px, calc(100vw - 48px));
+  padding: 28px 28px 24px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 50px rgba(15, 23, 38, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-card h1 { margin: 0; font-size: 18px; color: var(--text); }
+.login-sub { margin: 0; font-size: 12.5px; color: var(--text-3); line-height: 1.6; }
+.login-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-2); }
+.login-field input {
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+}
+.login-field input:focus { outline: none; border-color: var(--focus-border); box-shadow: 0 0 0 3px var(--focus-ring); }
+.login-error { font-size: 12.5px; color: var(--error-text); background: var(--error-bg); border: 1px solid var(--error-border); border-radius: 8px; padding: 8px 10px; }
+.login-card .primary-command:disabled { opacity: 0.6; cursor: wait; }
+.user-chip { display: flex; align-items: center; gap: 6px; flex: none; }
+.user-chip #userLabel { font-size: 13px; color: var(--header-text); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

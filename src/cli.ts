@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, extname } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { tmpdir, hostname } from 'node:os';
+import { join, extname, dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { Writable } from 'node:stream';
 import type { ConfirmDraft } from './tools/confirm.js';
 import { installService, readServiceLogs, restartService, serviceStatus, uninstallService } from './service.js';
 import { listBackups, restoreBackup } from './backup.js';
@@ -18,6 +19,41 @@ const baseUrl = (process.env.CSM_BASE_URL ?? `http://127.0.0.1:${process.env.CSM
 const rawArgs = process.argv.slice(2);
 const jsonOutput = rawArgs.includes('--json');
 const args = rawArgs.filter((arg) => arg !== '--json');
+
+// ── CLI 登录凭证：按 baseUrl 键控存于数据目录（0600），所有请求自动附带 Bearer。 ──
+interface CliAuthEntry { token: string; username: string; savedAt: string }
+type CliAuthStore = Record<string, CliAuthEntry>;
+
+function cliAuthPath(): string {
+  return join(dataDir(), 'cli-auth.json');
+}
+
+function loadCliAuth(): CliAuthStore {
+  try {
+    const parsed = JSON.parse(readFileSync(cliAuthPath(), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed as CliAuthStore : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCliAuthEntry(entry: CliAuthEntry | undefined): void {
+  const store = loadCliAuth();
+  if (entry) store[baseUrl] = entry;
+  else delete store[baseUrl];
+  writeFileSync(cliAuthPath(), JSON.stringify(store, null, 2), 'utf8');
+  try { chmodSync(cliAuthPath(), 0o600); } catch { /* 平台不支持时忽略 */ }
+}
+
+function currentCliAuth(): CliAuthEntry | undefined {
+  return loadCliAuth()[baseUrl];
+}
+
+/** 统一的请求头：已登录则附带 Authorization（调用方显式传入的同名头优先）。 */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const auth = currentCliAuth();
+  return { ...(auth ? { Authorization: `Bearer ${auth.token}` } : {}), ...(extra ?? {}) };
+}
 
 interface CustomerSummary {
   id: string;
@@ -52,6 +88,9 @@ function onesWorkItemRow(event: any): { id: string; title: string; status: strin
 
 const CLI_CAPABILITIES = [
   { command: 'serve', workflow: 'service', access: 'local', api: [] },
+  { command: 'login', workflow: 'auth', access: 'write', api: ['POST /api/auth/login'], notes: '多人共用部署的密码登录（logout 退出并吊销凭证、whoami 查看当前身份）；凭证按服务地址存于 ~/.csm-agent/cli-auth.json（0600），此后所有命令自动附带 Bearer。服务端 API 已全部要求登录；首启会创建 admin（CSM_ADMIN_PASSWORD 或随机生成打印一次）' },
+  { command: 'users', workflow: 'user-admin', access: 'write', api: ['GET /api/users', 'POST /api/users', 'PATCH /api/users/:id', 'POST /api/users/:id/reset-password'], notes: '管理员管理账号：list 列出、create 建号（缺省生成初始密码仅显示一次）、reset-password 重置（收回该用户在线会话）、set-role/enable/disable；最后一名管理员不可降级或禁用' },
+  { command: 'token', workflow: 'auth', access: 'write', api: ['POST /api/auth/tokens', 'GET /api/auth/tokens', 'DELETE /api/auth/tokens/:id'], notes: '个人访问令牌（PAT，无过期可吊销）: create 生成（明文仅显示一次）、list 查看、revoke 吊销；适合脚本/CI 以 Bearer 调用 API' },
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
@@ -92,10 +131,14 @@ const CLI_CAPABILITIES = [
 async function request<T = any>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${baseUrl}${path}`, options);
+    response = await fetch(`${baseUrl}${path}`, {
+      ...options,
+      headers: authHeaders((options?.headers as Record<string, string>) ?? undefined),
+    });
   } catch (error) {
     throw new Error(`无法连接 ${baseUrl}；请先运行 npm run dev。${(error as Error).message}`);
   }
+  if (response.status === 401) throw new Error(`未登录或凭证已失效——请先运行 csm-agent login（目标 ${baseUrl}）`);
   const body: any = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
   return body as T;
@@ -138,6 +181,18 @@ function help(): void {
   csm-agent serve [端口]
   csm-agent doctor
     （健康自检，含旧进程探测：服务端构建 vs 本地 dist 构建，stale 会提示重启）
+  csm-agent login [用户名]
+    （多人部署的密码登录：交互输入密码，凭证按服务地址存于 ~/.csm-agent/cli-auth.json，
+     此后所有命令自动附带；服务端首启创建 admin，密码取 CSM_ADMIN_PASSWORD 或随机生成打印一次）
+  csm-agent logout
+    （退出并吊销当前凭证）
+  csm-agent whoami [--json]
+    （查看当前服务地址与登录身份）
+  csm-agent users list|create|reset-password|set-role|enable|disable ...（需管理员）
+    （create <用户名> [--display-name=X] [--role=admin|member] [--password=X]，缺省生成初始密码仅显示一次；
+     reset-password <用户名> [--password=X]；set-role <用户名> admin|member；enable/disable <用户名>）
+  csm-agent token create|list|revoke
+    （个人访问令牌（PAT，脚本/CI 用）: create [--name=X] 明文仅显示一次；revoke <令牌ID>）
   csm-agent config llm [--json]
   csm-agent config llm set --provider=<id> --model=<id> [--base-url=<url>] [--api-key=<key>] [--protocol=openai|anthropic] [--vision=on|off]
     （查看/切换大模型；provider=custom 需 --base-url，--protocol 选端点协议：
@@ -1639,8 +1694,8 @@ async function confirmDraft(sessionId: string, draft: ConfirmDraft): Promise<voi
 }
 
 async function streamAgent(sessionId: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/events`);
-  if (!response.ok || !response.body) throw new Error(`SSE 连接失败: HTTP ${response.status}`);
+  const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/events`, { headers: authHeaders() });
+  if (!response.ok || !response.body) throw new Error(`SSE 连接失败: HTTP ${response.status}${response.status === 401 ? '（请先 csm-agent login）' : ''}`);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -1837,6 +1892,164 @@ async function doctor(): Promise<void> {
     sampleTimelineEvents: overview?.timeline?.length ?? 0, llm, webSearch: search });
 }
 
+// ── 登录与账号（多人共用：密码登录；PAT 供 CI 复用，admin 管理用户） ──
+
+/** 静默密码输入：TTY 下 terminal 模式 + 吞掉输出的可写流 = 不回显；管道/CI（非 TTY）直接读一行。 */
+async function promptPassword(): Promise<string> {
+  const isTty = process.stdin.isTTY === true;
+  const muted = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const rl = createInterface({ input: process.stdin, output: muted, terminal: isTty });
+  try {
+    if (isTty) process.stdout.write('密码: ');
+    return await rl.question('');
+  } finally {
+    rl.close();
+  }
+}
+
+async function loginCommand(usernameArg?: string): Promise<void> {
+  const username = (usernameArg ?? '').trim() || await (async () => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true });
+    try { return (await rl.question('用户名: ')).trim(); } finally { rl.close(); }
+  })();
+  if (!username) throw new Error('用户名不能为空');
+  const password = await promptPassword();
+  if (!password) throw new Error('密码不能为空');
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, tokenName: `cli@${hostname()}` }),
+    });
+  } catch (error) {
+    throw new Error(`无法连接 ${baseUrl}: ${(error as Error).message}`);
+  }
+  const body: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? `登录失败 (HTTP ${response.status})`);
+  if (!body.token) throw new Error('服务端未返回令牌（请升级服务端到支持多用户的版本）');
+  saveCliAuthEntry({ token: body.token, username: body.user?.username ?? username, savedAt: new Date().toISOString() });
+  console.log(`已登录 ${baseUrl}，身份: ${body.user?.displayName || body.user?.username || username}${body.user?.role === 'admin' ? '（管理员）' : ''}`);
+}
+
+async function logoutCommand(): Promise<void> {
+  const auth = currentCliAuth();
+  if (!auth) {
+    console.log(`${baseUrl} 未保存登录凭证`);
+    return;
+  }
+  try {
+    await request('/api/auth/logout', { method: 'POST' });
+  } catch (error) {
+    // 服务端不可达/令牌已失效也照样清理本地凭证。
+    if (!/未登录|无法连接/.test((error as Error).message)) throw error;
+  }
+  saveCliAuthEntry(undefined);
+  console.log(`已退出 ${baseUrl}（身份 ${auth.username}）`);
+}
+
+async function whoamiCommand(): Promise<void> {
+  const auth = currentCliAuth();
+  if (!auth) {
+    console.log(`未登录（目标 ${baseUrl}；运行 csm-agent login）`);
+    return;
+  }
+  const me = await request<any>('/api/auth/me');
+  if (jsonOutput) print({ baseUrl, savedUsername: auth.username, ...me.user });
+  else console.log(`${baseUrl}: ${me.user.displayName || me.user.username}（${me.user.username}，${me.user.role === 'admin' ? '管理员' : '成员'}）`);
+}
+
+async function usersCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'list') {
+    const body = await request<{ users: any[] }>('/api/users');
+    if (jsonOutput) return print(body.users);
+    if (!body.users.length) return console.log('（暂无用户）');
+    for (const user of body.users) {
+      console.log(`${String(user.id).padStart(3)}  ${user.username.padEnd(16)} ${String(user.displayName).padEnd(12)} ${user.role === 'admin' ? '管理员' : '成员'}${user.status === 'disabled' ? '（已禁用）' : ''}`);
+    }
+    return;
+  }
+  if (subcommand === 'create') {
+    const username = values.shift() ?? '';
+    if (!username) throw new Error('用法: users create <用户名> [--display-name=显示名] [--role=member|admin] [--password=密码]');
+    const body = await request<any>('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        displayName: flagOf(values, 'display-name'),
+        role: flagOf(values, 'role') === 'admin' ? 'admin' : 'member',
+        ...(flagOf(values, 'password') ? { password: flagOf(values, 'password') } : {}),
+      }),
+    });
+    if (jsonOutput) return print(body);
+    console.log(`已创建用户 ${body.user.username}（${body.user.role === 'admin' ? '管理员' : '成员'}）`);
+    if (body.initialPassword) console.log(`初始密码（仅此一次显示）: ${body.initialPassword}`);
+    return;
+  }
+  // 其余子命令都按用户名定位目标：list 一次拿全量再本地匹配。
+  const username = values.shift() ?? '';
+  if (!username) throw new Error('缺少用户名参数');
+  const { users } = await request<{ users: any[] }>('/api/users');
+  const target = users.find((user) => user.username === username);
+  if (!target) throw new Error(`用户 ${username} 不存在`);
+  if (subcommand === 'reset-password') {
+    const supplied = flagOf(values, 'password');
+    const body = await request<any>(`/api/users/${target.id}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(supplied ? { password: supplied } : {}),
+    });
+    if (jsonOutput) return print({ ok: true, ...(body.password ? { password: body.password } : {}) });
+    console.log(`已重置 ${username} 的密码（其在线会话已收回）`);
+    if (body.password) console.log(`新密码（仅此一次显示）: ${body.password}`);
+    return;
+  }
+  if (subcommand === 'set-role') {
+    const role = values.shift() ?? '';
+    if (role !== 'admin' && role !== 'member') throw new Error('角色只允许 admin / member');
+    await request(`/api/users/${target.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
+    console.log(`${username} 已设为${role === 'admin' ? '管理员' : '成员'}`);
+    return;
+  }
+  if (subcommand === 'enable' || subcommand === 'disable') {
+    await request(`/api/users/${target.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: subcommand === 'enable' ? 'active' : 'disabled' }) });
+    console.log(`${username} 已${subcommand === 'enable' ? '启用' : '禁用（其在线会话已收回）'}`);
+    return;
+  }
+  throw new Error(`未知 users 子命令: ${subcommand}（可用: list/create/reset-password/set-role/enable/disable）`);
+}
+
+async function tokenCommand(subcommand: string, values: string[]): Promise<void> {
+  if (subcommand === 'create') {
+    const body = await request<any>('/api/auth/tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: flagOf(values, 'name') ?? `cli@${hostname()}` }),
+    });
+    if (jsonOutput) return print(body);
+    console.log(`已创建个人访问令牌「${body.tokenRecord.name}」（仅此一次显示）:`);
+    console.log(body.token);
+    console.log('用法: 保存到环境变量后以 Authorization: Bearer <token> 访问 API。');
+    return;
+  }
+  if (subcommand === 'list') {
+    const body = await request<{ tokens: any[] }>('/api/auth/tokens');
+    if (jsonOutput) return print(body.tokens);
+    if (!body.tokens.length) return console.log('（暂无令牌）');
+    for (const token of body.tokens) console.log(`${token.id}  ${token.name.padEnd(24)} 创建 ${token.createdAt}  最近使用 ${token.lastUsedAt}`);
+    return;
+  }
+  if (subcommand === 'revoke') {
+    const id = values.shift() ?? '';
+    if (!id) throw new Error('用法: token revoke <令牌ID>（token list 查看）');
+    const body = await request<{ ok: boolean }>(`/api/auth/tokens/${id}`, { method: 'DELETE' });
+    console.log(body.ok ? '已吊销' : '令牌不存在或已吊销');
+    return;
+  }
+  throw new Error(`未知 token 子命令: ${subcommand}（可用: create/list/revoke）`);
+}
+
 async function main(): Promise<void> {
   const command = args.shift() ?? 'help';
   if (command === 'help' || command === '--help' || command === '-h') return help();
@@ -1844,6 +2057,11 @@ async function main(): Promise<void> {
   if (command === 'capabilities') return print(CLI_CAPABILITIES);
   if (command === 'serve') return serve(args.shift());
   if (command === 'doctor') return doctor();
+  if (command === 'login') return loginCommand(args.shift());
+  if (command === 'logout') return logoutCommand();
+  if (command === 'whoami') return whoamiCommand();
+  if (command === 'users') return usersCommand(args.shift() ?? 'list', args);
+  if (command === 'token') return tokenCommand(args.shift() ?? '', args);
   if (command === 'config') return configCommand(args.shift() ?? '', args);
   if (command === 'customers') return showCustomers(args);
   if (command === 'customer') return showCustomer(args.join(' '));

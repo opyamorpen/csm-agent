@@ -180,7 +180,7 @@ function pruneBackups(backupDir: string, dir: string): string[] {
 let backupInFlight = false;
 
 /** 触发一次备份（定时/手动同路径）：建 run 行即返回，工作 setImmediate 异步执行，run 行是进度权威。 */
-export function triggerBackup(db: WorkbenchDatabase, dir: string, trigger: BackupTrigger): { run: SyncRun } {
+export function triggerBackup(db: WorkbenchDatabase, dir: string, trigger: BackupTrigger, actor = 'system'): { run: SyncRun } {
   if (backupInFlight) throw new Error('备份已在进行中，请稍后用 csm-agent backup list 查看最近结果');
   const run = db.createSyncRun(`backup:${shanghaiDateKey()}`);
   backupInFlight = true;
@@ -188,7 +188,7 @@ export function triggerBackup(db: WorkbenchDatabase, dir: string, trigger: Backu
     try {
       const result = runBackup(db, dir, trigger);
       db.finishSyncRun(run.id, 'succeeded', { backup: { status: 'ok', archive: result.archivePath, trigger, pruned: result.pruned } });
-      db.audit('csm', 'backup_create', 'backup', result.manifest.id,
+      db.audit(actor, 'backup_create', 'backup', result.manifest.id,
         { archive: result.archivePath, trigger, files: result.manifest.files.length, pruned: result.pruned });
     } catch (error) {
       const message = String((error as Error).message);
@@ -424,7 +424,7 @@ export function consumeRestoreMarker(db: WorkbenchDatabase, dir: string): void {
   if (!existsSync(markerPath)) return;
   try {
     const marker = JSON.parse(readFileSync(markerPath, 'utf8')) as { archive?: string; restoredAt?: string; dbOnly?: boolean; rollbackDir?: string };
-    db.audit('csm', 'backup_restore', 'backup', String(marker.archive ?? 'unknown'),
+    db.audit('system', 'backup_restore', 'backup', String(marker.archive ?? 'unknown'),
       { restoredAt: marker.restoredAt ?? null, dbOnly: marker.dbOnly === true, rollbackDir: marker.rollbackDir ?? null });
   } catch (error) {
     console.error(`[backup] 恢复标记消费失败（backup_restore 审计未落库）: ${String((error as Error).message)}`);

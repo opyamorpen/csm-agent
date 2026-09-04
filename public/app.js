@@ -207,13 +207,63 @@
     const response = await fetch(path, options);
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      // 附带 HTTP 状态码：调用方按 status 区分错误类别（如 stop 的 409=服务端已无进行中的轮次）。
+      // 401 = 会话失效：揭示登录门（整页遮罩），后续加载终止；其余状态照常抛给调用方。
+      if (response.status === 401) showLoginGate();
       const error = new Error(body.error || `请求失败 (${response.status})`);
       error.status = response.status;
       throw error;
     }
     return body;
   }
+
+  // ── 登录门 ──
+  const loginGate = document.getElementById('loginGate');
+  const loginForm = document.getElementById('loginForm');
+  const loginError = document.getElementById('loginError');
+  let loginGateShown = false;
+  function showLoginGate(message) {
+    if (loginGateShown) return;
+    loginGateShown = true;
+    loginGate.classList.remove('hidden');
+    if (message) {
+      loginError.textContent = message;
+      loginError.classList.remove('hidden');
+    }
+    document.getElementById('loginUser').focus();
+  }
+  loginForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    loginError.classList.add('hidden');
+    const submitBtn = document.getElementById('loginSubmit');
+    submitBtn.disabled = true;
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('loginUser').value.trim(),
+          password: document.getElementById('loginPass').value,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        loginError.textContent = body.error || '登录失败';
+        loginError.classList.remove('hidden');
+        return;
+      }
+      // 整页重载：会话 cookie 就位后干净重建全部前端状态。
+      location.reload();
+    } catch (err) {
+      loginError.textContent = '网络错误：' + err.message;
+      loginError.classList.remove('hidden');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+  document.getElementById('logoutBtn').onclick = async () => {
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (error) { /* 掉线也照样回登录页 */ }
+    location.reload();
+  };
 
   function formatDate(value) {
     if (!value) return '未知';
@@ -4140,6 +4190,17 @@
   }
 
   async function init() {
+    // 身份先行：401 直接落登录门，不再加载任何业务数据；登录成功由表单整页重载重建。
+    try {
+      const me = await api('/api/auth/me');
+      const chip = document.getElementById('userChip');
+      document.getElementById('userLabel').textContent = me.user.displayName || me.user.username;
+      chip.classList.remove('hidden');
+    } catch (error) {
+      if (loginGateShown) return;
+      showLoginGate('请先登录');
+      return;
+    }
     const listRes = await fetch('/api/sessions');
     const listData = await listRes.json();
     const sessions = listData.sessions || [];

@@ -1001,18 +1001,18 @@ export class HemoryDraftService {
   }
 
   /** 忽略草稿批次：未写入项软删除为 dismissed（保留审计轨迹），written/writing 项不受影响。 */
-  dismissBatch(batchId: string): DraftBatch {
+  dismissBatch(batchId: string, actor = 'csm'): DraftBatch {
     const batch = this.db.dismissDraftBatch(batchId);
     if (!batch) throw new Error('draft batch not found');
-    this.db.audit('csm', 'dismiss_draft_batch', 'draft_batch', batchId, { customerId: batch.customerId });
+    this.db.audit(actor, 'dismiss_draft_batch', 'draft_batch', batchId, { customerId: batch.customerId });
     return batch;
   }
 
   /** 忽略单条草稿：逐条软删除（Web 单卡忽略 / 浮动条批量忽略共用），审计对齐批次忽略。 */
-  dismissItem(itemId: string): DraftItem {
+  dismissItem(itemId: string, actor = 'csm'): DraftItem {
     const item = this.db.dismissDraftItem(itemId);
     if (!item) throw new Error('draft item not found');
-    this.db.audit('csm', 'dismiss_draft_item', 'draft_item', itemId, { customerId: item.customerId, batchId: item.batchId });
+    this.db.audit(actor, 'dismiss_draft_item', 'draft_item', itemId, { customerId: item.customerId, batchId: item.batchId });
     return item;
   }
 
@@ -1595,7 +1595,7 @@ export class HemoryDraftService {
     return { batchId, items: previews };
   }
 
-  async confirm(batchId: string, approvals: Array<{ id: string; version: number; approvalHash: string }>): Promise<{ items: DraftItem[] }> {
+  async confirm(batchId: string, approvals: Array<{ id: string; version: number; approvalHash: string }>, actor = 'csm'): Promise<{ items: DraftItem[] }> {
     const preview = await this.preview(batchId, approvals.map((item) => item.id));
     const byId = new Map(approvals.map((item) => [item.id, item]));
     for (const item of preview.items) {
@@ -1604,7 +1604,7 @@ export class HemoryDraftService {
       if (item.validationErrors.length) throw new Error(`草稿 ${item.id} 不可写入: ${item.validationErrors.join('；')}`);
     }
     const results: DraftItem[] = [];
-    for (const approved of approvals) results.push(await this.execute(approved.id, approved.approvalHash));
+    for (const approved of approvals) results.push(await this.execute(approved.id, approved.approvalHash, actor));
     return { items: results };
   }
 
@@ -1616,7 +1616,7 @@ export class HemoryDraftService {
     return this.execute(item.id, item.approvalHash);
   }
 
-  private async execute(itemId: string, approvalHash: string): Promise<DraftItem> {
+  private async execute(itemId: string, approvalHash: string, actor = 'csm'): Promise<DraftItem> {
     const item = this.db.getDraftItem(itemId);
     if (!item) throw new Error('draft item not found');
     const expected = argumentsHash({ draftId: item.id, version: item.version, targetTool: item.targetTool, targetArguments: item.targetArguments });
@@ -1663,7 +1663,7 @@ export class HemoryDraftService {
         }
         result = { response: response.text.slice(0, 2000) };
       }
-      this.db.audit('csm', 'execute_hemory_draft', 'draft_item', item.id, { approvalHash, targetSystem: item.targetSystem, targetTool: item.targetTool, result });
+      this.db.audit(actor, 'execute_hemory_draft', 'draft_item', item.id, { approvalHash, targetSystem: item.targetSystem, targetTool: item.targetTool, result });
       return this.db.setDraftItemExecution(item.id, 'written', { approvalHash, result })!;
     } catch (error) {
       return this.db.setDraftItemExecution(item.id, 'failed', { approvalHash, error: (error as Error).message })!;

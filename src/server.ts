@@ -17,6 +17,12 @@ import { missingOnesDeskSpecFields, missingOnesDeskDescription, unknownOnesDeskF
 import { Store, customerOf, makeRecordFromDraft, dataDir, type RecordEntry } from './store.js';
 import { formatSessionTranscript, type TranscriptSession, type TranscriptEvent } from './transcript.js';
 import { WorkbenchDatabase } from './workbench/database.js';
+import type { AuthUser } from './workbench/database.js';
+import {
+  issueToken, tokenFingerprint, hashPassword, verifyPassword, PHANTOM_HASH, validatePassword, generatePassword,
+  USERNAME_PATTERN, LoginRateLimiter, cookieValue, SESSION_COOKIE, sessionCookieHeader, clearSessionCookieHeader,
+  sessionExpiry, SESSION_TTL_MS, ensureBootstrapAdmin,
+} from './auth.js';
 import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync } from './workbench/sync.js';
@@ -67,6 +73,8 @@ interface Session {
   customer: CustomerContext | null;
   /** archived sessions stay loadable but are hidden from the default list */
   archived: boolean;
+  /** 归属登录用户：会话是个人工作区，仅属主本人可读写（存量旧会话在装载时归入 admin）。 */
+  userId: number;
 }
 
 /** 事件帧 seq 判断：text_delta/thinking_delta 只流给在线客户端，不落盘不回放。 */
@@ -311,8 +319,61 @@ interface WorkbenchServices {
   opportunities: OpportunityService;
 }
 
-function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices): http.RequestListener {
+/** 一次已通过验证的请求身份：用户 + 凭证形态（cookie 会话 / Bearer PAT 或会话）。 */
+interface AuthContext {
+  user: AuthUser;
+  kind: 'cookie' | 'token';
+  credential: 'session' | 'pat';
+  tokenHash: string;
+}
+
+function authenticate(db: WorkbenchDatabase, req: http.IncomingMessage): AuthContext | null {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (!token) return null;
+    const { tokenHash } = tokenFingerprint(token);
+    const tokenUser = db.findAuthToken(tokenHash);
+    if (tokenUser) {
+      db.touchAuthToken(tokenHash);
+      return { user: tokenUser, kind: 'token', credential: 'pat', tokenHash };
+    }
+    const session = db.findAuthSession(tokenHash);
+    if (session) {
+      const expiry = sessionExpiry(session.expiresAt, session.lastSeenAt);
+      if (expiry.expired) {
+        db.deleteAuthSession(tokenHash);
+        return null;
+      }
+      if (expiry.nextExpiresAt) db.touchAuthSession(tokenHash, expiry.nextExpiresAt);
+      return { user: session.user, kind: 'token', credential: 'session', tokenHash };
+    }
+    return null;
+  }
+  const cookieToken = cookieValue(req.headers.cookie, SESSION_COOKIE);
+  if (!cookieToken) return null;
+  const { tokenHash } = tokenFingerprint(cookieToken);
+  const session = db.findAuthSession(tokenHash);
+  if (!session) return null;
+  const expiry = sessionExpiry(session.expiresAt, session.lastSeenAt);
+  if (expiry.expired) {
+    db.deleteAuthSession(tokenHash);
+    return null;
+  }
+  if (expiry.nextExpiresAt) db.touchAuthSession(tokenHash, expiry.nextExpiresAt);
+  return { user: session.user, kind: 'cookie', credential: 'session', tokenHash };
+}
+
+/** 用户对外视图：永不携带密码哈希与企微 userid。 */
+function publicUser(user: AuthUser): { id: number; username: string; displayName: string; role: string; status: string } {
+  return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, status: user.status };
+}
+
+export function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServices, legacyUserId: number | undefined): http.RequestListener {
   const sessions = new Map<string, Session>();
+  const loginRateLimiter = new LoginRateLimiter();
+  // 会话属主判定：库内会话带 userId；存量单用户时代的旧会话文件无字段，按 admin（legacy）兜底。
+  const sessionOwner = (userId: number | undefined): number => userId ?? legacyUserId ?? -1;
 
   // 视觉（图片输入）能力：builtin 目录模型自动带，custom 由配置声明；附件图片走 image 块的前提。
   const visionSupported = () => runtime.model.input.includes('image');
@@ -411,7 +472,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
    * 转写基准 inputMeta（仅当按当前录音 payload 重算的指纹与该 job 指纹一致，证明 job 跑在
    * 当前转写上）——回填后重切闸门对已处理完的录音立即生效。apply=false 为 dry-run 只报告。
    */
-  function repairHemoryInheritance(apply: boolean): Array<{
+  function repairHemoryInheritance(apply: boolean, actor = 'csm'): Array<{
     recordingId: string; recordingEventId: string; title: string; inherited: Array<{ eventId: string; predecessorId: string; status: string; customerId: string | null; overlapRatio: number }>; metaBackfilled: boolean;
   }> {
     const report: Array<{ recordingId: string; recordingEventId: string; title: string; inherited: Array<{ eventId: string; predecessorId: string; status: string; customerId: string | null; overlapRatio: number }>; metaBackfilled: boolean }> = [];
@@ -438,7 +499,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
     }
     if (apply && report.length) {
-      workbench.db.audit('csm', 'repair_hemory_inheritance', 'hemory', 'inheritance',
+      workbench.db.audit(actor, 'repair_hemory_inheritance', 'hemory', 'inheritance',
         { recordings: report.length, inherited: report.reduce((sum, item) => sum + item.inherited.length, 0), metaBackfilled: report.filter((item) => item.metaBackfilled).length });
     }
     return report;
@@ -575,6 +636,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       events: session.events as Array<{ seq: number; event: unknown }>,
       customer: session.customer,
       archived: session.archived,
+      userId: session.userId,
     });
   }
 
@@ -632,6 +694,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       lastRecordId: null,
       customer: (stored.customer as CustomerContext | undefined) ?? null,
       archived: stored.archived === true,
+      userId: sessionOwner(stored.userId),
     };
     const agent = makeAgent(session);
     session.agent = agent;
@@ -670,10 +733,179 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         return json(res, 200, serviceVersionInfo(loadedBuildInfo, serverStartedAt));
       }
 
+      // ── 登录（唯一免鉴权的业务端点；version 之上已处理）──
+      if (req.method === 'POST' && path === '/api/auth/login') {
+        const body = await readBody(req);
+        const username = String(body.username ?? '').trim();
+        const password = String(body.password ?? '');
+        if (!username || !password) return json(res, 400, { error: '用户名与密码必填' });
+        const rateKey = `${req.socket.remoteAddress ?? '?'}|${username}`;
+        const lock = loginRateLimiter.checkLocked(rateKey);
+        if (lock.locked) {
+          return json(res, 429, { error: `失败次数过多，请 ${Math.ceil(lock.retryAfterSec / 60)} 分钟后再试`, retryAfterSec: lock.retryAfterSec });
+        }
+        const found = workbench.db.getUserByUsername(username);
+        // 用户不存在也走完同一条 scrypt 校验（幻影哈希），抹平用户名枚举计时差。
+        const passwordOk = verifyPassword(password, found?.passwordHash ?? PHANTOM_HASH);
+        if (!found || !passwordOk) {
+          loginRateLimiter.recordFailure(rateKey);
+          return json(res, 401, { error: '用户名或密码错误' });
+        }
+        loginRateLimiter.recordSuccess(rateKey);
+        if (found.status === 'disabled') return json(res, 403, { error: '账号已被禁用，请联系管理员' });
+        // CLI/CI 登录：带 tokenName 时签发 PAT（无过期、可吊销）而非 cookie 会话，令牌只回显这一次。
+        if (typeof body.tokenName === 'string' && body.tokenName.trim()) {
+          const { token, tokenHash } = issueToken();
+          const record = workbench.db.createAuthToken(tokenHash, found.id, body.tokenName.trim().slice(0, 80));
+          workbench.db.audit(found.username, 'auth.login', 'user', String(found.id), { via: 'token', name: record.name }, found.id);
+          return json(res, 200, { token, tokenKind: 'pat', user: publicUser(found) });
+        }
+        const { token, tokenHash } = issueToken();
+        workbench.db.createAuthSession(tokenHash, found.id, new Date(Date.now() + SESSION_TTL_MS).toISOString());
+        workbench.db.audit(found.username, 'auth.login', 'user', String(found.id), { via: 'cookie' }, found.id);
+        res.setHeader('Set-Cookie', sessionCookieHeader(token, Math.floor(SESSION_TTL_MS / 1000)));
+        return json(res, 200, { user: publicUser(found) });
+      }
+
+      // ── 鉴权门：除上方白名单外，所有 /api/* 必须携带有效凭证（cookie 会话或 Bearer）──
+      let auth: AuthContext | null = null;
+      if (path.startsWith('/api/')) {
+        auth = authenticate(workbench.db, req);
+        if (!auth) return json(res, 401, { error: '未登录或凭证已失效' });
+        if (auth.user.status === 'disabled') return json(res, 403, { error: '账号已被禁用' });
+        // CSRF：cookie 凭证的变更请求必须同源（SameSite=Lax 已挡大半，Origin 复核兜底；Bearer 不受 CSRF 影响）。
+        if (auth.kind === 'cookie' && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+          const origin = req.headers.origin;
+          if (origin) {
+            let sameOrigin = false;
+            try { sameOrigin = new URL(origin).host === req.headers.host; } catch { sameOrigin = false; }
+            if (!sameOrigin) return json(res, 403, { error: '跨站请求被拒绝' });
+          }
+        }
+      }
+      // 下方全部路由都是 /api/*（静态与白名单已在上方返回），非空断言安全。
+      const authCtx = auth as AuthContext;
+      const actor = authCtx.user.username;
+      const requireAdmin = (): boolean => authCtx.user.role === 'admin';
+
+      // ── 账号与会话 ──
+      if (req.method === 'GET' && path === '/api/auth/me') {
+        return json(res, 200, { user: publicUser(authCtx.user) });
+      }
+      if (req.method === 'POST' && path === '/api/auth/logout') {
+        if (authCtx.credential === 'session') {
+          workbench.db.deleteAuthSession(authCtx.tokenHash);
+          res.setHeader('Set-Cookie', clearSessionCookieHeader());
+        } else {
+          workbench.db.deleteAuthTokenByHash(authCtx.tokenHash);
+        }
+        workbench.db.audit(actor, 'auth.logout', 'user', String(authCtx.user.id), { credential: authCtx.credential }, authCtx.user.id);
+        return json(res, 200, { ok: true });
+      }
+      // PAT（个人访问令牌）：CLI/CI 的长效凭证，本人可建可吊销，令牌本体只在创建响应出现一次。
+      if (req.method === 'POST' && path === '/api/auth/tokens') {
+        const body = await readBody(req);
+        const name = (typeof body.name === 'string' ? body.name : '').trim() || 'unnamed';
+        const { token, tokenHash } = issueToken();
+        const record = workbench.db.createAuthToken(tokenHash, authCtx.user.id, name.slice(0, 80));
+        workbench.db.audit(actor, 'auth.token_create', 'user', String(authCtx.user.id), { name: record.name }, authCtx.user.id);
+        return json(res, 200, { token, tokenRecord: record });
+      }
+      if (req.method === 'GET' && path === '/api/auth/tokens') {
+        return json(res, 200, { tokens: workbench.db.listAuthTokens(authCtx.user.id) });
+      }
+      const patMatch = path.match(/^\/api\/auth\/tokens\/([0-9a-f-]+)$/);
+      if (req.method === 'DELETE' && patMatch) {
+        const ok = workbench.db.deleteAuthToken(patMatch[1]!, authCtx.user.id);
+        if (ok) workbench.db.audit(actor, 'auth.token_revoke', 'user', String(authCtx.user.id), { tokenId: patMatch[1] }, authCtx.user.id);
+        return json(res, 200, { ok });
+      }
+
+      // ── 用户管理（admin）──
+      if (path === '/api/users' || /^\/api\/users\/\d+/.test(path)) {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
+        if (req.method === 'GET' && path === '/api/users') {
+          return json(res, 200, { users: workbench.db.listUsers().map(publicUser) });
+        }
+        if (req.method === 'POST' && path === '/api/users') {
+          const body = await readBody(req);
+          const username = String(body.username ?? '').trim();
+          if (!USERNAME_PATTERN.test(username)) return json(res, 400, { error: '用户名须 2–32 位字母/数字/_ . -，且以字母或数字开头' });
+          if (workbench.db.getUserByUsername(username)) return json(res, 409, { error: `用户名 ${username} 已存在` });
+          const role = body.role === 'admin' ? 'admin' : 'member';
+          const supplied = typeof body.password === 'string' && body.password ? body.password : '';
+          if (supplied) {
+            const invalid = validatePassword(supplied);
+            if (invalid) return json(res, 400, { error: invalid });
+          }
+          const password = supplied || generatePassword();
+          const user = workbench.db.createUser({
+            username,
+            displayName: String(body.displayName ?? '').trim() || username,
+            role, passwordHash: hashPassword(password),
+            ...(typeof body.wecomUserid === 'string' && body.wecomUserid.trim() ? { wecomUserid: body.wecomUserid.trim() } : {}),
+          });
+          workbench.db.audit(actor, 'user.create', 'user', String(user.id), { role }, user.id);
+          return json(res, 200, { user: publicUser(user), ...(supplied ? {} : { initialPassword: password }) });
+        }
+        const userMatch = path.match(/^\/api\/users\/(\d+)(\/.*)?$/);
+        if (userMatch) {
+          const targetId = Number(userMatch[1]);
+          const target = workbench.db.getUserById(targetId);
+          const sub = userMatch[2] ?? '';
+          if (!target) return json(res, 404, { error: 'user not found' });
+          if (req.method === 'PATCH' && sub === '') {
+            const body = await readBody(req);
+            const patch: { displayName?: string; role?: 'admin' | 'member'; status?: 'active' | 'disabled'; wecomUserid?: string | null; passwordHash?: string } = {};
+            if (typeof body.displayName === 'string' && body.displayName.trim()) patch.displayName = body.displayName.trim();
+            if (body.role === 'admin' || body.role === 'member') patch.role = body.role;
+            if (body.status === 'active' || body.status === 'disabled') patch.status = body.status;
+            if (body.wecomUserid === null) patch.wecomUserid = null;
+            else if (typeof body.wecomUserid === 'string' && body.wecomUserid.trim()) patch.wecomUserid = body.wecomUserid.trim();
+            if (typeof body.password === 'string' && body.password) {
+              const invalid = validatePassword(body.password);
+              if (invalid) return json(res, 400, { error: invalid });
+              patch.passwordHash = hashPassword(body.password);
+            }
+            // 最后一名管理员不可降级/禁用，否则系统将无人管理。
+            if ((patch.role === 'member' || patch.status === 'disabled') && target.role === 'admin' && target.status === 'active') {
+              const otherAdmins = workbench.db.listUsers().filter((u) => u.role === 'admin' && u.status === 'active' && u.id !== targetId);
+              if (!otherAdmins.length) return json(res, 409, { error: '最后一名管理员不可降级或禁用' });
+            }
+            const updated = workbench.db.updateUser(targetId, patch);
+            if (patch.passwordHash || patch.status === 'disabled') workbench.db.deleteUserAuthSessions(targetId);
+            workbench.db.audit(actor, 'user.update', 'user', String(targetId), {
+              ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+              ...(patch.role !== undefined ? { role: patch.role } : {}),
+              ...(patch.status !== undefined ? { status: patch.status } : {}),
+              ...(patch.wecomUserid !== undefined ? { wecomBound: patch.wecomUserid != null } : {}),
+              ...(patch.passwordHash ? { passwordReset: true } : {}),
+            }, targetId);
+            return json(res, 200, { user: publicUser(updated!) });
+          }
+          if (req.method === 'POST' && sub === '/reset-password') {
+            const body = await readBody(req);
+            const supplied = typeof body.password === 'string' && body.password ? body.password : '';
+            if (supplied) {
+              const invalid = validatePassword(supplied);
+              if (invalid) return json(res, 400, { error: invalid });
+            }
+            const password = supplied || generatePassword();
+            workbench.db.updateUser(targetId, { passwordHash: hashPassword(password) });
+            // 密码重置即收回该用户全部在线会话（PAT 保留：属独立长效凭证，可另行吊销）。
+            workbench.db.deleteUserAuthSessions(targetId);
+            workbench.db.audit(actor, 'user.reset_password', 'user', String(targetId), {}, targetId);
+            return json(res, 200, { ok: true, ...(supplied ? {} : { password }) });
+          }
+        }
+      }
+
       // ── 备份（每日 04:00 上海时区自动全量备份，保留最近 3 份；CLI 入口 csm-agent backup）──
       if (req.method === 'POST' && path === '/api/backup/run') {
+        // 归档内含全部配置与密钥：触发权收敛到管理员。
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         try {
-          return json(res, 202, triggerBackup(workbench.db, dataDir(), 'manual').run);
+          return json(res, 202, triggerBackup(workbench.db, dataDir(), 'manual', actor).run);
         } catch (error) {
           return json(res, 409, { error: (error as Error).message });
         }
@@ -738,7 +970,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const previousCustomers = new Set(eventIds.map((id: string) => workbench.db.getSourceEvent(id)?.customerId).filter(Boolean) as string[]);
         try {
           const events = workbench.db.ignoreHemoryFragments(eventIds,
-            isRecord(body.expectedHashes) ? Object.fromEntries(Object.entries(body.expectedHashes).map(([key, value]) => [key, String(value)])) : {}, 'csm');
+            isRecord(body.expectedHashes) ? Object.fromEntries(Object.entries(body.expectedHashes).map(([key, value]) => [key, String(value)])) : {}, actor);
           workbench.db.markDraftsStaleForEvents(eventIds);
           workbench.db.deleteEvidenceForSourceEvents(eventIds);
           for (const id of previousCustomers) workbench.sync.recompute(id);
@@ -755,7 +987,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         const previousCustomers = new Set(eventIds.map((id: string) => workbench.db.getSourceEvent(id)?.customerId).filter(Boolean) as string[]);
         try {
           const events = workbench.db.attributeHemoryFragments(eventIds, customerId,
-            isRecord(body.expectedHashes) ? Object.fromEntries(Object.entries(body.expectedHashes).map(([key, value]) => [key, String(value)])) : {}, 'csm');
+            isRecord(body.expectedHashes) ? Object.fromEntries(Object.entries(body.expectedHashes).map(([key, value]) => [key, String(value)])) : {}, actor);
           workbench.db.markDraftsStaleForEvents(eventIds);
           workbench.db.deleteEvidenceForSourceEvents(eventIds);
           const byCustomer = new Map<string, string[]>();
@@ -789,7 +1021,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       if (req.method === 'POST' && path === '/api/hemory/fragments/inherit') {
         const body = await readBody(req);
         const apply = body.apply === true;
-        const plan = repairHemoryInheritance(apply);
+        const plan = repairHemoryInheritance(apply, actor);
         return json(res, 200, { apply, recordings: plan.length, inherited: plan.reduce((sum: number, item) => sum + item.inherited.length, 0),
           metaBackfilled: plan.reduce((sum: number, item) => sum + (item.metaBackfilled ? 1 : 0), 0), details: plan });
       }
@@ -812,7 +1044,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           const body = await readBody(req);
           const aliases = Array.isArray(body.aliases) ? body.aliases : [];
           try {
-            return json(res, 200, { aliases: workbench.db.setCustomerAliases(customerId, aliases, 'csm') });
+            return json(res, 200, { aliases: workbench.db.setCustomerAliases(customerId, aliases, actor) });
           } catch (error) {
             return json(res, 400, { error: (error as Error).message });
           }
@@ -920,10 +1152,9 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         if (!note) return json(res, 400, { error: '消除风险必须填写原因/动作（note）' });
         const alert = workbench.db.getAlert(alertMatch[1]);
         if (!alert) return json(res, 404, { error: 'alert not found' });
-        const actor = typeof body.actor === 'string' && body.actor.trim() ? body.actor.trim() : 'csm';
         const resolved = workbench.db.resolveAlert(alert.id, actor, note);
         if (!resolved) return json(res, 409, { error: '该预警已消除，无需重复操作' });
-        workbench.db.audit(actor, 'alert.resolve', 'customer_alert', alert.id, { triggerKey: alert.triggerKey, note });
+        workbench.db.audit(actor, 'alert.resolve', 'customer_alert', alert.id, { triggerKey: alert.triggerKey, note }, authCtx.user.id);
         return json(res, 200, resolved);
       }
 
@@ -984,13 +1215,13 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/dismiss') {
-          try { return json(res, 200, decorateDraftBatch(workbench.drafts.dismissBatch(batchId))); }
+          try { return json(res, 200, decorateDraftBatch(workbench.drafts.dismissBatch(batchId, actor))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/confirm') {
           const body = await readBody(req);
           try {
-            const { items } = await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : []);
+            const { items } = await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : [], actor);
             return json(res, 200, { items: items.map(decorateDraftItem) });
           } catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
@@ -1038,7 +1269,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/dismiss') {
-          try { return json(res, 200, decorateDraftItem(workbench.drafts.dismissItem(itemId))); }
+          try { return json(res, 200, decorateDraftItem(workbench.drafts.dismissItem(itemId, actor))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
       }
@@ -1184,13 +1415,16 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
 
       // ── MCP configuration (read + save/reconnect) ──
+      // 阶段 1 仍为全局单套配置（含明文 token）：读写收敛到管理员；阶段 2 改为按用户「我的连接」。
       if (req.method === 'GET' && path === '/api/config/mcp') {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         return json(res, 200, {
           servers: loadMcpServers(),
           failures: [...runtime.mcp.failures.entries()],
         });
       }
       if (req.method === 'PUT' && path === '/api/config/mcp') {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         const body = await readBody(req);
         const err = validateServers(body.servers);
         if (err) return json(res, 400, { error: err });
@@ -1219,6 +1453,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         });
       }
       if (req.method === 'PUT' && path === '/api/config/llm') {
+        // LLM 密钥是全部署共享配置：仅管理员可切换。
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         const body = await readBody(req);
         if (!body.provider || !body.model) return json(res, 400, { error: 'provider 与 model 必填' });
         const provider = String(body.provider);
@@ -1285,6 +1521,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         return json(res, 200, searchConfigStatus(loadSearchConfig()));
       }
       if (req.method === 'PUT' && path === '/api/config/search') {
+        // 搜索密钥同为共享配置：仅管理员可写。
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         const body = await readBody(req);
         const current = loadSearchConfig();
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey : current.apiKey;
@@ -1295,18 +1533,22 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       }
 
       // ── records ──
+      // 写入审批记录挂在会话上：随会话属主可见（存量无主记录归 admin）。
       if (req.method === 'GET' && path === '/api/records') {
-        const sorted = [...store.records].sort((a, b) => b.createdAt - a.createdAt);
+        const sorted = [...store.records]
+          .filter((r) => sessionOwner(sessions.get(r.sessionId)?.userId) === authCtx.user.id)
+          .sort((a, b) => b.createdAt - a.createdAt);
         return json(res, 200, { records: sorted });
       }
 
       // ── session list ──
       // 会话列表默认剔除已归档；include=archived 返回全量（网页已归档区与 CLI --all 诊断口）。
+      // 会话是个人工作区：只看自己的（存量旧会话按 admin 归属兜底）。
       if (req.method === 'GET' && path === '/api/sessions') {
-        const sessions = store.listSessions();
+        const mine = store.listSessions().filter((s) => sessionOwner(s.userId) === authCtx.user.id);
         const visible = url.searchParams.get('include') === 'archived'
-          ? sessions
-          : sessions.filter((s) => s.archived !== true);
+          ? mine
+          : mine.filter((s) => s.archived !== true);
         return json(res, 200, { sessions: visible });
       }
 
@@ -1330,6 +1572,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           lastRecordId: null,
           customer: null,
           archived: false,
+        userId: authCtx.user.id,
         };
         session.agent = makeAgent(session);
         sessions.set(session.id, session);
@@ -1341,6 +1584,8 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
       const match = path.match(/^\/api\/sessions\/([0-9a-f-]+)(\/.*)?$/);
       const session = match ? sessions.get(match[1]) : undefined;
       if (match && !session) return json(res, 404, { error: 'session not found' });
+      // 会话属主校验：个人工作区仅本人可读写（含 SSE 回放、附件、确认审批）。
+      if (session && session.userId !== authCtx.user.id) return json(res, 403, { error: '无权访问他人的会话' });
       if (session) {
         const sub = match![2] ?? '';
 
@@ -1598,7 +1843,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
               if (!updated) return json(res, 400, { error: '案例草稿更新失败（版本已变化或已发布）' });
               // 写回护栏（非阻断）：精修稿异常（条目失控/超长/内部残留）随响应返回，由 CSM 复核。
               const refineWarnings = caseNarrativeWarnings(updated.fields);
-              workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id, warnings: refineWarnings });
+              workbench.db.audit('agent', 'refine_case_draft', 'case_draft', updated.id, { version: updated.version, sessionId: session.id, warnings: refineWarnings, approvedBy: actor });
               session.pending.resolve(approvedDraft);
               session.pending = null;
               const refineRecord = session.lastRecordId
@@ -1697,6 +1942,10 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
 export async function startServer(runtime: Runtime, port: number): Promise<http.Server> {
   const store = new Store(dataDir());
   const db = new WorkbenchDatabase(dataDir());
+  // 多人化引导：空库首启创建 admin（CSM_ADMIN_PASSWORD 或随机生成并打印一次）；
+  // 存量单用户部署的历史数据（会话/客户/草稿）一律归属该 admin，升级后除多一步登录外行为不变。
+  ensureBootstrapAdmin(db);
+  const legacyUserId = db.getUserByUsername('admin')?.id ?? db.listUsers()[0]?.id;
   // Preserve useful customer identities from pre-SQLite output records.
   for (const record of store.records) {
     const fields = record.fields ?? {};
@@ -1751,7 +2000,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
   const orphanedRuns = db.failOrphanedSyncRuns();
   const resetJobs = db.resetInterruptedHemorySegmentationJobs();
   if (orphanedRuns || resetJobs) {
-    db.audit('csm', 'recover_interrupted_sync_jobs', 'sync_run', 'startup', { orphanedRuns, resetSegmentationJobs: resetJobs });
+    db.audit('system', 'recover_interrupted_sync_jobs', 'sync_run', 'startup', { orphanedRuns, resetSegmentationJobs: resetJobs });
   }
   // 备份恢复标记消费：CLI 离线恢复后落 backup_restore 审计（CLI 不直接写 DB，保持单写者）。
   consumeRestoreMarker(db, dataDir());
@@ -1786,7 +2035,7 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     cases.resumePending();
   }, 5_000);
   resumeTimer.unref();
-  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki, opportunities }));
+  const server = http.createServer(buildHandler(runtime, store, { db, sync, cases, drafts, weekly, wiki, opportunities }, legacyUserId));
   // 旧进程检测的锚点：进程启动时加载的构建 + 受监管时的磁盘变化自检。
   loadedBuildInfo = readBuildInfo();
   serverStartedAt = new Date().toISOString();
@@ -1821,6 +2070,9 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     }
     throw error;
   });
-  await new Promise<void>((resolve) => server.listen(port, resolve));
+  // 监听地址显式收敛：默认只绑本机回环（此前不传 host 会绑全部网卡，鉴权上线前等于 API 裸奔到局域网）。
+  // 多人局域网/公网部署用 CSM_HOST 打开（阶段 5 部署形态定后再配 TLS 反代）。
+  const host = process.env.CSM_HOST ?? '127.0.0.1';
+  await new Promise<void>((resolve) => server.listen(port, host, resolve));
   return server;
 }

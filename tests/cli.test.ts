@@ -508,3 +508,17 @@ test('agent CLI exposes attachments and the customer-detail tool; config llm set
   assert.ok(agent?.tools?.includes('get_customer_detail'), 'agent capability must list get_customer_detail');
   assert.ok(agent?.api.includes('/api/sessions/:id/attachments/:attId'), 'agent capability must list the attachment route');
 });
+
+test('help and capabilities expose the auth command group for multi-user deployments', () => {
+  const help = runCli('help');
+  assert.match(help.stdout, /csm-agent login \[用户名\]/);
+  assert.match(help.stdout, /csm-agent logout/);
+  assert.match(help.stdout, /csm-agent whoami/);
+  assert.match(help.stdout, /csm-agent users list\|create\|reset-password\|set-role\|enable\|disable/);
+  assert.match(help.stdout, /csm-agent token create\|list\|revoke/);
+  const capabilities = JSON.parse(runCli('capabilities', '--json').stdout) as Array<{ command: string }>;
+  const commands = new Set(capabilities.map((item) => item.command));
+  for (const name of ['login', 'users', 'token']) {
+    assert.ok(commands.has(name), `capabilities 缺少命令: ${name}`);
+  }
+});

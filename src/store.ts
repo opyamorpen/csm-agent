@@ -29,6 +29,8 @@ export interface SessionMeta {
   customerName?: string;
   /** Archived sessions stay on disk but are hidden from the default session list. */
   archived?: boolean;
+  /** 归属登录用户；存量单用户时代的旧会话文件无此字段（读取端按 admin 兜底）。 */
+  userId?: number;
 }
 
 export interface StoredSession {
@@ -40,6 +42,7 @@ export interface StoredSession {
   events: Array<{ seq: number; event: unknown }>;
   customer?: unknown;
   archived?: boolean;
+  userId?: number;
 }
 
 /** Default data home for sessions + records. Override with CSM_DATA_DIR. */
@@ -92,6 +95,7 @@ export class Store {
             createdAt: s.createdAt,
             updatedAt: s.updatedAt,
           };
+          if (typeof s.userId === 'number') meta.userId = s.userId;
           if (c?.crm_customer_id) meta.customerId = c.crm_customer_id;
           if (c?.customer_name) meta.customerName = c.customer_name;
           if (s.archived === true) meta.archived = true;

@@ -71,6 +71,17 @@ npm run dev
 
 默认地址为 [http://127.0.0.1:3210](http://127.0.0.1:3210)。首次进入后在“设置”中配置 CRM、ONES、Hemory MCP；点击“同步数据”执行首次导入。服务每天 02:00（上海时区）刷新 CRM/ONES，并在中国时间 13:00、20:00 拉取 Hemory 当天 `00:00` 至执行时刻的完整转写，再等待 Agent 大模型完成话题分段。客户公开动态自动轮换：每天中国时间 20:00–次日 08:00 夜间错峰时段每小时检索 1 个客户（8 角度联网搜索 + 1 次模型分类——错峰 token 更便宜，也不打满免费搜索限流），按「最久未查优先」约两周轮完全部非流失客户——14 天窗口内不重复搜、每天每客户至多尝试 1 次、失败的客户次日最先重试；Mac 合盖睡眠漏掉的槽位无需手动补：唤醒后过期的槽立即补跑一次，漏掉的客户自动排到「最久未查」队首由后续槽位捡回（想立即追进度用 `csm-agent webintel --rotation`）。同一条新闻跨轮命中按（客户, URL, 日期）自然键去重，不重复堆积证据。客户详情支持单客户刷新（公开动态强制立查，不受 14 天门限制）。
 
+### 登录与多用户（密码登录）
+
+所有 `/api/*`（除 `POST /api/auth/login` 与 `GET /api/version`）都要求登录凭证；页面首次打开会弹出登录页。
+
+- **首启引导**：空库首次启动自动创建管理员 `admin`——密码取 `CSM_ADMIN_PASSWORD` 环境变量，未设置则随机生成并**打印到服务日志一次**（`csm-agent service logs` 查看）。存量单用户部署升级后，历史会话/记录全部归属 admin，除多一步登录外行为不变。
+- **登录方式**：浏览器走用户名 + 密码（HttpOnly cookie 会话，7 天滑动过期）；CLI 走 `csm-agent login`（签发个人访问令牌 PAT，存 `~/.csm-agent/cli-auth.json`，0600，按服务地址键控）。企业微信扫码登录为规划中的接入层（`users.wecom_userid` 字段已就位），凭证配置好后启用。
+- **账号管理（管理员）**：`csm-agent users list / create <用户名> [--display-name=X] [--role=admin|member] [--password=X] / reset-password / set-role / enable / disable`；create/reset 缺省生成随机密码仅回显一次，重置密码会收回该用户全部在线会话；最后一名管理员不可降级或禁用。无自助注册。
+- **权限口径（现阶段）**：`admin` 管理用户与全局配置（LLM/搜索密钥、MCP 配置、备份触发）；`member` 使用业务功能。Agent 会话与写入审批记录按属主私有（他人的会话 403）；审计（`audit_log`）记录真实登录用户名与 `user_id`，审批落 CRM/ONES 的执行记录带操作人。
+- **安全要点**：密码 scrypt 加盐哈希（`node:crypto`，无外部依赖）；登录失败按 用户名+来源IP 连续 5 次锁 15 分钟；cookie 变更请求校验同源（CSRF 防御）；服务默认只监听 `127.0.0.1`（此前未绑 host 会监听全部网卡），多人局域网/公网部署用 `CSM_HOST` 打开（公网务必置于 HTTPS 反代之后）。
+- **CLI/CI 令牌**：`csm-agent token create [--name=X]` 生成 PAT（明文仅显示一次、无过期、可 `token revoke` 吊销），供脚本以 `Authorization: Bearer <token>` 调用 API。
+
 ### 构建版本与旧进程检测
 
 `public/` 静态文件每次请求从磁盘实时读取（页面永远最新），而 API 路由在进程启动时加载进内存——**构建后若进程不重启，就会出现「新 UI + 旧 API」分裂**（新端点 404、新按钮失效）。防护体系：
@@ -96,6 +107,8 @@ csm-agent capabilities --json
 ```bash
 csm-agent serve 3210
 csm-agent doctor
+csm-agent login # 多人部署：交互输密码登录，此后所有命令自动携带凭证（logout 退出）
+csm-agent whoami # 查看当前服务地址与登录身份
 csm-agent customers 青岛高测
 csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
