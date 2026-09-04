@@ -4221,6 +4221,7 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseInternalEvidenceLabel, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
 import { ARCHITECTURE_FIGURE_PALETTE, parseArchitectureGraph, renderArchitectureSvg, type ArchitectureGraph } from '../src/workbench/case-architecture-figure.js';
 import { CAPABILITY_MAP_PALETTE, parseCapabilityMapBlueprint, renderCapabilityMapSvg, type CapabilityMapBlueprint } from '../src/workbench/case-capability-map-figure.js';
+import { parseValueMapBlueprint, renderValueMapSvg, type ValueMapBlueprint } from '../src/workbench/case-value-map-figure.js';
 import { Resvg } from '@resvg/resvg-js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
@@ -4486,7 +4487,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v13-architecture-layered-render');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v14-value-map-deterministic-render');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5357,6 +5358,25 @@ test('workbench: renderCapabilityMapSvg creates deterministic adaptive blueprint
   assert.ok(dense && sanitizeCaseSvg(dense), '六阶段六能力密集图可渲染');
 });
 
+test('workbench: value map blueprint enforces 3~5 paired items and deterministic three-zone render', () => {
+  const item = (index: number) => ({ title: `痛点${index}`, detail: `现状问题说明${index}，需要集中治理` });
+  const value = (index: number) => ({ title: `价值${index}`, detail: `已确认改善结果${index}，便于持续跟踪` });
+  const blueprint: ValueMapBlueprint = { painPoints: [1, 2, 3, 4].map(item), values: [1, 2, 3, 4].map(value) };
+  const parsed = parseValueMapBlueprint(blueprint);
+  assert.ok('blueprint' in parsed, '四条痛点/价值通过校验');
+  const svg = renderValueMapSvg((parsed as { blueprint: ValueMapBlueprint }).blueprint)!;
+  assert.match(svg, /viewBox="0 0 1440 720"/);
+  assert.ok(svg.includes('痛点及挑战') && svg.includes('id="value-map-solution-content"'), '三分区标题与方案槽位存在');
+  assert.equal((svg.match(/痛点[1-4]/g) ?? []).length, 4);
+  assert.equal((svg.match(/价值[1-4]/g) ?? []).length, 4);
+  assert.equal(renderValueMapSvg(blueprint), svg, '同输入输出稳定');
+  assert.ok(sanitizeCaseSvg(svg), '确定性模板产物可消毒');
+  assert.match((parseValueMapBlueprint({ ...blueprint, painPoints: [1, 2].map(item) }) as { error: string }).error, /3~5/);
+  assert.match((parseValueMapBlueprint({ ...blueprint, values: [1, 2, 3].map(value) }) as { error: string }).error, /数量必须相等/);
+  const five = { painPoints: [1, 2, 3, 4, 5].map(item), values: [1, 2, 3, 4, 5].map(value) };
+  assert.ok(renderValueMapSvg(five), '五条密集图可渲染');
+});
+
 // ── 架构图（architecture）v11：内容契约解析 + 服务端确定性模板渲染 ──
 
 /** 图 A 真实内容（回归夹具）：OA 系统 3 模块 ↔ ONES 4 模块、3 条流。 */
@@ -5767,10 +5787,10 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.ok(!capabilityMap.includes('tspan'), '映射图不再要求模型处理 SVG 换行');
   assert.match(capabilityMap, /【ONES 产品能力图谱/, '映射图注入能力图谱');
   const valueMap = buildCaseFigurePrompt({ ...base, sectionLabel: '方案价值概述', kind: 'value_map' });
-  assert.match(valueMap, /你只画两个区/, '全景图只画痛点带与价值栏两区');
+  assert.match(valueMap, /痛点及挑战/, '全景图顶部标题固定');
   assert.match(valueMap, /按序一一对位/, '痛点价值编号对位规则');
-  assert.match(valueMap, /viewBox="0 0 1440 720"/, '2:1 横版画布');
-  assert.match(valueMap, /完全留空/, '方案区必须留空（服务端拼装）');
+  assert.match(valueMap, /1440×720/, '2:1 横版画布');
+  assert.match(valueMap, /各 3~5 条且数量必须相等/, '痛点与价值数量契约');
   assert.match(valueMap, /【ONES 产品能力图谱/, '全景图注入能力图谱');
   const flow = buildCaseFigurePrompt({ ...base, sectionLabel: '业务现状', kind: 'flow_current' });
   assert.match(flow, /节点总数不超过 10 个/, '流程图维持 v7 规模口径');
@@ -5851,7 +5871,19 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
         if (prompt.includes('章节配图')) {
           // 分发须先判全景图：其 brief 也提到「需求场景-产品能力映射图」（方案区嵌入来源）。
           if (prompt.includes('痛点-方案-价值全景图')) {
-            return { content: [{ type: 'text', text: JSON.stringify({ svg: CLEAN_CASE_FIGURE_SVG.replace('需求提出', '痛点到价值'), caption: '全景：三痛点对三价值收束' }) }], stopReason: 'stop' };
+            return { content: [{ type: 'text', text: JSON.stringify({
+              caption: '全景：三痛点对三价值收束',
+              painPoints: [
+                { title: '进度信息分散', detail: '项目进展依赖人工汇总，延期风险暴露较晚' },
+                { title: '质量验收不稳', detail: '交付标准缺少统一留痕，问题反复沟通' },
+                { title: '资源投入难看清', detail: '预算、工时和资源使用缺乏统一视图' },
+              ],
+              values: [
+                { title: '项目进度可控', detail: '排期、工时与实际进展集中呈现，及时调整' },
+                { title: '质量要求不跑偏', detail: '交付标准线上提交与核准，过程记录可追溯' },
+                { title: '资源投入有节奏', detail: '预算、工时与资源饱和度统一查看，提前调度' },
+              ],
+            }) }], stopReason: 'stop' };
           }
           return { content: [{ type: 'text', text: JSON.stringify(CAPABILITY_BLUEPRINT_RESPONSE) }], stopReason: 'stop' };
         }
@@ -5893,7 +5925,8 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
     assert.match(figurePrompt, /【痛点素材·业务诉求】/, '锚点含业务诉求定稿');
     assert.match(figurePrompt, /【价值正文·方案价值概述】/, '锚点含价值定稿');
     assert.ok(!figurePrompt.includes('【方案正文·业务解决方案】'), '方案正文不再注入锚点');
-    assert.match(figurePrompt, /完全留空/, '方案区留空规则');
+    assert.match(figurePrompt, /痛点及挑战/, '顶部标题固定');
+    assert.match(figurePrompt, /各 3~5 条且数量必须相等/, '痛点与价值数量契约');
     assert.match(figurePrompt, /【ONES 产品能力图谱/, '全景图注入能力图谱');
     // 服务端拼装：value_map 落库 SVG 嵌入「方案」分区框+标题牌+映射图本体（含其标识内容）。
     assert.ok(valueMapFigure.svg.includes('方案'), '方案区标题牌');

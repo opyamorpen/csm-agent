@@ -14,10 +14,11 @@ import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAss
 import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
 import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
+import { injectValueMapSolutionSvg, parseValueMapBlueprint, renderValueMapSvg } from './case-value-map-figure.js';
 
 /** v13：业务解决方案图 1 与系统集成图均采用「模型供结构化内容、服务端模板确定性渲染」。
  * 提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v13-architecture-layered-render';
+export const CASE_GENERATION_VERSION = 'case-v14-value-map-deterministic-render';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1840,7 +1841,7 @@ const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
   capability_map: '需求场景-产品能力映射图：横向分层业务蓝图——目标或核心场景、业务阶段、模块与能力矩阵、平台支撑、系统集成，有明确素材时追加组织保障；列对位即映射，仅阶段标题之间保留流程箭头',
   architecture: '系统集成架构图：多系统集成场景专用——素材表明方案涉及外部系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时绘制：ONES 平台为核心、外部系统环绕对接、连线带数据标注。模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
-  value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——顶部痛点带 + 右栏价值栏两区由模型绘制（痛点与价值按序一一对位），左下方案区由服务端嵌入需求场景-产品能力映射图',
+  value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——顶部痛点及挑战、左下方案、右侧价值三块区域由服务端统一渲染，痛点与价值按序一一对位',
 };
 
 /** 配图绘图规范·通用条目（所有 kind 适用；规模/画布/布局差异在 CASE_FIGURE_KIND_RULES 专属条目里）。 */
@@ -1886,12 +1887,11 @@ const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
     '- 系统名、模块、数据项、字段只能来自素材原文与能力图谱，不虚构未交付组件；图内文字不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）。素材实际无外部系统与 ONES 对接时输出 {"systems":[],"hubModules":[],"flows":[]} 全空 graph（系统将放弃本图）。',
   ].join('\n'),
   value_map: [
-    '- 规模：痛点卡与价值卡各 3~4 条且数量必须相等，SVG 约 4~10k 字符即可。',
-    '- 画布 2:1 横版，viewBox="0 0 1440 720"。',
-    '- 你只画两个区：①顶部痛点带——红色虚线圆角框（x=44 至 x=1396、y=24 至 y=184）+ 框顶中央压红色实心「痛点」标题牌，框内痛点卡横向均排：红色实心标题条带编号（白字，如「1. 收集靠邮件」6~10 字）+ 白底卡身一行描述（不超过 30 个字），从业务现状/业务诉求正文中提炼；②右侧价值栏——蓝色虚线圆角框（x=1030 至 x=1396、y=208 至 y=696）+ 框顶蓝色实心「价值」标题牌，价值卡纵向排列：蓝色实心标题条带编号（如「1. 进度可控」）+ 白底卡身描述（不超过 30 个字）。',
-    '- 痛点与价值按序一一对位：第 i 个痛点对应第 i 个价值，措辞互相呼应。',
-    '- 左下方案区（x=44 至 x=1004、y=208 至 y=696）由服务端拼装解决方案章节的配图，你必须把该区域完全留空——不得在其中画任何框、线或文字，痛点带与价值栏也不得越界侵入该区域。',
-    '- 两区之间不画任何连线；色彩语义：痛点统一红色（标题牌与卡标题条用 #D32F2F）、价值统一蓝色（标题牌与卡标题条用 #2467EC，与左下方案区嵌入的映射图主蓝同色系），整图白底。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统按 1440×720 三分区模板渲染。valueMap 结构：{"painPoints":[{"title":"项目延期","detail":"进度依赖人工汇总，风险常到最后才暴露"}],"values":[{"title":"项目进度可控","detail":"排期、工时与实际进展集中呈现，及时调整"}]}。',
+    '- painPoints 与 values 各 3~5 条且数量必须相等；按序一一对应，痛点标题写现状问题，价值标题写已确认改善，不要写空泛口号。',
+    '- 每项必须包含 title 与 detail；title 为 4~14 字宽短语，detail 为 1~34 字宽的客户化短说明，优先保留数据对象、管理动作和已确认结果。',
+    '- 顶部区域标题固定为「痛点及挑战」，左下区域固定为「方案」，右侧区域固定为「价值」；系统会将第三章节 capability_map 整体缩小嵌入左下区域，你不要输出方案区文字、坐标、颜色或 SVG。',
+    '- 痛点、价值、方案内容均须来自定稿正文、引用素材或已确认交付事实；无证据时减少条目或放弃整图，不使用待补充/unknown，不虚构数字与成效。',
   ].join('\n'),
 };
 
@@ -1911,7 +1911,7 @@ const CAPABILITY_CONTENT_COMMON_RULES = [
 /**
  * 配图生成 prompt 的唯一组装出口（生成调用 / 探针脚本 / 单测共用一份实现，防止三处漂移）。
  * capability_map / architecture / value_map 额外注入 ONES 能力图谱（模块命名依据），其余 kind 不注入。
- * v12：capability_map / architecture 只提取结构化内容，由服务端模板渲染。
+ * v14：capability_map / architecture / value_map 只提取结构化内容，由服务端模板渲染。
  */
 export function buildCaseFigurePrompt(input: {
   customerName: string;
@@ -1927,14 +1927,17 @@ export function buildCaseFigurePrompt(input: {
     : '';
   const isArchitecture = input.kind === 'architecture';
   const isCapabilityMap = input.kind === 'capability_map';
-  const isStructured = isArchitecture || isCapabilityMap;
+  const isValueMap = input.kind === 'value_map';
+  const isStructured = isArchitecture || isCapabilityMap || isValueMap;
   const contract = isArchitecture
     ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","graph":{...}}（graph 结构见本图专属规范）'
     : isCapabilityMap
       ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","blueprint":{...}}（blueprint 结构见本图专属规范）'
-      : '只输出 JSON：{"svg":"...","caption":"..."}';
+      : isValueMap
+        ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","painPoints":[...],"values":[...]}（valueMap 结构见本图专属规范）'
+        : '只输出 JSON：{"svg":"...","caption":"..."}';
   const commonRules = isArchitecture ? ARCHITECTURE_CONTENT_COMMON_RULES
-    : isCapabilityMap ? CAPABILITY_CONTENT_COMMON_RULES : CASE_FIGURE_COMMON_RULES;
+    : isCapabilityMap ? CAPABILITY_CONTENT_COMMON_RULES : isValueMap ? '- 思考从简：先按顺序整理 3~5 条痛点及对应价值，再立即输出；只输出 JSON，不要输出 SVG、markdown 或解释文字。\n- 所有文字均为面向客户的中文业务短语；caption 是 30 字以内的图注。' : CASE_FIGURE_COMMON_RULES;
   return `为客户「${input.customerName}」的客户成功案例绘制「${input.sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[input.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。${contract}\n`
     + `${isStructured ? '内容规范：' : '绘图规范：'}\n`
     + `${commonRules}\n`
@@ -2078,6 +2081,18 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
         } else {
           structureFeedback = parsed.error;
           lastError = `能力映射图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        }
+      } else if (figure.kind === 'value_map') {
+        const parsed = parseValueMapBlueprint(record, { textGuard: caseInternalEvidenceLabel });
+        if ('blueprint' in parsed) {
+          const rendered = renderValueMapSvg(parsed.blueprint);
+          const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
+          if (result) return result;
+          structureFeedback = rendered ? '' : '痛点及价值必须各 3~5 条且数量相等，或内容超出画布承载，请精选条目并缩短说明';
+          lastError = `价值全景图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        } else {
+          structureFeedback = parsed.error;
+          lastError = `价值全景图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         }
       } else {
         const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
@@ -2276,12 +2291,15 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
         ? valueMapAnchorText(chapters, chapterOutput)
         : chapterAnchorText(figure.section as CaseChapterKey, chapterOutput);
       const generated = await generateFigureWithModel(runtime, input, snapshot, figure, communications, anchor, milestones, slots, stamped);
-      // 一指禅方案区拼装：不占并发槽，等解决方案映射图完成后把 capability_map 以嵌套 <svg> 嵌入模型留空的左下区域；
-      // 拼装失败退回未拼装版不阻断。
+      // 方案区拼装：不占并发槽，等解决方案映射图完成后注入确定性渲染器预留的内容槽位；
+      // 旧版模型 SVG 继续走 composeValueMapSvg 兼容路径。
       if (generated && figure.kind === 'value_map') {
         const solutionFigure = await (figureTasksByKey.get('solution:capability_map') ?? Promise.resolve(null));
-        const composed = composeValueMapSvg(generated.svg, solutionFigure);
-        if (composed) return { ...generated, svg: composed };
+        const composed = generated.svg.includes('value-map-solution-content')
+          ? injectValueMapSolutionSvg(generated.svg, solutionFigure?.svg ?? null)
+          : composeValueMapSvg(generated.svg, solutionFigure);
+        const sanitizedComposed = composed ? sanitizeCaseSvg(composed) : null;
+        if (sanitizedComposed) return { ...generated, svg: sanitizedComposed };
         stamped?.('一指禅方案区拼装未通过消毒，保留未拼装版本');
       }
       return generated;
