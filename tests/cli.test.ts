@@ -49,6 +49,8 @@ test('version --json prints the install fingerprint for cross-machine comparison
   assert.match(help.stdout, /version \[--json\]/);
   assert.match(help.stdout, /backup (list|run|restore)/, 'help 应包含备份三命令');
   assert.match(help.stdout, /--db-only/, 'help 应说明 --db-only 恢复语义');
+  assert.match(help.stdout, /customers aliases <客户ID或名称>/, 'help 应包含客户别名维护子命令');
+  assert.match(help.stdout, /--set 别名1,别名2\] \[--add 别名\] \[--remove 别名\]/, 'help 应说明别名三种维护方式');
 });
 
 test('CLI exposes machine-readable core capability coverage without a running server', () => {
@@ -56,9 +58,13 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.equal(result.status, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout) as Array<{ command: string; workflow: string; api: string[] }>;
   const commands = new Set(capabilities.map((item) => item.command));
-  for (const command of ['serve', 'doctor', 'config', 'customers', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'backup', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
+  for (const command of ['serve', 'doctor', 'config', 'customers', 'customers aliases', 'customer', 'webintel', 'opportunities', 'timeline', 'workhours', 'action', 'case', 'sync', 'backup', 'hemory', 'draft', 'service', 'version', 'agent', 'sessions', 'api']) {
     assert.ok(commands.has(command), `missing CLI capability: ${command}`);
   }
+  // 客户别名维护：写能力条目必须暴露整组替换端点（agent 解析口径：全称/简称/别名精确 + 唯一子串兜底）。
+  const aliasCapability = capabilities.find((item) => item.command === 'customers aliases')!;
+  assert.ok(aliasCapability.api.includes('PUT /api/customers/:id/aliases'), 'alias capability must expose the replace endpoint');
+  assert.match(aliasCapability.notes ?? '', /唯一子串/);
   // 数据备份能力：run/list 走服务 API，restore 是本地离线命令（notes 必须说明保留策略与恢复语义）。
   const backupCapability = capabilities.find((item) => item.workflow === 'data-backup')!;
   assert.ok(backupCapability.api.includes('POST /api/backup/run'), 'backup capability must expose the manual trigger endpoint');

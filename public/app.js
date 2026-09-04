@@ -3117,6 +3117,26 @@
     customerOverview.innerHTML = '';
     const head = el('div', 'customer-detail-head');
     const title = el('div'); title.append(el('h1', null, c.name), el('p', null, [c.shortName, c.industry, c.csmName && `CSM ${c.csmName}`].filter(Boolean).join(' · ')));
+    // 别名（本地叠加层，同步不覆盖）：Agent 解析客户支持全称/简称/别名精确匹配 + 唯一子串兜底，
+    // 与全称无子串关系的品牌名/口语简称须在此维护后才能被解析。
+    const aliases = Array.isArray(data.aliases) ? data.aliases : [];
+    const aliasRow = el('div', 'alias-row');
+    aliasRow.append(el('span', 'alias-row-label', '别名'));
+    if (aliases.length) for (const alias of aliases) aliasRow.append(el('span', 'alias-chip', alias));
+    else aliasRow.append(el('span', 'alias-row-empty', '未维护（品牌名等与全称无关的叫法须维护别名才能被 Agent 解析）'));
+    const aliasEdit = el('button', 'quiet-command small alias-edit', '编辑别名');
+    aliasEdit.onclick = async () => {
+      const raw = await promptDialog('客户别名（多个用逗号分隔，留空清除全部）：', aliases.join('，'));
+      if (raw == null) return;
+      const next = raw.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+      try {
+        const result = await api(`/api/customers/${encodeURIComponent(customerId)}/aliases`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aliases: next }) });
+        await openCustomer(customerId);
+        await alertDialog(result.aliases.length ? `别名已更新：${result.aliases.join('、')}` : '别名已清空');
+      } catch (error) { await alertDialog(`别名保存失败：${error.message}`); }
+    };
+    aliasRow.append(aliasEdit);
+    title.append(aliasRow);
     const commands = el('div', 'row-actions');
     // 三个刷新类操作收进「刷新数据」菜单：首项是母操作（三套系统同步内部已强制跑公开动态并级联重算风险/机会），
     // 后两项是绕过门控的强制子集（公开动态 7 天节流门 / 机会指纹+时长门）；同步等待型的加载态挂到触发按钮上（菜单已收起）。

@@ -20,7 +20,7 @@ const DESK_TYPE_LABELS: Record<OnesDeskDraftType, string> = {
 };
 
 export interface OnesDeskToolDeps {
-  /** 按客户全称/简称唯一精确匹配取 CRM「使用版本」（公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版）；未提供或未命中为 null。 */
+  /** 按客户全称/简称/别名唯一匹配取 CRM「使用版本」（公有云版 / 私有部署按年订阅版 / 私有部署一次性授权版）；未提供或未命中为 null。 */
   getUsageVersion(customerName?: string): string | null | undefined;
 }
 
@@ -36,7 +36,7 @@ export const onesDeskFieldsTool: Tool = {
     record_type: Type.Union([Type.Literal('suggestion'), Type.Literal('ticket'), Type.Literal('operations')], {
       description: '工作项类型：suggestion=建议和反馈、ticket=工单、operations=运维工单',
     }),
-    customer_name: Type.Optional(Type.String({ description: '客户全称或简称（唯一精确匹配，用于实例部署类型的 CRM 使用版本判定）' })),
+    customer_name: Type.Optional(Type.String({ description: '客户全称/简称/别名（唯一匹配：精确或唯一子串，用于实例部署类型的 CRM 使用版本判定）' })),
   }),
 };
 

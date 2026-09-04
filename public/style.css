@@ -985,6 +985,11 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .workspace-empty::before { content: ''; display: block; margin: 0 auto 12px; width: 34px; height: 34px; border-radius: 50%; background: var(--accent-soft); box-shadow: inset 0 0 0 7px var(--panel); }
 
 .customer-detail-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin: 12px 0 18px; }
+/* 客户别名行：全称下的 chips + 编辑入口（Agent 按全称/简称/别名精确或唯一子串解析客户）。 */
+.alias-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.alias-row-label, .alias-row-empty { color: var(--muted); font-size: 12px; }
+.alias-chip { display: inline-flex; align-items: center; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2); color: var(--text); font-size: 12px; }
+.alias-row .alias-edit { min-height: 24px; padding: 2px 8px; font-size: 12px; flex: none; }
 .back-command { border: 0; background: transparent; color: var(--accent-deep); padding-left: 0; }
 .back-command:hover { transform: translateY(-1px); }
 .row-actions { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }

@@ -295,6 +295,16 @@ export class WorkbenchDatabase {
       CREATE INDEX IF NOT EXISTS idx_customers_renewal ON customers(renewal_date);
       CREATE INDEX IF NOT EXISTS idx_customers_value ON customers(contract_value DESC);
 
+      CREATE TABLE IF NOT EXISTS customer_aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        alias TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(customer_id, alias)
+      );
+      CREATE INDEX IF NOT EXISTS idx_customer_aliases_alias ON customer_aliases(alias);
+
       CREATE TABLE IF NOT EXISTS external_identities (
         customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
         system TEXT NOT NULL,
@@ -727,8 +737,9 @@ export class WorkbenchDatabase {
       WHERE COALESCE(c.source_object, '') = 'object_Umwnn__c'
         AND TRIM(COALESCE(c.after_sales_stage, '')) <> '流失'
         AND COALESCE(c.contract_status, '') <> '已流失'
-        AND (?='' OR c.name LIKE ? OR COALESCE(c.short_name,'') LIKE ? OR COALESCE(c.csm_name,'') LIKE ?)
-    `).all(query, `%${query}%`, `%${query}%`, `%${query}%`) as Row[];
+        AND (?='' OR c.name LIKE ? OR COALESCE(c.short_name,'') LIKE ? OR COALESCE(c.csm_name,'') LIKE ?
+          OR EXISTS (SELECT 1 FROM customer_aliases ca WHERE ca.customer_id=c.id AND ca.alias LIKE ?))
+    `).all(query, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`) as Row[];
     const customers = rows.map((row) => {
       const customer = customerFromRow(row);
       customer.risk = this.latestRisk(customer.id);
@@ -765,6 +776,48 @@ export class WorkbenchDatabase {
 
   setCustomerHealth(customerId: string, health: Customer['health']): void {
     this.db.prepare('UPDATE customers SET health=?, updated_at=? WHERE id=?').run(health, nowIso(), customerId);
+  }
+
+  /** 客户别名（工作台本地叠加层，同步不覆盖）：供口语简称/品牌名解析，顺序稳定。 */
+  listCustomerAliases(customerId: string): string[] {
+    return (this.db.prepare('SELECT alias FROM customer_aliases WHERE customer_id=? ORDER BY id').all(customerId) as Row[])
+      .map((row) => String(row.alias));
+  }
+
+  /**
+   * 整组替换客户别名。跨客户冲突校验只针对**可见活跃**客户（与 listCustomers 同一过滤口径）：
+   * 别名撞其他可见客户的名称/简称/别名会人为制造解析歧义，直接拒绝；隐藏的旧 AccountObj 行不参与
+   * （如旧行 short_name「青禾晶元」不应阻止把该品牌名维护为当前活跃客户的别名）。
+   */
+  setCustomerAliases(customerId: string, aliases: unknown, actor = 'csm'): string[] {
+    if (!this.getCustomer(customerId)) throw new Error('customer not found');
+    const next = [...new Set((Array.isArray(aliases) ? aliases : [aliases])
+      .map((alias) => String(alias).trim()).filter(Boolean))];
+    for (const alias of next) {
+      const clash = this.db.prepare(`
+        SELECT c.name FROM customers c
+        WHERE c.id<>? AND COALESCE(c.source_object,'')='object_Umwnn__c'
+          AND TRIM(COALESCE(c.after_sales_stage,''))<>'流失' AND COALESCE(c.contract_status,'')<>'已流失'
+          AND (c.name=? OR COALESCE(c.short_name,'')=?)
+        LIMIT 1
+      `).get(customerId, alias, alias) as Row | undefined
+        ?? this.db.prepare(`SELECT a.customer_id FROM customer_aliases a WHERE a.customer_id<>? AND a.alias=? LIMIT 1`)
+          .get(customerId, alias) as Row | undefined;
+      if (clash) throw new Error(`别名「${alias}」与其他客户（${String(clash.name ?? clash.customer_id)}）的名称/简称/别名冲突，拒绝维护以避免解析歧义`);
+    }
+    const now = nowIso();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('DELETE FROM customer_aliases WHERE customer_id=?').run(customerId);
+      const insert = this.db.prepare('INSERT INTO customer_aliases(customer_id,alias,created_at,updated_at) VALUES(?,?,?,?)');
+      for (const alias of next) insert.run(customerId, alias, now, now);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.audit(actor, 'customer_aliases_update', 'customer', customerId, { aliases: next });
+    return this.listCustomerAliases(customerId);
   }
 
   updateSupportStats(customerId: string, openCount: number, blockedCount: number): void {
@@ -1993,6 +2046,7 @@ export class WorkbenchDatabase {
     if (!customer) return null;
     return {
       customer,
+      aliases: this.listCustomerAliases(customerId),
       lastInteractionAt: this.lastInteractionAt(customerId),
       identities: this.listIdentities(customerId),
       risk: this.latestRisk(customerId),

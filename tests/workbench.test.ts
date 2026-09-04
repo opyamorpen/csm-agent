@@ -2741,6 +2741,13 @@ test('workbench: resolveOnesOption prefers the full-name identity deterministica
     db.upsertIdentity('crm-pick', 'ones_customer_option', '6iioSn0M', '北京敏锐达致机器人科技有限责任公司', 'confirmed');
     const picked = resolveOnesOption(db, db.getCustomer('crm-pick'));
     assert.deepEqual(picked, { id: '6iioSn0M', label: '北京敏锐达致机器人科技有限责任公司' });
+    // 别名身份（品牌名选项）与简称同层：全称身份缺失、简称失效时确定性回退到别名选项。
+    db.setCustomerAliases('crm-pick', ['青禾晶元']);
+    db.upsertIdentity('crm-pick', 'ones_customer_option', 'alias-opt', '青禾晶元', 'confirmed');
+    db.db.prepare("DELETE FROM external_identities WHERE external_id='6iioSn0M'").run();
+    db.db.prepare("UPDATE customers SET short_name=NULL WHERE id='crm-pick'").run();
+    const byAlias = resolveOnesOption(db, db.getCustomer('crm-pick'));
+    assert.deepEqual(byAlias, { id: 'alias-opt', label: '青禾晶元' });
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

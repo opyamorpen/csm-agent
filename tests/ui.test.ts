@@ -2131,3 +2131,18 @@ test('single-line progress consumers take the last line of the rolling case prog
   const usages = source.match(/progressTail\(job, '/g) ?? [];
   assert.equal(usages.length, 3, '三处单行消费位均走 progressTail');
 });
+
+test('customer overview renders alias chips with an editor bound to the aliases API', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  // 别名行：chips + 空态提示 + 编辑入口（WKWebView 禁用原生 prompt，走自研 promptDialog 输入弹窗）。
+  assert.match(source, /const aliasRow = el\('div', 'alias-row'\)/);
+  assert.match(source, /el\('span', 'alias-chip', alias\)/);
+  assert.match(source, /alias-row-empty/);
+  assert.match(source, /await promptDialog\('客户别名（多个用逗号分隔，留空清除全部）：'/);
+  assert.match(source, /\/api\/customers\/\$\{encodeURIComponent\(customerId\)\}\/aliases/);
+  assert.match(source, /JSON\.stringify\(\{ aliases: next \}\)/);
+  // chips 样式走主题 token（双主题契约），不得硬编码色值。
+  assert.match(styles, /\.alias-chip \{[^}]*var\(--border\)/);
+  assert.match(styles, /\.alias-chip \{[^}]*var\(--panel-2\)/);
+});

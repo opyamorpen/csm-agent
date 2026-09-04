@@ -184,23 +184,53 @@ function bindingOfCustomer(db: WorkbenchDatabase, customer: Customer): DraftCust
   return { customer, onesOptionId: option?.id, manhourIssueId: manhour?.externalId };
 }
 
-/** CRM _id 直取（模型乱填的非 ID 串自然落空）；否则按名称在工作台唯一精确匹配（全称或售后客户简称），歧义/无匹配返回 undefined。 */
-function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): Customer | undefined {
+export type CustomerMatchedBy = 'id' | 'exact' | 'alias' | 'substring';
+
+export type CustomerResolution =
+  | { status: 'resolved'; customer: Customer; matchedBy: CustomerMatchedBy }
+  | { status: 'ambiguous'; candidates: Customer[] }
+  | { status: 'not_found'; suggestions: Customer[] };
+
+/**
+ * CRM _id 直取（模型乱填的非 ID 串自然落空）；否则按名称解析，口径与 CLI 一致：
+ * ① 全称/简称/别名精确等值；② 唯一子串兜底（口语缩略如「中科晶禾」→「天津中科晶禾电子科技有限责任公司」，
+ * 仅当可见活跃客户中恰好一个含该子串时成立，≥2 字符门槛）。任何一层命中多个即歧义——宁可不归属。
+ * not_found 时带回 LIKE 相近候选（≤5 个），供 resolve_customer 向模型给出可确认的候选清单。
+ */
+export function resolveCustomerForContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): CustomerResolution {
   const id = typeof context.crm_customer_id === 'string' ? context.crm_customer_id.trim() : '';
   if (id) {
     const byId = db.getCustomer(id);
-    if (byId) return byId;
+    if (byId) return { status: 'resolved', customer: byId, matchedBy: 'id' };
   }
   const name = typeof context.customer_name === 'string' ? context.customer_name.trim() : '';
-  if (name) {
-    const matches = db.listCustomers(name).filter((c) => c.name === name || c.shortName === name);
-    if (matches.length === 1) return matches[0];
+  if (!name) return { status: 'not_found', suggestions: [] };
+  const candidates = db.listCustomers(name);
+  const aliasesOf = new Map(candidates.map((c) => [c.id, db.listCustomerAliases(c.id)]));
+  const exactTier = candidates.filter((c) => c.name === name || c.shortName === name || (aliasesOf.get(c.id) ?? []).includes(name));
+  if (exactTier.length === 1) {
+    const customer = exactTier[0]!;
+    return { status: 'resolved', customer, matchedBy: customer.name === name || customer.shortName === name ? 'exact' : 'alias' };
   }
-  return undefined;
+  if (exactTier.length > 1) return { status: 'ambiguous', candidates: exactTier };
+  if (name.length >= 2) {
+    const substringTier = candidates.filter((c) => c.name.includes(name) || (c.shortName ?? '').includes(name)
+      || (aliasesOf.get(c.id) ?? []).some((alias) => alias.includes(name)));
+    if (substringTier.length === 1) return { status: 'resolved', customer: substringTier[0]!, matchedBy: 'substring' };
+    if (substringTier.length > 1) return { status: 'ambiguous', candidates: substringTier };
+  }
+  return { status: 'not_found', suggestions: candidates.slice(0, 5) };
+}
+
+/** 兼容入口：只关心客户本体（读工具与草稿绑定门），解析细节见 resolveCustomerForContext。 */
+function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): Customer | undefined {
+  const resolution = resolveCustomerForContext(db, context);
+  return resolution.status === 'resolved' ? resolution.customer : undefined;
 }
 
 /**
- * 两级解析草稿客户：fields.customer_id 库内直取 → fields.customer_name 唯一精确匹配。
+ * 两级解析草稿客户：fields.customer_id 库内直取 → fields.customer_name 唯一匹配
+ * （全称/简称/别名精确，或唯一子串兜底——与读工具同一条解析链，避免对话里能解析、写单时又绑不上）。
  * 外部写的客户身份完全以草稿自含信息为准（贴图/聊天记录提单：客户名就在贴入内容里），
  * 会话不承载客户状态——「这次写入」必须绑定客户，对话本身不需要。
  */
@@ -248,7 +278,7 @@ export function enrichCustomerContext(db: WorkbenchDatabase, context: CustomerCo
 
 export function validateCustomerBoundDraft(draft: ConfirmDraft, binding: DraftCustomerBinding | null): string | null {
   if (!binding) {
-    return '草稿未携带可唯一解析的客户（fields.customer_id 或 customer_name 须与工作台客户唯一精确匹配），请确认客户名称后重新 confirm_write';
+    return '草稿未携带可唯一解析的客户（fields.customer_id 或 customer_name 须与工作台客户唯一匹配：全称/简称/别名精确或唯一子串），请确认客户名称后重新 confirm_write';
   }
   const { customer, onesOptionId, manhourIssueId } = binding;
   if (draft.target_system === 'crm') {
@@ -415,7 +445,7 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
   }
 
   function makeAgent(session: Session): AgentSession {
-    // 本地工具从调用参数解析客户（全称/简称唯一精确匹配，或权威 CRM _id 直取）——
+    // 本地工具从调用参数解析客户（全称/简称/别名精确或唯一子串匹配，或权威 CRM _id 直取）——
     // 会话不承载客户状态，身份只存在于对话文本、工具参数与回写草稿 fields。
     const resolveCustomerByNameOrId = (name?: string, id?: string): { id: string; name: string } | null => {
       const customer = uniqueCustomerByContext(workbench.db, { customer_name: name, crm_customer_id: id });
@@ -505,15 +535,31 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
           }
           // 无状态解析：把名称/ID 解析为工作台权威标识（CRM _id、ONES 选项、售后工时项、使用版本），
           // 结果只返回给模型——供后续本地工具的 customer_name 与回写草稿 fields 复用，不写任何会话状态。
-          const resolved = enrichCustomerContext(workbench.db, query);
-          if (resolved?.crm_customer_id) {
+          const resolution = resolveCustomerForContext(workbench.db, {
+            customer_name: query.customer_name,
+            crm_customer_id: query.crm_customer_id,
+          });
+          if (resolution.status !== 'resolved') {
+            // 失败必须带候选：零匹配给 LIKE 相近客户、歧义给撞名清单——模型据此向用户确认，而不是干问全称。
+            const label = `「${query.customer_name ?? query.crm_customer_id}」`;
+            const clue = resolution.status === 'ambiguous'
+              ? `多个客户匹配：${resolution.candidates.map((c) => c.name).join('、')}。`
+              : resolution.suggestions.length ? `工作台相近客户：${resolution.suggestions.map((c) => c.name).join('、')}。` : '';
             return {
-              text: `已解析客户：${resolved.customer_name}（CRM _id=${resolved.crm_customer_id}` +
-                `${resolved.ones_customer_option_id ? `，ONES option=${resolved.ones_customer_option_id}` : '，ONES option 未解析（confirmed 身份缺失，回写 ONES 前需刷新客户同步）'}` +
-                `，使用版本=${resolved.usage_version ?? 'unknown'}）。后续本地工具请带 customer_name="${resolved.customer_name}"，回写草稿 fields 用同名同 ID。`,
+              text: `未在工作台唯一匹配到客户${label}（支持全称/简称/别名的精确匹配与唯一子串匹配）。${clue}` +
+                '请与用户确认客户全称（或 CRM _id）后重试；客户的其他叫法可让用户维护别名（工作台客户页或 csm-agent customers aliases）。' +
+                '确认客户名称前，本地读工具与回写不可用。',
             };
           }
-          return { text: `未在工作台唯一匹配到客户「${query.customer_name ?? query.crm_customer_id}」（须全称/简称且唯一精确匹配）。确认客户名称前，本地读工具与回写不可用。` };
+          const { customer, matchedBy } = resolution;
+          const binding = bindingOfCustomer(workbench.db, customer);
+          const how = matchedBy === 'substring' ? `（按唯一子串「${query.customer_name}」匹配）`
+            : matchedBy === 'alias' ? `（按别名「${query.customer_name}」匹配）` : '';
+          return {
+            text: `已解析客户：${customer.name}${how}（CRM _id=${customer.id}` +
+              `${binding.onesOptionId ? `，ONES option=${binding.onesOptionId}` : '，ONES option 未解析（confirmed 身份缺失，回写 ONES 前需刷新客户同步）'}` +
+              `，使用版本=${customer.usageVersion ?? 'unknown'}）。后续本地工具请带 customer_name="${customer.name}"，回写草稿 fields 用同名同 ID。`,
+          };
         },
       },
     });
@@ -759,6 +805,17 @@ function buildHandler(runtime: Runtime, store: Store, workbench: WorkbenchServic
         if (req.method === 'GET' && sub === '/overview') {
           const overview = workbench.db.overview(customerId);
           return overview ? json(res, 200, overview) : json(res, 404, { error: 'customer not found' });
+        }
+        // 客户别名维护（工作台本地叠加层，同步不覆盖）：整组替换；跨客户撞名/撞别名 400 拒绝。
+        if (req.method === 'PUT' && sub === '/aliases') {
+          if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
+          const body = await readBody(req);
+          const aliases = Array.isArray(body.aliases) ? body.aliases : [];
+          try {
+            return json(res, 200, { aliases: workbench.db.setCustomerAliases(customerId, aliases, 'csm') });
+          } catch (error) {
+            return json(res, 400, { error: (error as Error).message });
+          }
         }
         if (req.method === 'GET' && sub === '/timeline') {
           const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 100)));

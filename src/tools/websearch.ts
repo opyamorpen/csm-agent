@@ -30,10 +30,10 @@ export const recordWebIntelligenceTool: Tool = {
   name: RECORD_WEB_INTELLIGENCE_TOOL_NAME,
   description:
     '把联网搜索汇总后的客户公开动态落库为 web_signal 证据，供后续分析直接读取（get_customer_profile 会带回最近记录）。' +
-    'customer_name 指定归属客户（全称或简称，与工作台客户唯一精确匹配——落库归属必须确定性，匹配不上宁可不落）。' +
+    'customer_name 指定归属客户（全称/简称/别名，与工作台客户唯一匹配——落库归属必须确定性，匹配不上宁可不落）。' +
     '每条动态须带日期与来源 URL；只记录有来源依据的内容。这是本地工作台写入，不涉及外部系统，无需 confirm_write。',
   parameters: Type.Object({
-    customer_name: Type.String({ description: '客户全称或简称（与工作台客户唯一精确匹配，落库归属）' }),
+    customer_name: Type.String({ description: '客户全称/简称/别名（与工作台客户唯一匹配，落库归属）' }),
     findings: Type.Array(
       Type.Object({
         label: Type.String({ description: '一句话概括该动态，如「完成 B 轮融资」' }),
@@ -355,7 +355,7 @@ export function makeWebSearchHandler(deps: WebSearchToolDeps): (args: Record<str
 }
 
 export interface RecordWebIntelligenceDeps {
-  /** 按客户全称/简称唯一精确匹配（写路径归属必须确定性）；未唯一命中返回 null。 */
+  /** 按客户全称/简称/别名唯一匹配（写路径归属必须确定性）；未唯一命中返回 null。 */
   resolveCustomer(name: string): { id: string; name: string } | null;
   addEvidence(input: { customerId: string; kind: string; label: string; detail: string; occurredAt: string; confidence: number; sourceSystem: string; sourceUrl?: string | null }): unknown;
 }
@@ -367,7 +367,7 @@ export function makeRecordWebIntelligenceHandler(
     const customerName = typeof args.customer_name === 'string' ? args.customer_name.trim() : '';
     const customer = customerName ? deps.resolveCustomer(customerName) : null;
     if (!customer) {
-      return { text: `record_web_intelligence: 缺少 customer_name，或「${customerName || '(未提供)'}」未在工作台唯一匹配到客户。落库归属必须确定，请提供客户全称/简称后重试。`, isError: true };
+      return { text: `record_web_intelligence: 缺少 customer_name，或「${customerName || '(未提供)'}」未在工作台唯一匹配到客户。落库归属必须确定，请提供客户全称/简称/别名后重试。`, isError: true };
     }
     const findings = Array.isArray(args.findings) ? args.findings : [];
     if (!findings.length) return { text: 'record_web_intelligence: findings 为空，未落库任何记录。', isError: true };

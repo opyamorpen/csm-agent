@@ -17,6 +17,7 @@ import {
   type HttpPost,
 } from '../src/tools/websearch.js';
 import * as websearchModule from '../src/tools/websearch.js';
+import { resolveCustomerForContext } from '../src/server.js';
 
 async function withDb(fn: (db: WorkbenchDatabase) => Promise<void> | void): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'csm-tools-'));
@@ -24,16 +25,12 @@ async function withDb(fn: (db: WorkbenchDatabase) => Promise<void> | void): Prom
   try { await fn(db); } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-/** 与服务端接线同口径：按调用参数解析客户（全称/简称唯一精确匹配，或 CRM _id 直取）。 */
+/** 与服务端接线同一条解析链（resolveCustomerForContext：全称/简称/别名精确 + 唯一子串兜底）。 */
 function dbHandlers(db: WorkbenchDatabase) {
   return makeWorkbenchToolHandlers({
     resolveCustomer: (name, id) => {
-      if (id) { const c = db.getCustomer(id); if (c) return { id: c.id, name: c.name }; }
-      if (name) {
-        const matches = db.listCustomers(name).filter((c) => c.name === name || c.shortName === name);
-        if (matches.length === 1) return { id: matches[0].id, name: matches[0].name };
-      }
-      return null;
+      const resolution = resolveCustomerForContext(db, { customer_name: name, crm_customer_id: id });
+      return resolution.status === 'resolved' ? { id: resolution.customer.id, name: resolution.customer.name } : null;
     },
     overview: (id) => db.overview(id),
     timeline: (id, limit) => db.listTimeline(id, limit).map((e) => e as unknown as Record<string, unknown>),
@@ -71,9 +68,12 @@ test('workbench tools: events returns synced timeline entries', () => withDb(asy
   assert.ok(filtered.text.includes('没有已同步的'), '按类型过滤无结果时应说明本地没有不代表源系统没有');
   const filteredHit = await handlers.events({ customer_name: '客户甲', sourceType: 'support_ticket' });
   assert.ok(filteredHit.text.includes('ticket-1'));
-  // 简称同样可解析（与 resolve_customer / 草稿解析同口径）。
-  const byShort = await handlers.events({ customer_name: '客户甲' });
-  assert.ok(byShort.text.includes('ticket-1'));
+  // 口语子串与维护过的别名同样可解析（与 resolve_customer / 草稿解析同一条链）。
+  const bySubstring = await handlers.events({ customer_name: '户甲' });
+  assert.ok(bySubstring.text.includes('ticket-1'));
+  db.setCustomerAliases('crm-1', ['甲客户']);
+  const byAlias = await handlers.events({ customer_name: '甲客户' });
+  assert.ok(byAlias.text.includes('ticket-1'));
 }));
 
 // HTTP stub: keyed-Tavily responses come back as JSON the tool parses.

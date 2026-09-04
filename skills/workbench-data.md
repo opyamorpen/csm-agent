@@ -9,7 +9,7 @@ description: 从工作台本地数据库读取客户的已同步数据（档案�
 
 ## 什么时候用本地工具
 
-对话中已明确客户身份后（客户全称/简称已知），回答下列问题**先用本地工具**——会话不绑定客户，每次调用都要带 `customer_name`（或 `customer_id`）参数：
+对话中已明确客户身份后（客户全称/简称/别名已知——本地工具按唯一匹配解析：精确或唯一子串），回答下列问题**先用本地工具**——会话不绑定客户，每次调用都要带 `customer_name`（或 `customer_id`）参数：
 
 - 主入口是 `get_customer_detail`：按板块（sections）抓取客户详情页数据，与客户页 tab 一一对应——
   `overview` 概览（档案/风险/机会/完成率）、`suggestion_feedback` 建议、`support_ticket` 工单、`operations_ticket` 运维、

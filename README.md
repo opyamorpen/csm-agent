@@ -99,6 +99,8 @@ csm-agent doctor
 csm-agent customers 青岛高测
 csm-agent customers --sort renewal_date
 csm-agent customers --sort renewal_amount
+csm-agent customers aliases <CRM客户ID或名称> # 查看客户别名
+csm-agent customers aliases <CRM客户ID或名称> --add 青禾晶元 # 维护别名：agent 解析客户支持全称/简称/别名精确匹配 + 唯一子串兜底；与全称无子串关系的品牌名须维护别名才能解析（--set 整组替换 / --remove 删除）
 csm-agent customer <CRM客户ID> # 概览含续约风险五维度明细与全量完成率
 csm-agent webintel <CRM客户ID> # 强制检索该客户最近三个月公开动态（8 角度），落库并重算风险/机会
 csm-agent webintel <CRM客户ID> --history # 轮次报告：最近 10 轮逐条明细（★新增标记 + 来源链接），旧闻跨轮不重复落库只在报告留痕

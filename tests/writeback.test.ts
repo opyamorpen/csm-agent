@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateCustomerBoundDraft, resolveDraftCustomer, applyDraftCustomerOptionBinding, enrichCustomerContext } from '../src/server.js';
+import { validateCustomerBoundDraft, resolveDraftCustomer, applyDraftCustomerOptionBinding, enrichCustomerContext, resolveCustomerForContext } from '../src/server.js';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import type { ConfirmDraft } from '../src/tools/confirm.js';
 
@@ -63,6 +63,56 @@ test('writeback: resolveDraftCustomer resolves identity carried by the draft its
     db.upsertCustomer({ id: 'crm-3', name: '客户甲', renewalDate: null, contractValue: 0 });
     assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '客户甲' } })), null);
     assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '不存在的客户' } })), null);
+  });
+});
+
+/** 断言用：只保留 resolved 分支（assert.equal 不做类型收窄，这里用三元显式收窄）。 */
+function resolvedCustomer(db: WorkbenchDatabase, name: string) {
+  const resolution = resolveCustomerForContext(db, { customer_name: name });
+  return resolution.status === 'resolved' ? resolution : undefined;
+}
+
+test('writeback: customer resolution tiers — exact / alias / unique substring / ambiguity rejection', async () => {
+  await withDb(async (db) => {
+    // 真实事故形态：全称「天津中科晶禾…」、CRM 售后简称填的是全称本身、品牌简称挂在被过滤的旧 AccountObj 行上。
+    db.upsertCustomer({ id: 'crm-1', name: '天津中科晶禾电子科技有限责任公司', shortName: '天津中科晶禾电子科技有限责任公司', renewalDate: null, contractValue: 0 });
+    db.upsertCustomer({ id: 'crm-2', name: '中科慧拓（北京）科技有限公司', renewalDate: null, contractValue: 0 });
+    // 精确（全称/简称）。
+    const exact = resolvedCustomer(db, '天津中科晶禾电子科技有限责任公司');
+    assert.equal(exact?.matchedBy, 'exact');
+    assert.equal(exact?.customer.id, 'crm-1');
+    // 唯一子串兜底：口语缩略「中科晶禾」只出现在晶禾客户名内 → 命中（此前必然失败的根因场景）。
+    const substring = resolvedCustomer(db, '中科晶禾');
+    assert.equal(substring?.matchedBy, 'substring');
+    assert.equal(substring?.customer.id, 'crm-1');
+    // 子串撞多家（「中科」两家都含）→ 歧义拒绝；单字符不走子串层，但 LIKE 召回进候选供用户确认。
+    assert.equal(resolveCustomerForContext(db, { customer_name: '中科' }).status, 'ambiguous');
+    const single = resolveCustomerForContext(db, { customer_name: '晶' });
+    assert.equal(single.status, 'not_found');
+    assert.deepEqual(single.status === 'not_found' ? single.suggestions.map((c) => c.id) : [], ['crm-1']);
+    // 别名：维护/去空/去重（品牌名与全称无子串关系，只能靠别名解析）。
+    db.setCustomerAliases('crm-1', ['青禾晶元', ' 青禾晶元 ', '']);
+    assert.deepEqual(db.listCustomerAliases('crm-1'), ['青禾晶元']);
+    const byAlias = resolvedCustomer(db, '青禾晶元');
+    assert.equal(byAlias?.matchedBy, 'alias');
+    assert.equal(byAlias?.customer.id, 'crm-1');
+    // 别名同样参与唯一子串兜底。
+    assert.equal(resolvedCustomer(db, '青禾')?.customer.id, 'crm-1');
+    // overview 与搜索入口都带别名。
+    assert.deepEqual((db.overview('crm-1') as { aliases: string[] }).aliases, ['青禾晶元']);
+    assert.deepEqual(db.listCustomers('青禾晶元').map((c) => c.id), ['crm-1']);
+    // 别名维护写审计。
+    const auditRow = db.db.prepare("SELECT details_json FROM audit_log WHERE action='customer_aliases_update' AND entity_id='crm-1'").get() as { details_json: string };
+    assert.ok(JSON.parse(auditRow.details_json).aliases.includes('青禾晶元'));
+    // 跨客户冲突：撞其他可见客户的名称/别名拒绝；隐藏旧行（AccountObj）的简称不参与校验。
+    assert.throws(() => db.setCustomerAliases('crm-2', ['青禾晶元']), /冲突/);
+    assert.throws(() => db.setCustomerAliases('crm-1', ['中科慧拓（北京）科技有限公司']), /冲突/);
+    db.upsertCustomer({ id: 'crm-3', name: '天津中科晶禾电子科技有限责任公司', shortName: '青禾晶元', sourceObject: 'AccountObj', renewalDate: null, contractValue: 0 });
+    db.setCustomerAliases('crm-2', ['慧拓']);
+    // 草稿 confirm 门同一条解析链：别名与口语子串都能绑定草稿客户（读写统一口径）。
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '青禾晶元' } }))?.customer.id, 'crm-1');
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '中科晶禾' } }))?.customer.id, 'crm-1');
+    assert.equal(resolveDraftCustomer(db, deskDraft({ fields: { customer_name: '慧拓' } }))?.customer.id, 'crm-2');
   });
 });
 

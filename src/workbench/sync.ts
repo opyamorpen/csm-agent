@@ -956,13 +956,14 @@ export class PortfolioSyncService {
     await this.onesqlGrammarReady;
   }
 
-  // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）是次级变体。
-  // 一个客户在 ONES 可能同时存在全称与简称两个选项（实测：敏锐达/思灵、信通院/工物所），工作项可能挂在
-  // 任一选项名下——逐变体解析、全部用于 ONESQL 查询，缺一个就会漏同步该选项名下的工作项。
+  // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）与工作台别名
+  // （人工维护的品牌名等）是次级变体。一个客户在 ONES 可能同时存在多个名称选项（实测：敏锐达/思灵、信通院/工物所），
+  // 工作项可能挂在任一选项名下——逐变体解析、全部用于 ONESQL 查询，缺一个就会漏同步该选项名下的工作项。
   // 每个变体独立解析：先查 label 精确等于该变体的 confirmed 身份缓存，miss 则实时精确唯一匹配并落缓存；
   // 解析失败的变体落候选事件，不做模糊归属。返回去重后的 optionId 列表（全称在前）。
   private async resolveOnesCustomerOptions(customer: Customer): Promise<string[]> {
-    const names = [...new Set([customer.name, customer.shortName].filter((name): name is string => !!name))];
+    const names = [...new Set([customer.name, customer.shortName, ...this.db.listCustomerAliases(customer.id)]
+      .filter((name): name is string => !!name))];
     const optionIds = new Set<string>();
     const candidates: Array<{ option: Record<string, unknown>; exact: boolean }> = [];
 
@@ -1038,9 +1039,10 @@ export class PortfolioSyncService {
       const displayId = asText(item.display_id ?? item.issue_number);
       const title = asText(item.field001) ?? 'ONES 工作项';
       const status = asText(item.field005);
-      // JrvswW8P.name 返回选项名（即客户名称全称），与客户名称或售后客户名称（简称）任一一致即归属该客户。
+      // JrvswW8P.name 返回选项名，与客户名称全称、售后客户名称（简称）或工作台别名任一一致即归属该客户。
       const customerName = asText(item[ONES_CUSTOMER_FIELD_ID]);
-      if (customerName !== customer.name && customerName !== customer.shortName) {
+      if (customerName !== customer.name && customerName !== customer.shortName
+        && !(customerName && this.db.listCustomerAliases(customer.id).includes(customerName))) {
         this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'ones', sourceType, externalId: id, displayId, title,
           occurredAt: asOnesDate(item.field009 ?? item.field010) ?? new Date().toISOString(), payload: item,
           url: onesIssueUrl(id, displayId), confidence: 0.2, attributionStatus: 'ambiguous' });

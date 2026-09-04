@@ -55,6 +55,8 @@ const CLI_CAPABILITIES = [
   { command: 'doctor', workflow: 'diagnostics', access: 'read', api: ['/api/customers', '/api/config/llm', '/api/config/search', '/api/version'] },
   { command: 'config', workflow: 'runtime-config', access: 'write', api: ['/api/config/llm', 'PUT /api/config/llm'] },
   { command: 'customers', workflow: 'customer-portfolio', access: 'read', api: ['/api/customers'], sorts: ['default', 'renewal_date', 'renewal_amount'] },
+  { command: 'customers aliases', workflow: 'customer-portfolio', access: 'write', api: ['PUT /api/customers/:id/aliases', 'GET /api/customers/:id/overview'],
+    notes: '维护客户别名（品牌名/口语简称，本地叠加层）：agent 与 CLI 的客户名解析支持全称/简称/别名精确匹配 + 唯一子串兜底；--set 整组替换（逗号分隔）、--add/--remove 可重复；跨客户撞名拒绝' },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
   { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', 'GET /api/customers/:id/web-intel/rounds', '/api/web-intel/rotation'],
     notes: '单客户强制检索（忽略 14 天门）；--history 查轮次报告（run 即报告：逐条明细带新增标记，同一条旧闻跨轮不重复落库只在报告留痕）；--rotation 手动排空自动轮换队列（夜间窗口每日 20:00–次日 08:00 上海错峰、每小时 1 个客户、约两周全员轮换、最久未查优先，失败次日优先重试）' },
@@ -112,6 +114,16 @@ async function resolveCustomer(input: string): Promise<CustomerSummary> {
   if (exact.length > 1) throw new Error(`客户不唯一: ${exact.map((item) => `${item.name}(${item.id})`).join(', ')}`);
   const candidates = all.filter((customer) => customer.name.includes(input) || customer.shortName?.includes(input));
   if (candidates.length === 1) return candidates[0];
+  // 别名是服务端叠加层、不在列表载荷里：精确/子串都未命中时按搜索词召回，再逐个核对 overview 的 aliases。
+  if (input.length >= 2) {
+    const byAlias: CustomerSummary[] = [];
+    for (const item of await customers(input)) {
+      const overview = await request<any>(`/api/customers/${encodeURIComponent(item.id)}/overview`);
+      if (Array.isArray(overview?.aliases) && overview.aliases.includes(input)) byAlias.push(item);
+    }
+    if (byAlias.length === 1) return byAlias[0];
+    if (byAlias.length > 1) throw new Error(`客户不唯一（别名「${input}」）: ${byAlias.map((item) => `${item.name}(${item.id})`).join(', ')}`);
+  }
   throw new Error(candidates.length ? `请使用客户 ID；候选: ${candidates.slice(0, 10).map((item) => `${item.name}(${item.id})`).join(', ')}` : '未找到客户');
 }
 
@@ -136,6 +148,10 @@ function help(): void {
      示例：config llm set --provider=custom --model=glm-5.3-flash \\
               --base-url=https://open.bigmodel.cn/api/coding/paas/v4 --api-key=<key> --vision=on）
   csm-agent customers [搜索词] [--sort default|renewal_date|renewal_amount] [--json]
+  csm-agent customers aliases <客户ID或名称> [--set 别名1,别名2] [--add 别名] [--remove 别名] [--json]
+    （维护客户别名（品牌名/口语简称，同步不覆盖的本地叠加层）：agent 解析客户支持全称/简称/别名的
+     精确匹配与唯一子串匹配，与全称无子串关系的叫法必须维护别名才能解析；无 flag 列出当前别名；
+     撞其他客户的名称/简称/别名会被拒绝，避免制造歧义）
   csm-agent customer <客户ID或名称> [--json]
   csm-agent webintel <客户ID或名称> [--json]
     （强制检索该客户最近三个月公开动态（8 个角度：融资/中标/产品/高管/组织/舆情/招聘/政策），
@@ -318,6 +334,7 @@ async function serve(portInput?: string): Promise<void> {
 }
 
 async function showCustomers(input: string[]): Promise<void> {
+  if (input[0] === 'aliases') return customerAliases(input.slice(1));
   const values = [...input];
   let sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default';
   const sortIndex = values.findIndex((value) => value === '--sort' || value.startsWith('--sort='));
@@ -384,6 +401,65 @@ async function showCustomer(input: string): Promise<void> {
   console.log(`待办: ${(overview.actions ?? []).length}  案例草稿: ${(overview.caseDrafts ?? []).length}`);
   console.log('身份映射:');
   console.table((overview.identities ?? []).map((item: any) => ({ system: item.system, externalId: item.external_id, label: item.label, status: item.status })));
+  const aliases: string[] = Array.isArray(overview.aliases) ? overview.aliases : [];
+  console.log(`别名: ${aliases.length ? aliases.join('、') : '（未维护）'}`);
+}
+
+/** 客户别名维护：无 flag 列出；--set 整组替换（逗号分隔）；--add/--remove 可重复、支持 = 传值。 */
+async function customerAliases(input: string[]): Promise<void> {
+  const values = [...input];
+  const takeFlag = (flag: '--set' | '--add' | '--remove'): string[] => {
+    const hits: string[] = [];
+    for (let i = 0; i < values.length;) {
+      const value = values[i]!;
+      if (value === flag) {
+        const raw = values[i + 1];
+        if (!raw || raw.startsWith('--')) throw new Error(`${flag} 需要一个值（${flag} 别名 或 ${flag}=别名）`);
+        hits.push(raw);
+        values.splice(i, 2);
+        continue;
+      }
+      if (value.startsWith(`${flag}=`)) {
+        hits.push(value.slice(flag.length + 1));
+        values.splice(i, 1);
+        continue;
+      }
+      i++;
+    }
+    return hits;
+  };
+  const set = takeFlag('--set');
+  const add = takeFlag('--add');
+  const remove = takeFlag('--remove');
+  if (set.length && (add.length || remove.length)) throw new Error('--set（整组替换）不能与 --add/--remove 同时使用');
+  if (set.length > 1) throw new Error('--set 只能出现一次，多个别名用逗号分隔');
+  const splitAliases = (raw: string) => raw.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+  const target = values.join(' ').trim();
+  if (!target) throw new Error('用法：csm-agent customers aliases <客户ID或名称> [--set 别名1,别名2] [--add 别名] [--remove 别名]');
+  const customer = await resolveCustomer(target);
+  const overview = await request<any>(`/api/customers/${encodeURIComponent(customer.id)}/overview`);
+  let aliases: string[] = Array.isArray(overview?.aliases) ? overview.aliases.map(String) : [];
+  if (set.length) {
+    aliases = splitAliases(set[0]!);
+  } else {
+    for (const raw of add) aliases.push(...splitAliases(raw));
+    if (remove.length) {
+      const drop = new Set(remove.flatMap(splitAliases));
+      aliases = aliases.filter((alias) => !drop.has(alias));
+    }
+  }
+  if (set.length || add.length || remove.length) {
+    const body = await request<{ aliases: string[] }>(`/api/customers/${encodeURIComponent(customer.id)}/aliases`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aliases }),
+    });
+    aliases = body.aliases ?? aliases;
+    console.log(`已更新 ${customer.name} 的别名`);
+  }
+  if (jsonOutput) return print({ customer: { id: customer.id, name: customer.name }, aliases });
+  console.log(`${customer.name} (${customer.id})`);
+  console.log(aliases.length
+    ? `别名: ${aliases.join('、')}`
+    : '别名: （未维护；--add 添加。与全称无子串关系的品牌名/口语简称须维护别名才能被 agent 解析）');
 }
 
 /** 公开动态检索：单客户强制刷新（忽略 14 天门）；--history 查轮次报告；--rotation 手动排空自动轮换队列。 */

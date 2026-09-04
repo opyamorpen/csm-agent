@@ -43,9 +43,9 @@ export const resolveCustomerTool: Tool = {
   name: CUSTOMER_CONTEXT_TOOL_NAME,
   description:
     '把客户名称解析为工作台权威标识（无状态查询，不改变任何会话状态）。' +
-    '只需提交 customer_name（或 crm_customer_id）：系统按工作台客户唯一精确匹配（全称或售后简称）自动补全 crm_customer_id、ones_customer_option_id、customer_manhour_issue_id、usage_version。' +
+    '只需提交 customer_name（或 crm_customer_id）：系统按工作台客户唯一匹配（全称/简称/别名精确，或唯一子串兜底）自动补全 crm_customer_id、ones_customer_option_id、customer_manhour_issue_id、usage_version。' +
     '锁定身份后：后续本地工具（get_customer_detail / get_customer_profile / get_customer_events / record_web_intelligence / get_ones_desk_required_fields）调用带 customer_name，回写草稿 fields 写同名同 ID。' +
-    '未唯一匹配时返回失败说明，须先与用户确认客户全称/简称。' +
+    '未唯一匹配时返回失败说明与相近客户候选——拿候选向用户确认，或让用户维护别名（csm-agent customers aliases）。' +
     '字段：customer_name 客户名称、crm_customer_id、ones_project、ones_customer_option_id、customer_manhour_issue_id、recording_subject_id、' +
     'industry 行业、usage_version 使用版本（公有云版/私有部署按年订阅版/私有部署一次性授权版）、scale 规模、stage 当前阶段、health 健康度(红/黄/绿)、' +
     'renewal_status 续约状态、key_contacts 关键联系人、summary 最近跟进摘要。',
