@@ -13,10 +13,11 @@ import { WorkbenchDatabase } from './database.js';
 import type { CaseDraft, Customer, EvidenceInput, OpportunityHypothesis, RiskAssessment, SourceEvent } from './types.js';
 import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
+import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
 
-/** v11：系统集成架构图改「模型供内容 graph、服务端模板确定性渲染」（版式/配色/走线/注释框
- * 不再依赖模型执行软约束）。提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v11.3-architecture-render';
+/** v12：业务解决方案图 1（capability_map）改「模型供内容 blueprint、服务端模板确定性渲染」。
+ * 提示词实质变化必须升版本破指纹短路。 */
+export const CASE_GENERATION_VERSION = 'case-v12-capability-blueprint-render';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1836,7 +1837,7 @@ async function generateChapterWithModel(runtime: Runtime, input: CasePromptInput
 const CASE_FIGURE_KIND_BRIEFS: Record<CaseFigureKind, string> = {
   flow_current: '流程现状图：客户当前（合作前/现状）的实际业务流程——按步骤或角色分栏画框，箭头连接，突出断点、人工环节与重复环节',
   flow_target: '目标流程图：客户期望达成的目标流程——方案落地后的目标流转，步骤框 + 箭头，体现统一平台/自动化环节替代人工与断点',
-  capability_map: '需求场景-产品能力映射图：客户需求场景按业务先后顺序横排为短标签带，每个场景正下方挂其采用的功能项清单（模块分组头+条目，列对位即映射），底部为通用平台能力带——分层带状板式，不画映射连线',
+  capability_map: '需求场景-产品能力映射图：横向分层业务蓝图——目标或核心场景、业务阶段、模块与能力矩阵、平台支撑、系统集成，有明确素材时追加组织保障；列对位即映射，仅阶段标题之间保留流程箭头',
   architecture: '系统集成架构图：多系统集成场景专用——素材表明方案涉及外部系统与 ONES 的对接（信息接入 ONES、或从 ONES 取数）时绘制：ONES 平台为核心、外部系统环绕对接、连线带数据标注。模块名与连接关系须有素材依据，不虚构未交付组件',
   milestone: '服务里程碑时间轴：按时间先后横向排列的合作里程碑——水平主轴 + 依次节点，每个节点为「年月 + 短标签」的圆点/框，节点事实必须与提供的里程碑清单完全一致，不虚构、不增删节点',
   value_map: '痛点-方案-价值全景图：把前文客户痛点与已确认价值收束为一张总览大图——顶部痛点带 + 右栏价值栏两区由模型绘制（痛点与价值按序一一对位），左下方案区由服务端嵌入需求场景-产品能力映射图',
@@ -1858,26 +1859,22 @@ const CASE_FIGURE_SIMPLE_KIND_RULES = '- 规模：节点总数不超过 10 个�
   + '- 画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）；整体横向布局。';
 
 /**
- * 配图绘图规范·kind 专属条目。v11：architecture 改内容提取契约——模型只输出 graph JSON
- * （系统/模块/数据流），SVG 由服务端模板确定性渲染（case-architecture-figure.ts），
- * 版式/配色/走线不再依赖模型；其余 kind 维持模型手绘 + 专属规范。画法对齐手绘示例图：
- * 核心平台内部画能力模块清单、连线方向+数据标注；全景图三区不连线、靠编号对位表达映射。
+ * 配图 kind 专属条目。v12：capability_map 与 architecture 均改为内容提取契约，
+ * SVG 由服务端确定性模板渲染；其余 kind 维持模型手绘 + 专属规范。
  */
 const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   flow_current: CASE_FIGURE_SIMPLE_KIND_RULES,
   flow_target: CASE_FIGURE_SIMPLE_KIND_RULES,
   milestone: CASE_FIGURE_SIMPLE_KIND_RULES,
   capability_map: [
-    '- 规模：需求场景 4~6 个、每场景下挂功能项 3~6 条（尽量按素材列满，保持密集的清单版面）、底部通用能力 3~5 项，SVG 约 5~12k 字符即可。',
-    '- 画布 viewBox="0 0 800 460"（此图后续会被服务端原比例嵌入一指禅图，不要改画布比例）。',
-    '- 布局基准坐标（可 ±10 微调，务必垂直占满不留大片空白）：顶部场景带 y=20~72；中部功能区面板 y=92~368——功能项清单末行文字下缘不低于 y≈345（与平台带顶之间空档不超过 45），用分组头高度（两行式 60~90）与行距（22~36 自适应）把面板撑满，首行文字与分组头底边留距不小于 6，禁止面板与平台带之间留整幅空白横档；底部平台带 y=388~438（下缘距画布下缘约 22）。',
-    '- 字号与层级：场景标签 font-size 18~20 且 font-weight="bold"，必须比功能项至少大 4 号；分组头与功能项不小于 14；行距按上面的自适应区间取值。',
-    '- 版式为「分层带状板」，需求与功能的对应关系靠位置表达（列对位即映射），不画映射连线：',
-    '  · 顶部场景带：客户需求场景压缩为 4~10 字短标签（尽量精简，过长的场景名须提炼压缩，不带句子描述），做成实心蓝（#2467EC）白字圆角块，按业务先后顺序自左向右横排一行；带左端放一块同色「需求场景」行标签块；相邻场景块之间的流程箭头必须由一段 <line> 线杆（#9CA3AF、stroke-width 2）加实心三角头组成，只有三角头没有线杆不合格。',
-    '  · 中部功能区面板（版面主体）：每个场景标签正下方挂一列——列顶为模块分组头（浅蓝 #D6E7FB 底、深蓝 #1D4FA8 字，单行写「ONES 模块名·副题」，模块名从下方能力图谱中选取；相邻列模块名相同时，模块名只在该组首列出现、后续列分组头只写副题，不得整排同名；分组头文字与头带左右边缘各留边距不小于 8、文字总宽不得超过头带宽度的九成，超出时缩短副题、把模块名与副题分两行、或整头字号降至 13——禁止文字顶满或溢出头带），分组头下为白底无框功能项清单（深灰黑 #1F2329、4~8 字/条、每列 3~6 条，用「对象+动作」的业务短语命名，不写纯实现细节词）；该场景采用的功能就放在它这一列里。',
-    '  · 底部平台带：一条全宽浅蓝（#E8F1FD）横带，左端放一块实心蓝（#2467EC）白字「通用平台能力」行标签块（与顶部「需求场景」块同款），其后放 3~5 项跨场景通用能力（白底，能力名+一行括注，从能力图谱选取且须与方案相关），作为所有场景的公共支撑。',
-    '- 禁止画「需求→功能」的映射箭头或连线；箭头只允许用于顶部场景带内的流程先后。',
-    '- 场景、模块、功能项均须有素材依据，不虚构未提及的需求或未采用的能力。',
+    '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。blueprint 结构：{"topBand":{"kind":"goals","items":["降低协作成本","提升交付质量"]},"stages":[{"label":"需求收集","module":"ONES Project","capabilities":["外链表单提报","必填字段校验"]}],"platformCapabilities":[{"title":"流程自动化","detail":"状态流转与审批"}],"integrations":["OA","ERP"],"assurance":["管理制度","协作机制"]}。',
+    '- stages：按客户真实业务先后顺序排列 3~6 个阶段；label 为 4~10 字业务短语，module 为该阶段实际采用的 ONES 产品模块或能力域，每阶段 capabilities 为 2~6 条「对象+动作」能力短语。',
+    '- topBand 可选：仅素材明确给出业务目标或跨阶段核心场景时填写；kind=goals 或 core_scenarios，items 2~6 项；没有明确证据时省略。',
+    '- platformCapabilities 可选：跨阶段共同使用且已交付的能力，0~6 项；title 为能力名，detail 为一行短说明。不要为了填满底栏复述各阶段能力。',
+    '- integrations 可选：只列素材明确参与本方案的外部系统简称，0~8 项；无集成素材时输出空数组或省略。',
+    '- assurance 可选：只列素材明确描述的组织、制度、规范或人才保障，0~6 项；通用最佳实践不构成客户事实，无证据时输出空数组或省略。',
+    '- 字宽口径：文本长度按显示字宽计——汉字/全角计 1、英文与数字约计 0.6；stage.label 不超过 10 字宽，module/capability/topBand item/integration/assurance 不超过 14 字宽，platform detail 不超过 18 字宽。',
+    '- 场景、模块、能力、平台支撑、集成系统和组织保障均须有素材依据；ONES 能力图谱只用于准确命名，不构成交付证据。',
   ].join('\n'),
   architecture: [
     '- 本图不画 SVG——你只提取结构化内容，版式由系统模板渲染。graph 结构：{"systems":[{"id":"oa","name":"OA 系统","modules":["单点认证","通讯录用户目录"]}],"hubModules":["用户与组织架构","流程自动化","需求管理","权限管理"],"flows":[{"from":"oa","to":"ones","label":"认证信息回传","steps":[{"text":"统一认证登录，回传用户身份","fields":["账号ID"]}]}]}。',
@@ -1904,10 +1901,17 @@ const ARCHITECTURE_CONTENT_COMMON_RULES = [
   '- graph 中 name/modules/label/steps/fields 均为中文业务短语，id 只用小写英文；caption 是 30 字以内的图注（如「OA 与 ONES 双向集成：单点登录与通讯录同步」）。',
 ].join('\n');
 
+/** capability_map 内容提取通用条目（v12：模型不再输出 SVG）。 */
+const CAPABILITY_CONTENT_COMMON_RULES = [
+  '- 思考从简：先按业务先后顺序定下阶段、模块与能力清单，再补充有证据的可选分区；{"caption","blueprint"} JSON 是唯一交付物，不要输出 SVG、markdown 或解释文字。',
+  '- blueprint 中所有文字均为面向客户的中文业务短语；caption 是 30 字以内的图注。',
+  '- 可选分区没有事实依据时省略字段或输出空数组；不使用「待补充」「unknown」等占位文字。',
+].join('\n');
+
 /**
  * 配图生成 prompt 的唯一组装出口（生成调用 / 探针脚本 / 单测共用一份实现，防止三处漂移）。
  * capability_map / architecture / value_map 额外注入 ONES 能力图谱（模块命名依据），其余 kind 不注入。
- * v11：architecture 只提取内容 graph（服务端模板渲染），出厂契约与通用条目按 kind 分支。
+ * v12：capability_map / architecture 只提取结构化内容，由服务端模板渲染。
  */
 export function buildCaseFigurePrompt(input: {
   customerName: string;
@@ -1922,12 +1926,18 @@ export function buildCaseFigurePrompt(input: {
     ? `${ONES_CAPABILITY_MAP}\n（图中 ONES 能力模块的命名须与图谱一致；图谱不构成该客户已交付的证据——是否交付以正文与素材为准。）\n`
     : '';
   const isArchitecture = input.kind === 'architecture';
+  const isCapabilityMap = input.kind === 'capability_map';
+  const isStructured = isArchitecture || isCapabilityMap;
   const contract = isArchitecture
     ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","graph":{...}}（graph 结构见本图专属规范）'
-    : '只输出 JSON：{"svg":"...","caption":"..."}';
+    : isCapabilityMap
+      ? '本图由系统模板渲染成图，你只负责提取结构化内容。只输出 JSON：{"caption":"...","blueprint":{...}}（blueprint 结构见本图专属规范）'
+      : '只输出 JSON：{"svg":"...","caption":"..."}';
+  const commonRules = isArchitecture ? ARCHITECTURE_CONTENT_COMMON_RULES
+    : isCapabilityMap ? CAPABILITY_CONTENT_COMMON_RULES : CASE_FIGURE_COMMON_RULES;
   return `为客户「${input.customerName}」的客户成功案例绘制「${input.sectionLabel}」章节配图（${CASE_FIGURE_KIND_BRIEFS[input.kind]}）。这份案例经 CSM 审核后对外展示，图内容只能基于提供的素材原文，不得虚构环节、模块或数字。${contract}\n`
-    + `${isArchitecture ? '内容规范：' : '绘图规范：'}\n`
-    + `${isArchitecture ? ARCHITECTURE_CONTENT_COMMON_RULES : CASE_FIGURE_COMMON_RULES}\n`
+    + `${isStructured ? '内容规范：' : '绘图规范：'}\n`
+    + `${commonRules}\n`
     + `本图专属规范：\n${CASE_FIGURE_KIND_RULES[input.kind]}\n`
     + knowledge
     + `- 本图要表达的内容（来自章节规划）：${input.idea}\n`
@@ -1940,7 +1950,7 @@ const VALUE_MAP_SOLUTION_ZONE = { frame: { x: 44, y: 208, w: 960, h: 488 }, inne
 
 /**
  * 一指禅图方案区的服务端拼装（v10）：模型按规范把左下区域完全留空，这里补画「方案」蓝色虚线分区框 + 实色标题牌，
- * 并把解决方案章的 capability_map 图（已消毒）以嵌套 <svg> 等比嵌入——映射图按 800×460 设计，嵌入后约 0.96 倍、
+ * 并把解决方案章的 capability_map 图（已消毒）以嵌套 <svg> 等比嵌入——映射图按 1440×720 设计，嵌入后按方案区等比缩放、
  * 文字近原生可读；映射图缺失（未规划/生成失败）时画居中占位文案。返回拼装并重新消毒后的 SVG；
  * 结构异常返回 null（调用方退回未拼装版，不阻断）。
  */
@@ -2006,17 +2016,17 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     chapterAnchor: chapterText,
     materials,
   });
-  // v11 架构图内容校验失败时把具体违规附进下一轮 prompt（反馈环）——真实验收教训：
-  // 同错盲重试 4 次只会原样再犯，带上「上一次输出未通过校验：…」模型一次就能修正。
-  let architectureFeedback = '';
+  // 结构化配图内容校验失败时把具体违规附进下一轮 prompt（反馈环）——同错盲重试只会
+  // 原样再犯，带上具体错误后模型可定点修正。
+  let structureFeedback = '';
   onProgress?.(`配图「${figureKindLabel(figure.kind)}」调用${callSizeText(prompt, FIGURE_MAX_TOKENS)}，引用素材 ${materials.length} 段…`);
   // 4 次尝试 + 退避封顶 120s：中继坏窗口为分钟级，3 次/45s 封顶会被同一窗口连续击穿（真实验收两连败教训）。
   const MAX_ATTEMPTS = 4;
   const retryDelayMs = (attempt: number) => Math.min(120_000, caseModelRetryDelays.baseMs * 3 ** (attempt - 1));
   let lastError = '配图生成未返回可解析 JSON';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const attemptPrompt = architectureFeedback
-      ? `${prompt}\n\n- 上一次输出未通过内容校验：${architectureFeedback}。请严格按上文规范修正后重新输出完整 JSON。`
+    const attemptPrompt = structureFeedback
+      ? `${prompt}\n\n- 上一次输出未通过内容校验：${structureFeedback}。请严格按上文规范修正后重新输出完整 JSON。`
       : prompt;
     // 每次尝试单独取槽：响应到手即放槽，消毒校验与退避睡眠都在槽外——失败重试不再封锁另一路并发。
     const release = await slots.acquire('figure');
@@ -2050,11 +2060,24 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
           const rendered = renderArchitectureSvg(parsed.graph);
           const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
           if (result) return result;
-          architectureFeedback = rendered ? '' : '内容规模超出画布承载（系统/模块过多），请精选主要系统与模块';
+          structureFeedback = rendered ? '' : '内容规模超出画布承载（系统/模块过多），请精选主要系统与模块';
           lastError = `架构图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限（系统/模块过多）'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         } else {
-          architectureFeedback = parsed.error;
+          structureFeedback = parsed.error;
           lastError = `架构图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        }
+      } else if (figure.kind === 'capability_map') {
+        // v12：业务解决方案图 1 模型只供内容 blueprint，SVG 由服务端分层蓝图模板确定性渲染。
+        const parsed = parseCapabilityMapBlueprint(record.blueprint, { textGuard: caseInternalEvidenceLabel });
+        if ('blueprint' in parsed) {
+          const rendered = renderCapabilityMapSvg(parsed.blueprint);
+          const result = accepted(rendered ? sanitizeCaseSvg(rendered) : null);
+          if (result) return result;
+          structureFeedback = rendered ? '' : '内容规模超出画布承载，请精选阶段、能力与组织保障条目';
+          lastError = `能力映射图${rendered ? '渲染产物消毒或图注校验' : '渲染几何超限'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        } else {
+          structureFeedback = parsed.error;
+          lastError = `能力映射图内容校验未通过：${parsed.error}（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
         }
       } else {
         const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';

@@ -111,7 +111,7 @@ csm-agent action update <待办ID> '{"status":"completed"}'
 csm-agent alerts [--status active|resolved|all] # 风险预警名单：近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞、或公开动态检索到该客户负面信息（收入下降/罚款/投诉等）的客户自动进入；默认待处理
 csm-agent alerts resolve <预警ID> --note "已上门回访，客户预算冻结属正常周期" # 消除风险必须写明原因/动作（写审计）；消除后情况无新变化不重报
 csm-agent cases [CRM客户ID]
-csm-agent case generate <CRM客户ID> [--force] [--wait] # 公开版四章深结构案例；联网检索公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；--wait 实时打印生成进度（阶段/检索角度/模型输出字数）；服务端注入交付事实统计（合作时长/各类已完成交付量/工单解决时效/工时投入）并派生系统使用情况表与服务里程碑，素材覆盖度过低时自动追加一次补充完善；素材中有客户描述的流程/方案架构/里程碑时生成配图（SVG，消毒后落库）
+csm-agent case generate <CRM客户ID> [--force] [--wait] # 公开版四章深结构案例；联网检索公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；--wait 实时打印生成进度（阶段/检索角度/模型输出字数）；服务端注入交付事实统计（合作时长/各类已完成交付量/工单解决时效/工时投入）并派生系统使用情况表与服务里程碑，素材覆盖度过低时自动追加一次补充完善；业务解决方案图 1 由模型提取结构化蓝图、服务端按固定分层版式渲染，其余适用配图按既有链路生成并消毒落库
 csm-agent case show <草稿ID> # 默认输出可直接对外的 Markdown（与复制/Wiki 发布同源）与素材覆盖率一行摘要，有配图时列出图注；--json 查看 claim_evidence/figures/context_snapshot/coverage/unknowns
 csm-agent case regenerate <草稿ID> [--wait] # 数据更新后强制重建（新增草稿，不覆盖旧稿）
 csm-agent case update <草稿ID> <版本> '{"title":"案例标题","fields":{}}' # 只更新公开正文（v8 各章字段 + system_usage/milestones）

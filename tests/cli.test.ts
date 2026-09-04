@@ -166,6 +166,7 @@ test('CLI provides standard global help and version commands', () => {
   assert.doesNotMatch(help.stdout, /待处理\/进行中/);
   assert.match(help.stdout, /csm-agent case generate <客户ID或名称> \[--force\] \[--wait\]/);
   assert.match(help.stdout, /--wait 轮询任务到终态并实时打印生成进度/);
+  assert.match(help.stdout, /业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染/);
   assert.match(help.stdout, /csm-agent case show <草稿ID> \[--json\]/);
   assert.match(help.stdout, /csm-agent case regenerate <草稿ID> \[--wait\]/);
   assert.match(help.stdout, /公司概况\/项目管理\/需求管理\/知识管理\/行业动态\/招投标\/中标采购/);
