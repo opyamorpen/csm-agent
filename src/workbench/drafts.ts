@@ -1446,7 +1446,8 @@ export class HemoryDraftService {
       arguments: { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[deskType], title: proposal.title, fieldValues }, validationErrors };
   }
 
-  private validate(item: DraftItem): string[] {
+  private validate(item: DraftItem, hub?: McpHub): string[] {
+    const mcp = hub ?? this.mcp;
     const errors: string[] = [];
     const customer = this.db.getCustomer(item.customerId);
     if (!customer) return ['customer not found'];
@@ -1457,8 +1458,8 @@ export class HemoryDraftService {
     }
     if (!item.targetTool) errors.push('缺少目标写工具');
     else {
-      const target = this.mcp.resolve(item.targetTool);
-      if (!target || !this.mcp.isWrite(target.server, target.rawName)) errors.push('目标工具不是当前已连接的写工具');
+      const target = mcp.resolve(item.targetTool);
+      if (!target || !mcp.isWrite(target.server, target.rawName)) errors.push('目标工具不是当前已连接的写工具');
     }
     if (item.type === 'followup') {
       const objectData = item.targetArguments.object_data as Record<string, unknown> | undefined;
@@ -1475,7 +1476,7 @@ export class HemoryDraftService {
       if (!issue || item.targetArguments.issueID !== issue.externalId) errors.push('工时参数未绑定当前客户售后工时工作项（请刷新客户同步后重新生成草稿）');
       if (item.targetArguments.hours === 'unknown' || item.targetArguments.hours == null) errors.push('请补充工时时长');
       // 历史草稿曾误绑 create_new_issue：只有两个模式化工时工具是合法写目标。
-      const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;
+      const rawName = item.targetTool ? mcp.resolve(item.targetTool)?.rawName : null;
       if (rawName !== ONES_WORKHOUR_TOOLS.simple && rawName !== ONES_WORKHOUR_TOOLS.summary) {
         errors.push('工时草稿未绑定 ONES 工时登记工具（add_workhour_in_*_mode），请编辑修正或重新生成');
       }
@@ -1489,14 +1490,15 @@ export class HemoryDraftService {
     return errors;
   }
 
-  private async preflight(item: DraftItem, errors: string[]): Promise<void> {
+  private async preflight(item: DraftItem, errors: string[], hub?: McpHub): Promise<void> {
+    const mcp = hub ?? this.mcp;
     if (item.type === 'suggestion' || item.type === 'ticket' || item.type === 'operations') {
       const tool = this.findReadTool('ones', /(get.*issue.*fields|issue.*fields|工作项.*字段)/i);
       if (!tool) errors.push('未找到 ONES 工作项字段查询工具');
       else {
         // issueTypeID 必须传类型 UUID：旧代码传类型名字符串，get_issue_fields 返回 404 业务错误
         //（isError=false），解析失败后静默跳过必填项检查，草稿带病写入才在 ONES 端报错。
-        const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[onesDeskTypeId(item.type)!] });
+        const response = await mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[onesDeskTypeId(item.type)!] });
         if (response.isError) errors.push(`ONES 字段预检失败: ${response.text.slice(0, 300)}`);
         else {
           const fields = parseOnesIssueFields(response.text);
@@ -1523,7 +1525,7 @@ export class HemoryDraftService {
           // 绑定工具必须与实例当前模式一致（simple/summary 各有专属写工具），不一致宁可拒绝也不让 ONES 端报错。
           // 模式返回无法识别（含 FAIL 信封）时静默跳过一致性检查，保持原有降级行为。
           const mode = parseOnesManhourMode(response.text);
-          const rawName = item.targetTool ? this.mcp.resolve(item.targetTool)?.rawName : null;
+          const rawName = item.targetTool ? mcp.resolve(item.targetTool)?.rawName : null;
           if (mode && rawName && rawName !== ONES_WORKHOUR_TOOLS[mode]) {
             errors.push(`ONES 工时模式（${mode}）与草稿绑定工具不一致，请重新生成`);
           }
@@ -1537,7 +1539,8 @@ export class HemoryDraftService {
    * verify=true 时经 get_issue_fields 实时核对每个规格字段仍存在、必填、且内置选项 UUID 未失效。
    * 大选项集（≥30 截断）无法证伪，只核对该字段存在与必填。
    */
-  async deskFieldContract(verify = false): Promise<Record<string, unknown>> {
+  async deskFieldContract(verify = false, hub?: McpHub): Promise<Record<string, unknown>> {
+    const mcp = hub ?? this.mcp;
     const contract = {
       projectID: ONES_DESK_PROJECT_ID,
       issueTypeIDs: ONES_DESK_ISSUE_TYPE_IDS,
@@ -1554,7 +1557,7 @@ export class HemoryDraftService {
     if (!tool) return { ...contract, verification: { error: '未找到 ONES 工作项字段查询工具（ONES MCP 未连接）' } };
     const verification: Record<string, unknown> = {};
     for (const type of Object.keys(ONES_DESK_FIELD_SPECS) as OnesDeskDraftType[]) {
-      const response = await this.mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[type] });
+      const response = await mcp.call(tool, { projectID: ONES_DESK_PROJECT_ID, issueTypeID: ONES_DESK_ISSUE_TYPE_IDS[type] });
       const fields = response.isError ? null : parseOnesIssueFields(response.text);
       if (!fields) {
         verification[type] = { error: response.isError ? response.text.slice(0, 200) : '无法解析字段表' };
@@ -1578,7 +1581,7 @@ export class HemoryDraftService {
     return { ...contract, verification };
   }
 
-  async preview(batchId: string, itemIds: string[]): Promise<DraftPreview> {
+  async preview(batchId: string, itemIds: string[], hub?: McpHub): Promise<DraftPreview> {
     const batch = this.db.getDraftBatch(batchId);
     if (!batch) throw new Error('draft batch not found');
     const selected = new Set(itemIds);
@@ -1586,8 +1589,8 @@ export class HemoryDraftService {
     if (!items.length) throw new Error('未选择可确认草稿');
     const previews: DraftPreview['items'] = [];
     for (const item of items) {
-      const validationErrors = this.validate(item);
-      if (!validationErrors.length && item.targetSystem === 'ones') await this.preflight(item, validationErrors);
+      const validationErrors = this.validate(item, hub);
+      if (!validationErrors.length && item.targetSystem === 'ones') await this.preflight(item, validationErrors, hub);
       previews.push({ id: item.id, version: item.version,
         approvalHash: argumentsHash({ draftId: item.id, version: item.version, targetTool: item.targetTool, targetArguments: item.targetArguments }),
         validationErrors });
@@ -1595,8 +1598,8 @@ export class HemoryDraftService {
     return { batchId, items: previews };
   }
 
-  async confirm(batchId: string, approvals: Array<{ id: string; version: number; approvalHash: string }>, actor = 'csm'): Promise<{ items: DraftItem[] }> {
-    const preview = await this.preview(batchId, approvals.map((item) => item.id));
+  async confirm(batchId: string, approvals: Array<{ id: string; version: number; approvalHash: string }>, actor = 'csm', hub?: McpHub): Promise<{ items: DraftItem[] }> {
+    const preview = await this.preview(batchId, approvals.map((item) => item.id), hub);
     const byId = new Map(approvals.map((item) => [item.id, item]));
     for (const item of preview.items) {
       const supplied = byId.get(item.id);
@@ -1604,24 +1607,24 @@ export class HemoryDraftService {
       if (item.validationErrors.length) throw new Error(`草稿 ${item.id} 不可写入: ${item.validationErrors.join('；')}`);
     }
     const results: DraftItem[] = [];
-    for (const approved of approvals) results.push(await this.execute(approved.id, approved.approvalHash, actor));
+    for (const approved of approvals) results.push(await this.execute(approved.id, approved.approvalHash, actor, hub));
     return { items: results };
   }
 
-  async retry(itemId: string): Promise<DraftItem> {
+  async retry(itemId: string, hub?: McpHub): Promise<DraftItem> {
     const item = this.db.getDraftItem(itemId);
     if (!item || item.status !== 'failed' || !item.approvalHash) throw new Error('只有参数未变化的失败草稿可以重试');
     const expected = argumentsHash({ draftId: item.id, version: item.version, targetTool: item.targetTool, targetArguments: item.targetArguments });
     if (expected !== item.approvalHash) throw new Error('草稿已变化，请重新预览并批准');
-    return this.execute(item.id, item.approvalHash);
+    return this.execute(item.id, item.approvalHash, 'csm', hub);
   }
 
-  private async execute(itemId: string, approvalHash: string, actor = 'csm'): Promise<DraftItem> {
+  private async execute(itemId: string, approvalHash: string, actor = 'csm', hub?: McpHub): Promise<DraftItem> {
     const item = this.db.getDraftItem(itemId);
     if (!item) throw new Error('draft item not found');
     const expected = argumentsHash({ draftId: item.id, version: item.version, targetTool: item.targetTool, targetArguments: item.targetArguments });
     if (expected !== approvalHash) throw new Error('批准哈希与当前草稿不一致');
-    const errors = this.validate(item);
+    const errors = this.validate(item, hub);
     if (errors.length) throw new Error(errors.join('；'));
     this.db.setDraftItemExecution(item.id, 'writing', { approvalHash });
     try {
@@ -1634,7 +1637,8 @@ export class HemoryDraftService {
           evidenceRefs: item.evidenceRefs, sourceMeetingId: typeof args.sourceMeetingId === 'string' ? args.sourceMeetingId : null, confidence: 0.75 });
         result = { actionItemId: action.id };
       } else {
-        const response = await this.mcp.call(item.targetTool!, item.targetArguments);
+        const mcp = hub ?? this.mcp;
+        const response = await mcp.call(item.targetTool!, item.targetArguments);
         if (response.isError) throw new Error(response.text);
         // ONES 的 MCP 层同样不把业务失败标为 isError，{"result":"FAIL",...} 以正常内容返回；
         // 曾导致工时登记失败仍被标为 written，且不可重试。result 字符串非 SUCCESS 即业务失败。

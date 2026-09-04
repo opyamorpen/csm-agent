@@ -3036,7 +3036,7 @@ export class CaseService {
       approvalHash: argumentsHash({ draftId, version: draft.version, tool, args, reviewDigest }), warnings: detail.qualityReview.warnings };
   }
 
-  async publish(draftId: string, version: number, parentPageID: string, approvalHash: string): Promise<CaseDraft> {
+  async publish(draftId: string, version: number, parentPageID: string, approvalHash: string, hub?: McpHub): Promise<CaseDraft> {
     const preview = this.publishPreview(draftId, parentPageID);
     const expected = argumentsHash({ draftId, version, tool: preview.tool, args: preview.args, reviewDigest: preview.reviewDigest });
     if (preview.draft.version !== version || expected !== approvalHash) throw new Error('草稿版本或批准内容已变化，请重新确认');
@@ -3057,8 +3057,9 @@ export class CaseService {
     }
     this.publishing.add(requestHash);
     try {
+      const mcp = hub ?? this.mcp;
       let result;
-      try { result = await this.mcp.call(preview.tool, preview.args); }
+      try { result = await mcp.call(preview.tool, preview.args); }
       catch (error) {
         this.db.updateCasePublishAttempt(started.attempt.id, 'unknown', { error: (error as Error).message });
         throw new Error(`ONES Wiki 发布结果未知，请先核对目标页面: ${(error as Error).message}`);

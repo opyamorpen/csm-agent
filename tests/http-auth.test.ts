@@ -283,3 +283,27 @@ test('mcp config is per-user: members save their own connections without admin r
     assert.equal(bad.status, 400);
   });
 });
+
+test('customer-domain reads are gated by per-user visibility', async () => {
+  await withServer(async ({ call, db, memberId }) => {
+    db.upsertCustomer({ id: 'crm-mine', name: '我的客户', sourceObject: 'object_Umwnn__c', afterSalesStage: '正常', contractStatus: '正常' });
+    db.upsertCustomer({ id: 'crm-other', name: '别人的客户', sourceObject: 'object_Umwnn__c', afterSalesStage: '正常', contractStatus: '正常' });
+    db.grantCustomerAccess(memberId, ['crm-mine']);
+    const memberLogin = await call('POST', '/api/auth/login', { body: { username: 'csm1', password: 'member-pass-1' } });
+    const memberCookie = cookieFrom(memberLogin);
+    // 列表只含已授权客户。
+    const list = await call('GET', '/api/customers', { cookie: memberCookie });
+    assert.deepEqual(list.data.customers.map((c: any) => c.id), ['crm-mine']);
+    // 自己的客户可访问；未授权客户一律 404（不泄露存在性）。
+    assert.equal((await call('GET', '/api/customers/crm-mine/overview', { cookie: memberCookie })).status, 200);
+    for (const sub of ['/overview', '/timeline', '/workhours', '/weekly-reports']) {
+      assert.equal((await call('GET', `/api/customers/crm-other${sub}`, { cookie: memberCookie })).status, 404, sub);
+    }
+    assert.equal((await call('POST', '/api/customers/crm-other/refresh', { cookie: memberCookie, body: {} })).status, 404);
+    // admin（未授权任何人前）也只看自己映射内的客户：空列表。
+    const adminLogin = await call('POST', '/api/auth/login', { body: { username: 'admin', password: 'admin-pass-1' } });
+    const adminCookie = cookieFrom(adminLogin);
+    const adminList = await call('GET', '/api/customers', { cookie: adminCookie });
+    assert.deepEqual(adminList.data.customers.map((c: any) => c.id), []);
+  });
+});

@@ -68,6 +68,8 @@ export interface SourceEventInput {
   url?: string | null;
   payload?: Record<string, unknown>;
   attributionStatus?: AttributionStatus;
+  /** 归属登录用户（多人化）：Hemory 录音来自某用户自己的 vault，其待归属片段只进本人收件箱；仅插入时生效。 */
+  ownerUserId?: number;
 }
 
 export interface SourceEvent extends SourceEventInput {

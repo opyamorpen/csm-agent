@@ -491,11 +491,12 @@ export class WeeklyReportService {
     return { report, tool, args, approvalHash: argumentsHash({ reportId, version: report.version, tool, args }), warnings: weeklyContentWarnings(report.content) };
   }
 
-  async publish(reportId: string, version: number, parentPageID: string, approvalHash: string): Promise<WeeklyReport> {
+  async publish(reportId: string, version: number, parentPageID: string, approvalHash: string, hub?: McpHub): Promise<WeeklyReport> {
     const preview = this.publishPreview(reportId, parentPageID);
     const expected = argumentsHash({ reportId, version, tool: preview.tool, args: preview.args });
     if (preview.report.version !== version || expected !== approvalHash) throw new Error('周报版本或批准内容已变化，请重新确认');
-    const result = await this.mcp.call(preview.tool, preview.args);
+    const mcp = hub ?? this.mcp;
+    const result = await mcp.call(preview.tool, preview.args);
     if (result.isError) throw new Error(result.text);
     let pageId = '';
     try {

@@ -66,6 +66,13 @@ const ONES_TEAM_ID = process.env.ONES_TEAM_ID ?? 'RDjYMhKq';
 /** 自动/手动增量同步扫描的滚动窗口（上海自然日，含今天）。已入库录音靠分段指纹与 upsert 去重。 */
 export const HEMORY_SYNC_WINDOW_DAYS = 7;
 
+/** 按用户执行同步的上下文：本人 MCP 连接（各自凭证）+ 身份。userId=0 表示系统/单用户兼容形态。 */
+export interface SyncUser {
+  userId: number;
+  username: string;
+  mcp: McpGateway;
+}
+
 /** 公开动态自动轮换的夜间窗口（上海时区，token 错峰更便宜）：20:00 起、次日 08:00 止（END 排他），
  * 每小时 1 个槽 = 12 槽/天 ≈ 149 客户约 12.4 天轮完（留 Mac 睡眠漏槽余量仍不超两周）；
  * 每槽只检索 1 个客户（8 次搜索 + 1 次模型调用），对 keyless 搜索限流温和。 */
@@ -417,18 +424,46 @@ function parseTranscriptPage(text: string): { lines: TranscriptLine[]; more: boo
 }
 
 export class PortfolioSyncService {
-  private onesqlGrammarReady?: Promise<void>;
+  private onesqlGrammarReady = new Map<number, Promise<void>>();
   private hemoryRun?: SyncRun;
   private webIntelRun = new Set<string>();
   private webIntelRotationRun?: SyncRun;
 
-  constructor(private readonly db: WorkbenchDatabase, private readonly mcp: McpGateway,
+  /**
+   * 多人化：同步按登录用户各自的凭证执行（CRM/ONES/Hemory 拉取用本人连接，拉到的客户授予可见性）。
+   * 注入用户工厂（server 侧 = 有对应服务器配置的活跃用户 × runtime.users 连接池）；
+   * 仍接受单个 McpGateway（测试/单用户兼容，按 userId=0 的系统用户处理）。
+   */
+  constructor(private readonly db: WorkbenchDatabase, usersOrHub: ((serverName: string) => SyncUser[]) | McpGateway,
     private readonly segmentRecording: (recording: SourceEvent) => Promise<HemorySegmentationResult>,
     /** 同步路径的公开动态检索（server 注入 WebIntelService.refresh）；缺省跳过（如测试环境）。 */
     private readonly refreshWebIntel: (customer: Customer, options: { force?: boolean }) => Promise<{ status: string; saved: number }> = async () => ({ status: 'skipped', saved: 0 }),
     /** 增购机会 LLM 分析（server 注入 OpportunityService.analyze）；缺省跳过（如测试环境）。 */
     private readonly analyzeOpportunities: (customerId: string) => Promise<{ status: string; reason?: string }> = async () => ({ status: 'skipped' }),
-  ) {}
+  ) {
+    if (typeof usersOrHub === 'function') {
+      this.syncUsersOf = usersOrHub;
+    } else {
+      const hub = usersOrHub;
+      this.syncUsersOf = () => [{ userId: 0, username: 'system', mcp: hub }];
+    }
+  }
+
+  private readonly syncUsersOf: (serverName: string) => SyncUser[];
+
+  /** 指定用户的连接（无配置返回 undefined；调用方自行降级）。 */
+  private hubOf(userId: number, serverName: 'crm' | 'ones' | 'hemory'): McpGateway | undefined {
+    return this.syncUsersOf(serverName).find((user) => user.userId === userId)?.mcp;
+  }
+
+  /** 客户的「同步属主」候选：对该客户有可见性且配置了对应服务器的用户（请求用户优先）。 */
+  private syncOwnersOf(customerId: string, serverName: 'crm' | 'ones', requestingUserId?: number): SyncUser[] {
+    const candidates = this.syncUsersOf(serverName).filter((user) => user.userId !== 0)
+      .filter((user) => this.db.customerAccessExists(user.userId, customerId));
+    if (requestingUserId == null) return candidates;
+    const requesting = candidates.find((user) => user.userId === requestingUserId);
+    return requesting ? [requesting, ...candidates.filter((user) => user.userId !== requestingUserId)] : candidates;
+  }
 
   /** 单客户公开动态检索（幂等去重：同一客户并发触发只跑一次）。失败只记状态，不抛给调用方。 */
   async runWebIntelForCustomer(customerId: string, options: { force?: boolean } = {}): Promise<{ status: string; saved: number }> {
@@ -517,23 +552,26 @@ export class PortfolioSyncService {
     return run;
   }
 
-  refreshCustomer(customerId: string): SyncRun {
+  refreshCustomer(customerId: string, requestingUserId?: number): SyncRun {
     const run = this.db.createSyncRun('customer', customerId);
-    void this.executeCustomer(run, customerId);
+    void this.executeCustomer(run, customerId, requestingUserId);
     return run;
   }
 
   /** 定向刷新单客户的 ONES 工作项（含客户工时管理/售后客户）：不建 SyncRun、不动 CRM/Hemory。
-   * 供草稿生成路径在本地缺「售后客户」匹配时即时补数据，失败由调用方降级处理。 */
-  async syncOnesForCustomer(customerId: string): Promise<number> {
+   * 供草稿生成路径在本地缺「售后客户」匹配时即时补数据（用对该客户有可见性用户的连接），失败由调用方降级处理。 */
+  async syncOnesForCustomer(customerId: string, requestingUserId?: number): Promise<number> {
     const customer = this.db.getCustomer(customerId);
     if (!customer) throw new Error('customer not found');
-    const count = await this.syncOnesCustomer(customer);
+    const owners = this.syncOwnersOf(customerId, 'ones', requestingUserId);
+    const user = owners[0] ?? this.syncUsersOf('ones')[0];
+    if (!user) return 0;
+    const count = await this.syncOnesCustomer(customer, user);
     return count;
   }
 
-  /** Read the current customer's ONES work-hour registrations for the UI/CLI. */
-  async listCustomerWorkhours(customerId: string): Promise<{
+  /** Read the current customer's ONES work-hour registrations for the UI/CLI（未给 hub 时取任一 ONES 用户连接）。 */
+  async listCustomerWorkhours(customerId: string, hub?: McpGateway): Promise<{
     issueId: string | null;
     totalHours: number | null;
     remainingHours: number | null;
@@ -554,7 +592,8 @@ export class PortfolioSyncService {
         records: stored,
       };
     }
-    const records = await this.fetchWorkhourRecords(issue.externalId);
+    const mcp = hub ?? this.syncUsersOf('ones')[0]?.mcp;
+    const records = mcp ? await this.fetchWorkhourRecords(mcp, issue.externalId) : [];
     records.sort((left, right) => Date.parse(right.startTime) - Date.parse(left.startTime) || right.id.localeCompare(left.id));
     return {
       issueId: issue.externalId,
@@ -582,8 +621,8 @@ export class PortfolioSyncService {
       .filter((item) => item.id && item.startTime);
   }
 
-  private async fetchWorkhourRecords(issueId: string): Promise<WorkhourRecord[]> {
-    const modeResult = await this.mcp.call('mcp__ones__get_manhour_mode', {});
+  private async fetchWorkhourRecords(mcp: McpGateway, issueId: string): Promise<WorkhourRecord[]> {
+    const modeResult = await mcp.call('mcp__ones__get_manhour_mode', {});
     if (modeResult.isError) return [];
     const mode = parseOnesManhourMode(modeResult.text) ?? 'summary';
     const tool = mode === 'simple'
@@ -594,7 +633,7 @@ export class PortfolioSyncService {
     for (let page = 0; page < 20; page++) {
       const args: Record<string, unknown> = { issueID: issueId };
       if (cursor) args.cursor = cursor;
-      const result = await this.mcp.call(tool, args);
+      const result = await mcp.call(tool, args);
       if (result.isError) return records;
       const parsed = parseOnesManhourPage(result.text);
       records.push(...parsed.records);
@@ -706,36 +745,92 @@ export class PortfolioSyncService {
     }
   }
 
+  /** 按用户跑一组任务并聚合状态（逐用户隔离失败：一人凭证故障不拖垮其他人的同步）。 */
+  private async runPerUser(sources: Array<{ label: string; users: SyncUser[]; task: (user: SyncUser) => Promise<number> }>): Promise<Record<string, { status: string; count: number; error?: string; skipped?: boolean }>> {
+    const out: Record<string, { status: string; count: number; error?: string; skipped?: boolean }> = {};
+    for (const source of sources) {
+      if (!source.users.length) {
+        out[source.label] = { status: 'succeeded', count: 0, skipped: true };
+        continue;
+      }
+      const perUser: Array<{ user: string; count: number; error?: string }> = [];
+      for (const user of source.users) {
+        try {
+          perUser.push({ user: user.username, count: await source.task(user) });
+        } catch (error) {
+          perUser.push({ user: user.username, count: 0, error: (error as Error).message });
+        }
+      }
+      const failed = perUser.filter((entry) => entry.error);
+      out[source.label] = {
+        status: failed.length === 0 ? 'succeeded' : failed.length === perUser.length ? 'failed' : 'partial',
+        count: perUser.reduce((sum, entry) => sum + entry.count, 0),
+        ...(failed.length ? { error: failed.map((entry) => `${entry.user}: ${entry.error}`).join('; ') } : {}),
+      };
+    }
+    return out;
+  }
+
   private async executeAll(run: SyncRun): Promise<void> {
     const statuses: SyncRun['sourceStatus'] = {};
+    // CRM / ONES / Hemory 按用户各跑各的凭证：拉到的客户授予该用户可见性；ONES 只拉该用户可见客户。
     try {
-      const crmCount = await this.syncCrmCustomers();
-      statuses.crm = { status: 'succeeded', count: crmCount };
+      const perUser = await this.runPerUser([
+        { label: 'crm', users: this.syncUsersOf('crm'), task: (user) => this.syncCrmCustomers(user) },
+      ]);
+      statuses.crm = perUser.crm!;
     } catch (error) {
       statuses.crm = { status: 'failed', error: (error as Error).message };
     }
     try {
-      const outcome = await this.syncRecentHemory();
-      statuses.hemory = outcome.failures.length
-        ? { status: 'partial', count: outcome.count, error: outcome.failures.map((failure) => `${failure.recordingId}: ${failure.error}`).join('; ') }
-        : { status: 'succeeded', count: outcome.count };
+      const heroryUsers = this.syncUsersOf('hemory');
+      if (!heroryUsers.length) {
+        statuses.hemory = { status: 'succeeded', count: 0 };
+      } else {
+        const failures: string[] = [];
+        let count = 0;
+        for (const user of heroryUsers) {
+          try {
+            const outcome = await this.syncRecentHemory(user);
+            count += outcome.count;
+            failures.push(...outcome.failures.map((failure) => `${user.username}/${failure.recordingId}: ${failure.error}`));
+          } catch (error) {
+            failures.push(`${user.username}: ${(error as Error).message}`);
+          }
+        }
+        statuses.hemory = failures.length
+          ? { status: 'partial', count, error: failures.join('; ') }
+          : { status: 'succeeded', count };
+      }
     } catch (error) {
       statuses.hemory = { status: 'failed', error: (error as Error).message };
     }
     try {
-      await this.ensureOnesqlGrammar();
-      let onesCount = 0;
-      const customers = this.db.listCustomers();
-      for (let offset = 0; offset < customers.length; offset += 4) {
-        const counts = await Promise.all(customers.slice(offset, offset + 4).map((customer) => this.syncOnesCustomer(customer)));
-        onesCount += counts.reduce((sum, count) => sum + count, 0);
+      const onesUsers = this.syncUsersOf('ones');
+      if (!onesUsers.length) {
+        statuses.ones = { status: 'succeeded', count: 0 };
+      } else {
+        let onesCount = 0;
+        const failed: string[] = [];
+        for (const user of onesUsers) {
+          try {
+            const customers = this.db.listCustomers('', 'default', user.userId || undefined);
+            for (let offset = 0; offset < customers.length; offset += 4) {
+              const counts = await Promise.all(customers.slice(offset, offset + 4).map((customer) => this.syncOnesCustomer(customer, user)));
+              onesCount += counts.reduce((sum, count) => sum + count, 0);
+            }
+          } catch (error) {
+            failed.push(`${user.username}: ${(error as Error).message}`);
+          }
+        }
+        statuses.ones = failed.length && !onesCount && onesUsers.length
+          ? { status: 'failed', count: 0, error: failed.join('; ') }
+          : { status: failed.length ? 'partial' : 'succeeded', count: onesCount, ...(failed.length ? { error: failed.join('; ') } : {}) };
       }
-      statuses.ones = { status: 'succeeded', count: onesCount };
     } catch (error) {
       statuses.ones = { status: 'failed', error: (error as Error).message };
     }
-    // 公开动态：每客户 14 天新鲜度门（force=false），失败只计 partial 不阻断其他源。
-    // 本段在 crm/ones/hemory 的 recompute 之后执行——落了新信号必须逐客户补重算，否则风险/机会要等下次触发才看到。
+    // 公开动态：全局队列（与用户凭证无关，检索走共享配置）；每客户 14 天新鲜度门，失败只计 partial 不阻断。
     try {
       let savedCount = 0;
       for (const customer of this.db.listCustomers()) {
@@ -756,17 +851,30 @@ export class PortfolioSyncService {
 
   private async executePortfolio(run: SyncRun): Promise<void> {
     const statuses: SyncRun['sourceStatus'] = {};
-    try { statuses.crm = { status: 'succeeded', count: await this.syncCrmCustomers() }; }
-    catch (error) { statuses.crm = { status: 'failed', error: (error as Error).message }; }
     try {
-      await this.ensureOnesqlGrammar();
+      const perUser = await this.runPerUser([
+        { label: 'crm', users: this.syncUsersOf('crm'), task: (user) => this.syncCrmCustomers(user) },
+      ]);
+      statuses.crm = perUser.crm!;
+    } catch (error) { statuses.crm = { status: 'failed', error: (error as Error).message }; }
+    try {
+      const onesUsers = this.syncUsersOf('ones');
       let count = 0;
-      const customers = this.db.listCustomers();
-      for (let offset = 0; offset < customers.length; offset += 4) {
-        const counts = await Promise.all(customers.slice(offset, offset + 4).map((customer) => this.syncOnesCustomer(customer)));
-        count += counts.reduce((sum, value) => sum + value, 0);
+      const failed: string[] = [];
+      for (const user of onesUsers) {
+        try {
+          const customers = this.db.listCustomers('', 'default', user.userId || undefined);
+          for (let offset = 0; offset < customers.length; offset += 4) {
+            const counts = await Promise.all(customers.slice(offset, offset + 4).map((customer) => this.syncOnesCustomer(customer, user)));
+            count += counts.reduce((sum, value) => sum + value, 0);
+          }
+        } catch (error) {
+          failed.push(`${user.username}: ${(error as Error).message}`);
+        }
       }
-      statuses.ones = { status: 'succeeded', count };
+      statuses.ones = failed.length
+        ? { status: count ? 'partial' : 'failed', count, error: failed.join('; ') }
+        : { status: 'succeeded', count };
     } catch (error) { statuses.ones = { status: 'failed', error: (error as Error).message }; }
     const failures = Object.values(statuses).filter((value) => value.status === 'failed');
     this.db.finishSyncRun(run.id, failures.length === 0 ? 'succeeded' : failures.length === 2 ? 'failed' : 'partial', statuses,
@@ -779,7 +887,18 @@ export class PortfolioSyncService {
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt]) await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
       try {
-        const { count, failures } = await this.scanHemory([], startedAt, endedAt);
+        // 逐用户扫各自 vault（凭证独立）；单用户整段失败记入 failures，不阻断其他用户。
+        let count = 0;
+        const failures: HemoryRecordingFailure[] = [];
+        for (const user of this.syncUsersOf('hemory')) {
+          try {
+            const outcome = await this.scanHemory(user, [], startedAt, endedAt);
+            count += outcome.count;
+            failures.push(...outcome.failures);
+          } catch (error) {
+            failures.push({ recordingId: `@${user.username}`, error: (error as Error).message });
+          }
+        }
         // 分段失败已被阶段级重试兜过且按录音隔离，重试整轮也救不回单录音分段——
         // 直接落 partial 并收尾，让其余录音的片段尽快可见。
         if (failures.length) {
@@ -796,7 +915,7 @@ export class PortfolioSyncService {
     this.hemoryRun = undefined;
   }
 
-  private async executeCustomer(run: SyncRun, customerId: string): Promise<void> {
+  private async executeCustomer(run: SyncRun, customerId: string, requestingUserId?: number): Promise<void> {
     const customer = this.db.getCustomer(customerId);
     if (!customer) {
       this.db.finishSyncRun(run.id, 'failed', {}, 'customer not found');
@@ -805,9 +924,12 @@ export class PortfolioSyncService {
     const statuses: SyncRun['sourceStatus'] = {};
     // CRM 步骤可能更新客户名/主体名，ONES 解析必须读最新记录而不是刷新前的快照。
     const fresh = () => this.db.getCustomer(customerId) ?? customer;
+    // 单客户定向刷新用「对该客户有可见性」的用户凭证（请求用户优先；无人可见时退任意已配置用户）。
+    const crmUser = this.syncOwnersOf(customerId, 'crm', requestingUserId)[0] ?? this.syncUsersOf('crm')[0];
+    const onesUser = this.syncOwnersOf(customerId, 'ones', requestingUserId)[0];
     for (const [source, task] of [
-      ['crm', () => this.syncSingleCrmCustomer(customer)],
-      ['ones', () => this.syncOnesCustomer(fresh())],
+      ['crm', crmUser ? () => this.syncSingleCrmCustomer(fresh(), crmUser) : async () => 0],
+      ['ones', onesUser ? () => this.syncOnesCustomer(fresh(), onesUser) : async () => 0],
     ] as const) {
       try {
         statuses[source] = { status: 'succeeded', count: await task() };
@@ -815,12 +937,23 @@ export class PortfolioSyncService {
         statuses[source] = { status: 'failed', error: (error as Error).message };
       }
     }
-    // Hemory 按录音隔离失败：单录音分段失败计 partial，不阻断其余源。
+    // Hemory 按录音隔离失败：单录音分段失败计 partial，不阻断其余源；逐用户扫各自的 vault。
     try {
-      const outcome = await this.syncHemoryCustomer(fresh());
-      statuses.hemory = outcome.failures.length
-        ? { status: 'partial', count: outcome.count, error: outcome.failures.map((failure) => `${failure.recordingId}: ${failure.error}`).join('; ') }
-        : { status: 'succeeded', count: outcome.count };
+      const heroryUsers = this.syncUsersOf('hemory');
+      const failures: string[] = [];
+      let count = 0;
+      for (const user of heroryUsers) {
+        try {
+          const outcome = await this.syncRecentHemory(user);
+          count += outcome.count;
+          failures.push(...outcome.failures.map((failure) => `${user.username}/${failure.recordingId}: ${failure.error}`));
+        } catch (error) {
+          failures.push(`${user.username}: ${(error as Error).message}`);
+        }
+      }
+      statuses.hemory = failures.length
+        ? { status: 'partial', count, error: failures.join('; ') }
+        : { status: 'succeeded', count };
     } catch (error) {
       statuses.hemory = { status: 'failed', error: (error as Error).message };
     }
@@ -838,15 +971,16 @@ export class PortfolioSyncService {
       errored.map((value) => value.error).filter(Boolean).join('; ') || undefined);
   }
 
-  private async syncCrmCustomers(): Promise<number> {
+  private async syncCrmCustomers(user: SyncUser): Promise<number> {
     const baseArgs = {
       apiName: 'QueryRecordsByFields',
       object_api_name: CRM_OBJECT,
       select_fields: CRM_SELECT_FIELDS,
       need_count: true,
     };
-    const records = await this.fetchAllCrmRecords(baseArgs, [{ field_name: CRM_FIELDS.stageValue, field_values: [CRM_LOST_STAGE_VALUE], operator: 'ne', connector: 'AND', value_type: 0 }]);
+    const records = await this.fetchAllCrmRecords(user.mcp, baseArgs, [{ field_name: CRM_FIELDS.stageValue, field_values: [CRM_LOST_STAGE_VALUE], operator: 'ne', connector: 'AND', value_type: 0 }]);
     let count = 0;
+    const granted: string[] = [];
     for (const record of records) {
       const input = crmCustomer(record);
       if (!input) continue;
@@ -857,16 +991,19 @@ export class PortfolioSyncService {
         payload: record, confidence: 1 });
       this.addCrmEvidence(customer, record);
       this.recompute(customer.id);
+      // 该用户的凭证拉到的客户 = 其可见客户（领导账号权限大 → 拉到区域全集）。
+      granted.push(customer.id);
       count++;
     }
-    await this.syncCrmFollowupRecords();
+    this.db.grantCustomerAccess(user.userId, granted);
+    await this.syncCrmFollowupRecords(user);
     return count;
   }
 
   // 跟进记录（销售记录 ActiveRecordObj）通过 related_object_data 关联售后客户；what_list_data 不支持服务端过滤，
   // 按创建时间倒序取最近一批后本地归属。销售记录量大且历史久远，全量分页拉取代价高且只用于回显近期跟进。
-  private async syncCrmFollowupRecords(limit = 200): Promise<number> {
-    const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+  private async syncCrmFollowupRecords(user: SyncUser, limit = 200): Promise<number> {
+    const result = await user.mcp.call('mcp__crm__data_record_query-by-fields', {
       apiName: 'QueryRecordsByFields', object_api_name: 'ActiveRecordObj', need_count: false,
       select_fields: ['_id', 'active_record_content', 'active_record_type__r', 'field_MIe19__c__r', 'related_object_data', 'create_time', 'field_oUaZx__c'],
       search_template_query: { limit, filters: [], orders: [{ fieldName: 'create_time', isAsc: false }] },
@@ -885,9 +1022,9 @@ export class PortfolioSyncService {
     return count;
   }
 
-  private async fetchAllCrmRecords(baseArgs: Record<string, unknown>, baseFilters: Record<string, unknown>[] = []): Promise<Record<string, unknown>[]> {
+  private async fetchAllCrmRecords(mcp: McpGateway, baseArgs: Record<string, unknown>, baseFilters: Record<string, unknown>[] = []): Promise<Record<string, unknown>[]> {
     const query = async (filters: Record<string, unknown>[]) => {
-      const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+      const result = await mcp.call('mcp__crm__data_record_query-by-fields', {
         ...baseArgs,
         search_template_query: { limit: 50, filters, orders: [{ fieldName: CRM_FIELDS.pageCursor, isAsc: false }] },
       });
@@ -917,8 +1054,8 @@ export class PortfolioSyncService {
     return [...collected.values()];
   }
 
-  private async syncSingleCrmCustomer(customer: Customer): Promise<number> {
-    const result = await this.mcp.call('mcp__crm__data_record_query-by-fields', {
+  private async syncSingleCrmCustomer(customer: Customer, user: SyncUser): Promise<number> {
+    const result = await user.mcp.call('mcp__crm__data_record_query-by-fields', {
       apiName: 'QueryRecordsByFields', object_api_name: CRM_OBJECT, select_fields: CRM_SELECT_FIELDS, need_count: false,
       search_template_query: { limit: 50, filters: [{ field_name: CRM_FIELDS.id, field_values: [customer.id], operator: 'eq', connector: 'AND', value_type: 0 }], orders: [] },
     });
@@ -930,7 +1067,8 @@ export class PortfolioSyncService {
     const input = crmCustomer(record);
     if (input) this.db.upsertCustomer(input);
     this.addCrmEvidence(customer, record);
-    await this.syncCrmFollowupRecords();
+    this.db.grantCustomerAccess(user.userId, [customer.id]);
+    await this.syncCrmFollowupRecords(user);
     return 1;
   }
 
@@ -943,17 +1081,19 @@ export class PortfolioSyncService {
       occurredAt: asDate(record[CRM_FIELDS.updatedAt]) ?? new Date().toISOString(), confidence: 0.8, sourceSystem: 'crm', sourceUrl: customer.crmUrl });
   }
 
-  private async ensureOnesqlGrammar(): Promise<void> {
-    if (!this.onesqlGrammarReady) {
-      this.onesqlGrammarReady = (async () => {
-        const result = await this.mcp.call('mcp__ones__get_onesql_grammar_help', {});
+  /** ONESQL 语法预热按用户隔离：各用户连接独立，grammar 缓存不能跨凭证共享。 */
+  private async ensureOnesqlGrammar(user: SyncUser): Promise<void> {
+    if (!this.onesqlGrammarReady.has(user.userId)) {
+      const ready = (async () => {
+        const result = await user.mcp.call('mcp__ones__get_onesql_grammar_help', {});
         if (result.isError) throw new Error(result.text);
       })().catch((error) => {
-        this.onesqlGrammarReady = undefined;
+        this.onesqlGrammarReady.delete(user.userId);
         throw error;
       });
+      this.onesqlGrammarReady.set(user.userId, ready);
     }
-    await this.onesqlGrammarReady;
+    await this.onesqlGrammarReady.get(user.userId);
   }
 
   // 客户名称（field_n1qN0__c__r）是全称，与 ONES 客户信息选项通常一致；售后客户名称（简称）与工作台别名
@@ -961,7 +1101,7 @@ export class PortfolioSyncService {
   // 工作项可能挂在任一选项名下——逐变体解析、全部用于 ONESQL 查询，缺一个就会漏同步该选项名下的工作项。
   // 每个变体独立解析：先查 label 精确等于该变体的 confirmed 身份缓存，miss 则实时精确唯一匹配并落缓存；
   // 解析失败的变体落候选事件，不做模糊归属。返回去重后的 optionId 列表（全称在前）。
-  private async resolveOnesCustomerOptions(customer: Customer): Promise<string[]> {
+  private async resolveOnesCustomerOptions(customer: Customer, user: SyncUser): Promise<string[]> {
     const names = [...new Set([customer.name, customer.shortName, ...this.db.listCustomerAliases(customer.id)]
       .filter((name): name is string => !!name))];
     const optionIds = new Set<string>();
@@ -972,7 +1112,7 @@ export class PortfolioSyncService {
         item.system === 'ones_customer_option' && item.status === 'confirmed' && String(item.label) === name);
       if (existing?.external_id) { optionIds.add(String(existing.external_id)); continue; }
 
-      const result = await this.mcp.call('mcp__ones__search_for_issue_field_options', {
+      const result = await user.mcp.call('mcp__ones__search_for_issue_field_options', {
         fieldID: ONES_CUSTOMER_FIELD_ID,
         input: name,
       });
@@ -1014,15 +1154,15 @@ export class PortfolioSyncService {
     return [...optionIds];
   }
 
-  private async syncOnesCustomer(customer: Customer): Promise<number> {
-    await this.ensureOnesqlGrammar();
-    const optionIds = await this.resolveOnesCustomerOptions(customer);
+  private async syncOnesCustomer(customer: Customer, user: SyncUser): Promise<number> {
+    await this.ensureOnesqlGrammar(user);
+    const optionIds = await this.resolveOnesCustomerOptions(customer, user);
     if (!optionIds.length) return 0;
 
     const issues: Record<string, unknown>[] = [];
     let cursor = '';
     for (let page = 0; page < 20; page++) {
-      const result = await this.mcp.call('mcp__ones__query_issues_by_onesql', { query: buildOnesCustomerQuery(optionIds, cursor) });
+      const result = await user.mcp.call('mcp__ones__query_issues_by_onesql', { query: buildOnesCustomerQuery(optionIds, cursor) });
       if (result.isError) throw new Error(result.text);
       const parsed = parseOnesIssuePage(result.text);
       issues.push(...parsed.records);
@@ -1049,7 +1189,7 @@ export class PortfolioSyncService {
         continue;
       }
       const workhourRecords = sourceType === 'customer_manhour'
-        ? await this.fetchWorkhourRecords(id)
+        ? await this.fetchWorkhourRecords(user.mcp, id)
         : [];
       const payload = sourceType === 'customer_manhour' && workhourRecords.length
         ? { ...item, workhourRecords }
@@ -1085,26 +1225,23 @@ export class PortfolioSyncService {
     const open = supportIssues.filter((item) => !isClosed(item)).length;
     const blocked = supportIssues.filter((item) => /阻塞|挂起|blocked/i.test(asText(item.field005) ?? '')).length;
     this.db.updateSupportStats(customer.id, open, blocked);
+    // 该用户的 ONES 凭证能拉到这个客户的工作项 = 其可见客户（CRM 拉全量、ONES 补增量，双源都授权）。
+    if (user.userId !== 0) this.db.grantCustomerAccess(user.userId, [customer.id]);
     this.recompute(customer.id);
     return issues.length;
   }
 
-  private async syncHemoryCustomer(customer: Customer): Promise<HemoryScanOutcome> {
-    void customer;
-    return this.syncRecentHemory();
-  }
-
-  private async syncRecentHemory(): Promise<HemoryScanOutcome> {
+  private async syncRecentHemory(user: SyncUser): Promise<HemoryScanOutcome> {
     const { startedAt } = shanghaiDayBounds(shanghaiDateKey());
     const windowStart = new Date(new Date(startedAt).getTime() - (HEMORY_SYNC_WINDOW_DAYS - 1) * 86_400_000).toISOString();
-    return this.scanHemory([], windowStart, new Date().toISOString());
+    return this.scanHemory(user, [], windowStart, new Date().toISOString());
   }
 
-  private async scanHemory(keywords: string[], startedAt: string, endedAt: string): Promise<HemoryScanOutcome> {
+  private async scanHemory(user: SyncUser, keywords: string[], startedAt: string, endedAt: string): Promise<HemoryScanOutcome> {
     let after: string | undefined;
     const recordings = new Map<string, TranscriptLine[]>();
     for (let page = 0; page < 100; page++) {
-      const result = await this.mcp.call('mcp__hemory__search_memory', {
+      const result = await user.mcp.call('mcp__hemory__search_memory', {
         keywords, started_at: startedAt, ended_at: endedAt, after: after ?? null, limit: 1000,
       });
       if (result.isError) throw new Error(result.text);
@@ -1123,7 +1260,10 @@ export class PortfolioSyncService {
       lines.sort((a, b) => a.spokenAt.localeCompare(b.spokenAt));
       const recording = this.db.upsertSourceEvent({ customerId: null, sourceSystem: 'hemory', sourceType: 'raw_transcript',
         externalId: recordingId, title: `Hemory 原始转写 ${recordingId}`, occurredAt: lines[0].spokenAt,
-        confidence: 1, attributionStatus: 'unattributed', payload: { recordingId, startedAt: lines[0].spokenAt,
+        confidence: 1, attributionStatus: 'unattributed',
+        // 录音归属同步它的用户（vault 边界）：其待归属片段只进本人收件箱；首次插入定终身，他人 vault 撞 ID 不改写。
+        ownerUserId: user.userId || undefined,
+        payload: { recordingId, startedAt: lines[0].spokenAt,
           endedAt: lines.at(-1)!.spokenAt, lines, transcript: lines.map((line) => `${line.speaker}: ${line.text}`).join('\n') } });
       // 单录音分段失败不得中止整轮扫描：后面的录音（往往是最新的会话）必须照常入库，
       // 失败明细随 run 上报为 partial，由下一轮同步/定向重切收尾。

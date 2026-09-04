@@ -2626,7 +2626,7 @@ test('workbench: ONES customer option resolves per name variant; dual options bo
       '华大九天': [],
     });
     const sync = new PortfolioSyncService(db, mcp, async () => []);
-    const optionIds = await (sync as any).resolveOnesCustomerOptions(db.getCustomer('crm-hd'));
+    const optionIds = await (sync as any).resolveOnesCustomerOptions(db.getCustomer('crm-hd'), { userId: 0, username: 'system', mcp });
     assert.deepEqual(optionIds, ['BJY0WFZJ']);
     const identity = db.listIdentities('crm-hd').find((item) => item.system === 'ones_customer_option');
     assert.equal(identity?.external_id, 'BJY0WFZJ');
@@ -2645,7 +2645,7 @@ test('workbench: ONES customer option resolves per name variant; dual options bo
       '通用AI研究院': [{ uuid: 'tyy8tinj', name: '通用AI研究院' }],
     });
     const sync2 = new PortfolioSyncService(db, mcp2, async () => []);
-    const optionIds2 = await (sync2 as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai'));
+    const optionIds2 = await (sync2 as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai'), { userId: 0, username: 'system', mcp: mcp2 });
     assert.deepEqual(optionIds2, ['tyy8tinj']);
     assert.equal(db.listIdentities('crm-ai').find((item) => item.system === 'ones_customer_option')?.external_id, 'tyy8tinj');
 
@@ -2656,7 +2656,7 @@ test('workbench: ONES customer option resolves per name variant; dual options bo
       '智源': [{ uuid: 'v8Goci1j', name: '智源研究院' }],
     });
     const sync2b = new PortfolioSyncService(db, mcp2b, async () => []);
-    const optionIds2b = await (sync2b as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai2'));
+    const optionIds2b = await (sync2b as any).resolveOnesCustomerOptions(db.getCustomer('crm-ai2'), { userId: 0, username: 'system', mcp: mcp2b });
     assert.deepEqual(optionIds2b, []);
     assert.equal(db.listIdentities('crm-ai2').filter((item) => item.system === 'ones_customer_option').length, 0);
     assert.ok(db.listSourceEvents('ones', 'customer_option_candidate', 'crm-ai2').length >= 1);
@@ -2668,7 +2668,7 @@ test('workbench: ONES customer option resolves per name variant; dual options bo
       '简称客户': [{ uuid: 'opt-a', name: '简称客户集团' }],
     });
     const sync3 = new PortfolioSyncService(db, mcp3, async () => []);
-    const optionIds3 = await (sync3 as any).resolveOnesCustomerOptions(db.getCustomer('crm-xx'));
+    const optionIds3 = await (sync3 as any).resolveOnesCustomerOptions(db.getCustomer('crm-xx'), { userId: 0, username: 'system', mcp: mcp3 });
     assert.deepEqual(optionIds3, []);
     assert.equal(db.listIdentities('crm-xx').filter((item) => item.system === 'ones_customer_option').length, 0);
     const candidates = db.listSourceEvents('ones', 'customer_option_candidate', 'crm-xx');
@@ -2683,7 +2683,7 @@ test('workbench: ONES customer option resolves per name variant; dual options bo
       // 简称已命中缓存，不再实时搜索。
     });
     const sync4 = new PortfolioSyncService(db, mcp4, async () => []);
-    const optionIds4 = await (sync4 as any).resolveOnesCustomerOptions(db.getCustomer('crm-md'));
+    const optionIds4 = await (sync4 as any).resolveOnesCustomerOptions(db.getCustomer('crm-md'), { userId: 0, username: 'system', mcp: mcp4 });
     // 全称（primary）在前，简称在后，两者都参与 ONESQL IN 查询。
     assert.deepEqual(optionIds4, ['6iioSn0M', '87pQMH70']);
     assert.deepEqual(mcp4.calls.map((call) => call.args.input), ['北京敏锐达致机器人科技有限责任公司']);
@@ -2721,7 +2721,7 @@ test('workbench: dual-option customer syncs the manhour issue bound to the secon
       },
     };
     const sync = new PortfolioSyncService(db, onesMcp, async () => []);
-    const count = await (sync as any).syncOnesCustomer(db.getCustomer('crm-dual'));
+    const count = await (sync as any).syncOnesCustomer(db.getCustomer('crm-dual'), { userId: 0, username: 'system', mcp: onesMcp });
     assert.ok(count >= 1);
     // ONESQL 查询必须同时含两个选项 ID。
     assert.match(capturedQuery, /JrvswW8P IN \('opt-full', 'opt-short'\)/);

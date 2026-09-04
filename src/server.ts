@@ -25,7 +25,7 @@ import {
 } from './auth.js';
 import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
-import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync } from './workbench/sync.js';
+import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync, type SyncUser } from './workbench/sync.js';
 import { WebIntelService } from './workbench/webintel.js';
 import { OpportunityService } from './workbench/opportunity.js';
 import { RISK_RULE_VERSION } from './workbench/risk.js';
@@ -205,15 +205,16 @@ export type CustomerResolution =
  * 仅当可见活跃客户中恰好一个含该子串时成立，≥2 字符门槛）。任何一层命中多个即歧义——宁可不归属。
  * not_found 时带回 LIKE 相近候选（≤5 个），供 resolve_customer 向模型给出可确认的候选清单。
  */
-export function resolveCustomerForContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): CustomerResolution {
+export function resolveCustomerForContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }, userId?: number): CustomerResolution {
   const id = typeof context.crm_customer_id === 'string' ? context.crm_customer_id.trim() : '';
   if (id) {
     const byId = db.getCustomer(id);
-    if (byId) return { status: 'resolved', customer: byId, matchedBy: 'id' };
+    if (byId && (userId == null || db.customerAccessExists(userId, byId.id))) return { status: 'resolved', customer: byId, matchedBy: 'id' };
   }
   const name = typeof context.customer_name === 'string' ? context.customer_name.trim() : '';
   if (!name) return { status: 'not_found', suggestions: [] };
-  const candidates = db.listCustomers(name);
+  // 多人化：会话/草稿的解析在属主可见客户内进行（getCustomer(id) 直取也过可见性门）。
+  const candidates = db.listCustomers(name, 'default', userId);
   const aliasesOf = new Map(candidates.map((c) => [c.id, db.listCustomerAliases(c.id)]));
   const exactTier = candidates.filter((c) => c.name === name || c.shortName === name || (aliasesOf.get(c.id) ?? []).includes(name));
   if (exactTier.length === 1) {
@@ -231,8 +232,8 @@ export function resolveCustomerForContext(db: WorkbenchDatabase, context: { crm_
 }
 
 /** 兼容入口：只关心客户本体（读工具与草稿绑定门），解析细节见 resolveCustomerForContext。 */
-function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }): Customer | undefined {
-  const resolution = resolveCustomerForContext(db, context);
+function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_id?: string; customer_name?: string }, userId?: number): Customer | undefined {
+  const resolution = resolveCustomerForContext(db, context, userId);
   return resolution.status === 'resolved' ? resolution.customer : undefined;
 }
 
@@ -242,17 +243,17 @@ function uniqueCustomerByContext(db: WorkbenchDatabase, context: { crm_customer_
  * 外部写的客户身份完全以草稿自含信息为准（贴图/聊天记录提单：客户名就在贴入内容里），
  * 会话不承载客户状态——「这次写入」必须绑定客户，对话本身不需要。
  */
-export function resolveDraftCustomer(db: WorkbenchDatabase, draft: ConfirmDraft): DraftCustomerBinding | null {
+export function resolveDraftCustomer(db: WorkbenchDatabase, draft: ConfirmDraft, userId?: number): DraftCustomerBinding | null {
   const byDraft = uniqueCustomerByContext(db, {
     crm_customer_id: typeof draft.fields?.customer_id === 'string' ? draft.fields.customer_id : undefined,
     customer_name: typeof draft.fields?.customer_name === 'string' ? draft.fields.customer_name : undefined,
-  });
+  }, userId);
   return byDraft ? bindingOfCustomer(db, byDraft) : null;
 }
 
 /** 草稿自含客户解析出的 CRM 使用版本（结构化编辑契约与部署类型锁定的依据）；草稿无可解析客户时为 null。 */
-function draftUsageVersion(db: WorkbenchDatabase, draft: ConfirmDraft): string | null {
-  return resolveDraftCustomer(db, draft)?.customer.usageVersion ?? null;
+function draftUsageVersion(db: WorkbenchDatabase, draft: ConfirmDraft, userId?: number): string | null {
+  return resolveDraftCustomer(db, draft, userId)?.customer.usageVersion ?? null;
 }
 
 /** ONES Desk 批准时确定性绑定客户选项：模型自行搜索的选项仅参考，以解析客户 confirmed 选项为准（与部署类型覆盖同一哲学）。返回错误串或 null（已就地规范化）。 */
@@ -507,9 +508,10 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
 
   function makeAgent(session: Session): AgentSession {
     // 本地工具从调用参数解析客户（全称/简称/别名精确或唯一子串匹配，或权威 CRM _id 直取）——
-    // 会话不承载客户状态，身份只存在于对话文本、工具参数与回写草稿 fields。
+    // 会话不承载客户状态，身份只存在于对话文本、工具参数与回写草稿 fields；
+    // 多人化：解析域收窄到会话属主可见的客户（不可见 = 对该用户不存在）。
     const resolveCustomerByNameOrId = (name?: string, id?: string): { id: string; name: string } | null => {
-      const customer = uniqueCustomerByContext(workbench.db, { customer_name: name, crm_customer_id: id });
+      const customer = uniqueCustomerByContext(workbench.db, { customer_name: name, crm_customer_id: id }, session.userId);
       return customer ? { id: customer.id, name: customer.name } : null;
     };
     const workbenchHandlers = makeWorkbenchToolHandlers({
@@ -790,6 +792,16 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       const actor = authCtx.user.username;
       const requireAdmin = (): boolean => authCtx.user.role === 'admin';
 
+      // ── 可见性（多人化）：客户域数据按 user_customer_access 映射过滤；不可见按 404（不泄露存在性）。
+      // 个人工作区（会话/写入记录）按属主，已在各自路由处理。 ──
+      const hasCustomerAccess = (customerId: string): boolean => workbench.db.customerAccessExists(authCtx.user.id, customerId);
+      const visibleCustomerIds = (): Set<string> => workbench.db.customerIdsVisibleTo(authCtx.user.id);
+      const ownedHemoryRecordings = (): Set<string> => workbench.db.hemoryRecordingIdsOwnedBy(authCtx.user.id);
+      const fragmentVisible = (event: { customerId?: string | null; payload?: Record<string, unknown> | null }): boolean =>
+        event.customerId ? hasCustomerAccess(event.customerId) : ownedHemoryRecordings().has(String(event.payload?.recordingId ?? ''));
+      // 用户本人的 MCP 连接池（一个 hub 内含其全部服务器）；未配置任何连接时退系统连接池（只读降级）。
+      const ownHub = () => (loadUserMcpServers(authCtx.user.id).length ? runtime.users.get(authCtx.user.id).mcp : runtime.mcp);
+
       // ── 账号与会话 ──
       if (req.method === 'GET' && path === '/api/auth/me') {
         return json(res, 200, { user: publicUser(authCtx.user) });
@@ -921,7 +933,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (req.method === 'GET' && path === '/api/customers') {
         const requestedSort = url.searchParams.get('sort');
         const sort = requestedSort === 'renewal_date' || requestedSort === 'renewal_amount' ? requestedSort : 'default';
-        return json(res, 200, { customers: workbench.db.listCustomers(url.searchParams.get('q') ?? '', sort) });
+        return json(res, 200, { customers: workbench.db.listCustomers(url.searchParams.get('q') ?? '', sort, authCtx.user.id) });
       }
       if (req.method === 'POST' && path === '/api/sync') {
         return json(res, 202, workbench.sync.refreshAll());
@@ -940,6 +952,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       // 全量重切：遍历库内全部录音并按当前分段版本重切，与增量同步互斥；内部数据变更，无需外部写审批。
       // recordingId = 定向重切单条录音（分段失败逃生门）：先重置该录音的分段 job 再重切。
       if (req.method === 'POST' && path === '/api/hemory/resegment') {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限（全量重切为全局维护操作）' });
         const body = await readBody(req);
         if (typeof body.recordingId === 'string' && body.recordingId) {
           return json(res, 202, workbench.sync.resegmentHemoryRecording(body.recordingId));
@@ -963,12 +976,18 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
           recordingId: url.searchParams.get('recording_id') ?? undefined,
           cursor: url.searchParams.get('cursor') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100),
           days: daysParam == null ? undefined : Math.max(0, Number(daysParam) || 0) });
-        return json(res, 200, { fragments: decorateHemoryFragments(fragments), nextCursor: fragments.at(-1)?.occurredAt ?? null });
+        const visibleFragments = fragments.filter(fragmentVisible);
+        return json(res, 200, { fragments: decorateHemoryFragments(visibleFragments), nextCursor: visibleFragments.at(-1)?.occurredAt ?? null });
       }
       if (req.method === 'PUT' && path === '/api/hemory/fragments/ignore') {
         const body = await readBody(req);
         const eventIds = Array.isArray(body.eventIds) ? body.eventIds.map(String) : [];
         if (!eventIds.length) return json(res, 400, { error: 'eventIds 不能为空' });
+        // 只能动本人可见的片段（已归属客户可见 ∨ 本人的录音）。
+        if (eventIds.some((id: string) => {
+          const event = workbench.db.getSourceEvent(id);
+          return !event || !fragmentVisible(event);
+        })) return json(res, 404, { error: 'fragment not found' });
         const previousCustomers = new Set(eventIds.map((id: string) => workbench.db.getSourceEvent(id)?.customerId).filter(Boolean) as string[]);
         try {
           const events = workbench.db.ignoreHemoryFragments(eventIds,
@@ -985,7 +1004,12 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         const body = await readBody(req);
         const eventIds = Array.isArray(body.eventIds) ? body.eventIds.map(String) : [];
         if (!eventIds.length) return json(res, 400, { error: 'eventIds 不能为空' });
+        if (eventIds.some((id: string) => {
+          const event = workbench.db.getSourceEvent(id);
+          return !event || !fragmentVisible(event);
+        })) return json(res, 404, { error: 'fragment not found' });
         const customerId = body.customerId == null || body.customerId === '' ? null : String(body.customerId);
+        if (customerId && !hasCustomerAccess(customerId)) return json(res, 404, { error: 'customer not found' });
         const previousCustomers = new Set(eventIds.map((id: string) => workbench.db.getSourceEvent(id)?.customerId).filter(Boolean) as string[]);
         try {
           const events = workbench.db.attributeHemoryFragments(eventIds, customerId,
@@ -1012,6 +1036,10 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         const body = await readBody(req);
         const eventIds = Array.isArray(body.eventIds) ? body.eventIds.map(String) : [];
         if (!eventIds.length) return json(res, 400, { error: 'eventIds 不能为空' });
+        if (eventIds.some((id: string) => {
+          const event = workbench.db.getSourceEvent(id);
+          return !event || !fragmentVisible(event);
+        })) return json(res, 404, { error: 'fragment not found' });
         try {
           return json(res, 200, workbench.drafts.regenerateByEventIds(eventIds));
         } catch (error) {
@@ -1021,6 +1049,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       // 存量孪生一次性修复：把停用世代的 confirmed/ignored 归属按时间覆盖率继承到活跃世代待处理片段，
       // 并回填分段 job 的转写基准（inputMeta）。默认 dry-run 只返回逐录音修复计划。
       if (req.method === 'POST' && path === '/api/hemory/fragments/inherit') {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限（存量孪生修复为全局维护操作）' });
         const body = await readBody(req);
         const apply = body.apply === true;
         const plan = repairHemoryInheritance(apply, actor);
@@ -1029,6 +1058,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       }
       const syncMatch = path.match(/^\/api\/sync-runs\/([0-9a-f-]+)$/);
       if (req.method === 'GET' && syncMatch) {
+        if (!requireAdmin()) return json(res, 403, { error: '需要管理员权限' });
         const run = workbench.db.getSyncRun(syncMatch[1]);
         return run ? json(res, 200, run) : json(res, 404, { error: 'sync run not found' });
       }
@@ -1036,6 +1066,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (customerMatch) {
         const customerId = decodeURIComponent(customerMatch[1]);
         const sub = customerMatch[2] ?? '';
+        if (!hasCustomerAccess(customerId)) return json(res, 404, { error: 'customer not found' });
         if (req.method === 'GET' && sub === '/overview') {
           const overview = workbench.db.overview(customerId);
           return overview ? json(res, 200, overview) : json(res, 404, { error: 'customer not found' });
@@ -1057,7 +1088,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         }
         if (req.method === 'GET' && sub === '/workhours') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
-          return json(res, 200, await workbench.sync.listCustomerWorkhours(customerId));
+          return json(res, 200, await workbench.sync.listCustomerWorkhours(customerId, ownHub()));
         }
         if (req.method === 'GET' && sub === '/weekly-reports') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
@@ -1075,7 +1106,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         }
         if (req.method === 'POST' && sub === '/refresh') {
           if (!workbench.db.getCustomer(customerId)) return json(res, 404, { error: 'customer not found' });
-          return json(res, 202, workbench.sync.refreshCustomer(customerId));
+          return json(res, 202, workbench.sync.refreshCustomer(customerId, authCtx.user.id));
         }
         // 公开动态检索：强制刷新（忽略 14 天门），检索+落库+重算风险/机会，同步返回结果。
         if (req.method === 'POST' && sub === '/web-intel') {
@@ -1110,12 +1141,18 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       }
 
       if (req.method === 'GET' && path === '/api/action-items') {
-        return json(res, 200, { actions: workbench.db.listActions(url.searchParams.get('customer_id') ?? undefined) });
+        const visible = visibleCustomerIds();
+        const actions = workbench.db.listActions(url.searchParams.get('customer_id') ?? undefined)
+          .filter((action) => visible.has(action.customerId));
+        return json(res, 200, { actions });
       }
       if (req.method === 'POST' && path === '/api/action-items/bulk-complete') {
         const body = await readBody(req);
         const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
         if (!ids.length) return json(res, 400, { error: 'ids 不能为空' });
+        const visible = visibleCustomerIds();
+        const hidden = workbench.db.listActions().some((action) => ids.includes(action.id) && !visible.has(action.customerId));
+        if (hidden) return json(res, 404, { error: 'action item not found' });
         const outcome = typeof body.outcome === 'string' && body.outcome.trim() ? body.outcome.trim() : undefined;
         return json(res, 200, { items: workbench.db.bulkCompleteActions(ids, outcome) });
       }
@@ -1123,15 +1160,21 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (actionMatch) {
         const actionId = actionMatch[1];
         const sub = actionMatch[2] ?? '';
+        const actionVisible = (): boolean => {
+          const found = workbench.db.listActions().find((action) => action.id === actionId);
+          return !!found && hasCustomerAccess(found.customerId);
+        };
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
           const allowed = ['new', 'completed'];
           if (body.status && !allowed.includes(body.status)) return json(res, 400, { error: 'invalid action status' });
+          if (!actionVisible()) return json(res, 404, { error: 'action item not found' });
           const action = workbench.db.updateAction(actionId, body);
           return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });
         }
         if (req.method === 'POST' && sub === '/complete') {
           const body = await readBody(req);
+          if (!actionVisible()) return json(res, 404, { error: 'action item not found' });
           const action = workbench.db.completeAction(actionId, typeof body.outcome === 'string' ? body.outcome : undefined);
           return action ? json(res, 200, action) : json(res, 404, { error: 'action item not found' });
         }
@@ -1142,9 +1185,11 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         const statusParam = url.searchParams.get('status');
         const status = statusParam === 'resolved' || statusParam === 'all' ? statusParam : 'active';
         const customerId = url.searchParams.get('customer_id')?.trim() || undefined;
+        const visible = visibleCustomerIds();
+        const alerts = workbench.db.listAlerts({ status, customerId }).filter((alert) => visible.has(alert.customerId));
         return json(res, 200, {
-          alerts: workbench.db.listAlerts({ status, customerId }),
-          counts: { active: workbench.db.countAlerts('active'), resolved: workbench.db.countAlerts('resolved') },
+          alerts,
+          counts: { active: alerts.filter((alert) => alert.status === 'active').length, resolved: alerts.filter((alert) => alert.status === 'resolved').length },
         });
       }
       const alertMatch = path.match(/^\/api\/alerts\/([0-9A-Za-z-]+)(\/.*)?$/);
@@ -1153,7 +1198,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         const note = typeof body.note === 'string' ? body.note.trim() : '';
         if (!note) return json(res, 400, { error: '消除风险必须填写原因/动作（note）' });
         const alert = workbench.db.getAlert(alertMatch[1]);
-        if (!alert) return json(res, 404, { error: 'alert not found' });
+        if (!alert || !hasCustomerAccess(alert.customerId)) return json(res, 404, { error: 'alert not found' });
         const resolved = workbench.db.resolveAlert(alert.id, actor, note);
         if (!resolved) return json(res, 409, { error: '该预警已消除，无需重复操作' });
         workbench.db.audit(actor, 'alert.resolve', 'customer_alert', alert.id, { triggerKey: alert.triggerKey, note }, authCtx.user.id);
@@ -1161,15 +1206,20 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       }
 
       if (req.method === 'GET' && path === '/api/case-drafts') {
-        return json(res, 200, { drafts: workbench.db.listCaseDrafts(url.searchParams.get('customer_id') ?? undefined) });
+        const visible = visibleCustomerIds();
+        const drafts = workbench.db.listCaseDrafts(url.searchParams.get('customer_id') ?? undefined)
+          .filter((draft) => visible.has(draft.customerId));
+        return json(res, 200, { drafts });
       }
 
       if (req.method === 'GET' && path === '/api/draft-batches') {
-        const batches = workbench.db.listDraftBatches(url.searchParams.get('customer_id') ?? undefined);
+        const visibleCustomers = visibleCustomerIds();
+        const accessible = workbench.db.listDraftBatches(url.searchParams.get('customer_id') ?? undefined)
+          .filter((batch) => visibleCustomers.has(batch.customerId));
         // 草稿箱只展示待处理草稿：已写入项默认剔除，全写入的批次整批隐藏；include=written 恢复全量（诊断口）。
         const visible = url.searchParams.get('include') === 'written'
-          ? batches
-          : batches
+          ? accessible
+          : accessible
             .map((batch) => (batch.items ? { ...batch, items: batch.items.filter((item) => item.status !== 'written') } : batch))
             .filter((batch) => (batch.items ? batch.items.length > 0 : true));
         // 重新生成中日集合按请求算一次，批次装饰复用（单批次 GET 则在装饰内自算）。
@@ -1197,12 +1247,15 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         } else {
           jobs = status === 'failed' ? workbench.db.listFailedDraftJobs(kind) : [];
         }
-        return json(res, 200, { jobs: jobs.map(decorateDraftJob) });
+        const visibleJobs = jobs.filter((job) => hasCustomerAccess(job.customerId));
+        return json(res, 200, { jobs: visibleJobs.map(decorateDraftJob) });
       }
       const draftBatchMatch = path.match(/^\/api\/draft-batches\/([0-9a-f-]+)(\/.*)?$/);
       if (draftBatchMatch) {
         const batchId = draftBatchMatch[1];
         const sub = draftBatchMatch[2] ?? '';
+        const batchRow = workbench.db.getDraftBatch(batchId);
+        if (batchRow && !hasCustomerAccess(batchRow.customerId)) return json(res, 404, { error: 'draft batch not found' });
         if (req.method === 'GET' && sub === '') {
           const batch = workbench.db.getDraftBatch(batchId);
           return batch ? json(res, 200, decorateDraftBatch(batch)) : json(res, 404, { error: 'draft batch not found' });
@@ -1223,7 +1276,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         if (req.method === 'POST' && sub === '/confirm') {
           const body = await readBody(req);
           try {
-            const { items } = await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : [], actor);
+            const { items } = await workbench.drafts.confirm(batchId, Array.isArray(body.items) ? body.items : [], actor, ownHub());
             return json(res, 200, { items: items.map(decorateDraftItem) });
           } catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
@@ -1232,6 +1285,8 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (draftItemMatch) {
         const itemId = draftItemMatch[1];
         const sub = draftItemMatch[2] ?? '';
+        const itemRow = workbench.db.getDraftItem(itemId);
+        if (itemRow && !hasCustomerAccess(itemRow.customerId)) return json(res, 404, { error: 'draft item not found' });
         if (req.method === 'GET' && sub === '') {
           const item = workbench.db.getDraftItem(itemId);
           if (!item) return json(res, 404, { error: 'draft item not found' });
@@ -1267,7 +1322,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
           return item ? json(res, 200, decorateDraftItem(item)) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
         }
         if (req.method === 'POST' && sub === '/retry') {
-          try { return json(res, 200, decorateDraftItem(await workbench.drafts.retry(itemId))); }
+          try { return json(res, 200, decorateDraftItem(await workbench.drafts.retry(itemId, ownHub()))); }
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/dismiss') {
@@ -1277,6 +1332,9 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       }
       if (req.method === 'POST' && path === '/api/case-drafts') {
         const body = await readBody(req);
+        if (typeof body.customerId === 'string' && body.customerId && !hasCustomerAccess(body.customerId)) {
+          return json(res, 404, { error: 'customer not found' });
+        }
         try {
           return json(res, 202, workbench.cases.generate(String(body.customerId ?? ''), Boolean(body.force)));
         } catch (error) {
@@ -1287,6 +1345,8 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (caseMatch) {
         const draftId = caseMatch[1];
         const sub = caseMatch[2] ?? '';
+        const caseDraftRow = workbench.db.getCaseDraft(draftId);
+        if (caseDraftRow && !hasCustomerAccess(caseDraftRow.customerId)) return json(res, 404, { error: '案例草稿不存在' });
         if (req.method === 'GET' && sub === '') {
           const detail = workbench.cases.detail(draftId);
           return detail ? json(res, 200, detail) : json(res, 404, { error: '案例草稿不存在' });
@@ -1332,7 +1392,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
           const body = await readBody(req);
           try {
             const parentPageID = String(body.parentPageID ?? process.env.ONES_CASE_PARENT_PAGE_ID ?? '');
-            return json(res, 200, await workbench.cases.publish(draftId, Number(body.version), parentPageID, String(body.approvalHash ?? '')));
+            return json(res, 200, await workbench.cases.publish(draftId, Number(body.version), parentPageID, String(body.approvalHash ?? ''), ownHub()));
           } catch (error) {
             return json(res, 400, { error: (error as Error).message });
           }
@@ -1350,6 +1410,8 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       if (weeklyMatch) {
         const reportId = weeklyMatch[1];
         const sub = weeklyMatch[2] ?? '';
+        const weeklyRow = workbench.weekly.get(reportId);
+        if (weeklyRow && !hasCustomerAccess(weeklyRow.customerId)) return json(res, 404, { error: 'weekly report not found' });
         if (req.method === 'GET' && sub === '') {
           // markdown 是服务端权威渲染的客户版正文（Web 复制与 CLI 默认输出共用），warnings 为内部证据残留提示。
           const detail = workbench.weekly.detailWithMarkdown(reportId);
@@ -1388,7 +1450,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
           const body = await readBody(req);
           try {
             const parentPageID = String(body.parentPageID ?? process.env.ONES_WEEKLY_PARENT_PAGE_ID ?? '');
-            const published = await workbench.weekly.publish(reportId, Number(body.version), parentPageID, String(body.approvalHash ?? ''));
+            const published = await workbench.weekly.publish(reportId, Number(body.version), parentPageID, String(body.approvalHash ?? ''), ownHub());
             return json(res, 200, { report: published });
           } catch (error) {
             return json(res, 400, { error: (error as Error).message });
@@ -1398,15 +1460,15 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
 
       // ── ONES Wiki 只读浏览（发布位置层级选择器的数据源） ──
       if (req.method === 'GET' && path === '/api/ones-wiki/spaces') {
-        try { return json(res, 200, { spaces: await workbench.wiki.listSpaces() }); }
+        try { return json(res, 200, { spaces: await workbench.wiki.listSpaces(ownHub()) }); }
         catch (error) { return json(res, 400, { error: (error as Error).message }); }
       }
       if (req.method === 'GET' && path === '/api/ones-wiki/pages') {
         const spaceId = url.searchParams.get('space_id') ?? '';
         const keyword = url.searchParams.get('q') ?? '';
         try {
-          if (keyword) return json(res, 200, { pages: await workbench.wiki.searchPages(keyword) });
-          return json(res, 200, { pages: await workbench.wiki.listPages(spaceId) });
+          if (keyword) return json(res, 200, { pages: await workbench.wiki.searchPages(keyword, ownHub()) });
+          return json(res, 200, { pages: await workbench.wiki.listPages(spaceId, ownHub()) });
         } catch (error) { return json(res, 400, { error: (error as Error).message }); }
       }
 
@@ -1741,7 +1803,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
                     // 渲染中文表单，无契约（case/profile 等）前端回退原始 JSON 编辑。
                     // confirm 事件在这里下发后必须 return，不得再走末尾的通用广播——
                     // 双下发会让前端按事件渲染出两张同题确认卡、审计记录也翻倍（真实事故）。
-                    broadcast(session, { ...e, editContract: confirmDraftEditContract(e.draft, draftUsageVersion(workbench.db, e.draft)) } as unknown as DisplayEvent);
+                    broadcast(session, { ...e, editContract: confirmDraftEditContract(e.draft, draftUsageVersion(workbench.db, e.draft, session.userId)) } as unknown as DisplayEvent);
                   } else {
                   if (e.type === 'tool_result' && e.name && e.name !== 'confirm_write') {
                     const t = runtime.users.get(session.userId).mcp.resolve(e.name);
@@ -1814,7 +1876,7 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
             // 结构化编辑分支：客户端只提交字段键→新值，服务端按类型契约合并；合并失败（未知选项等）报 400。
             // 部署类型锁定等编辑契约的权威使用版本由草稿自含客户解析（会话不承载客户状态）。
             if (isRecord(body.edits)) {
-              const merged = applyConfirmDraftEdits(session.pending.draft, body.edits, draftUsageVersion(workbench.db, session.pending.draft));
+              const merged = applyConfirmDraftEdits(session.pending.draft, body.edits, draftUsageVersion(workbench.db, session.pending.draft, session.userId));
               if (!merged.draft) return json(res, 400, { error: `草稿编辑未通过: ${merged.errors.join('；')}` });
               approvedDraft = merged.draft;
             } else {
@@ -1828,7 +1890,10 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
               const caseDraft = workbench.db.getCaseDraft(caseDraftId);
               if (!caseDraft) return json(res, 400, { error: `案例草稿不存在: ${caseDraftId}` });
               // 归属校验按草稿自含客户（fields.customer_id/customer_name）解析——会话不承载客户状态。
-              const refineBinding = resolveDraftCustomer(workbench.db, approvedDraft);
+              const refineBinding = resolveDraftCustomer(workbench.db, approvedDraft, session.userId);
+              if (refineBinding && !workbench.db.customerAccessExists(session.userId, refineBinding.customer.id)) {
+                return json(res, 403, { error: '无权对该客户执行写入（客户不在你的可见范围内）' });
+              }
               if (!refineBinding || caseDraft.customerId !== refineBinding.customer.id) {
                 return json(res, 400, { error: '案例草稿与草稿携带的客户不一致（fields.customer_id/customer_name 须与案例草稿归属客户一致）' });
               }
@@ -1870,7 +1935,10 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
             }
             // 客户身份以（可能编辑过的）草稿为准做最终解析与校验；ONES Desk 的客户字段在批准前
             // 确定性绑定为解析客户的 confirmed 选项（模型自行搜索的选项仅参考），批准 hash 绑定规范化后参数。
-            const binding = resolveDraftCustomer(workbench.db, approvedDraft);
+            const binding = resolveDraftCustomer(workbench.db, approvedDraft, session.userId);
+            if (binding && !workbench.db.customerAccessExists(session.userId, binding.customer.id)) {
+              return json(res, 403, { error: '无权对该客户执行写入（客户不在你的可见范围内）' });
+            }
             const rawName = typeof approvedDraft.fields?.customer_name === 'string' ? approvedDraft.fields.customer_name.trim() : '';
             if (binding && rawName && rawName !== binding.customer.name && rawName !== binding.customer.shortName) {
               return json(res, 400, { error: '草稿中的客户 ID 与客户名称指向不同客户，请修正后重新提交' });
@@ -1956,6 +2024,12 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
     }
     runtime.attachSystemUser(legacyUserId);
   }
+  // 多人化可见性迁移：存量客户一次性全部授予 admin（映射表为空才执行；此后由各用户同步按各自凭证授权）。
+  if (legacyUserId != null && db.countCustomerAccess() === 0 && db.listCustomers().length > 0) {
+    const granted = db.grantAllCustomersToUser(legacyUserId);
+    db.audit('system', 'migrate_customer_access', 'user', String(legacyUserId), { granted }, legacyUserId);
+    console.log(`[visibility] 已将 ${granted} 个存量客户一次性授予 admin（单用户时代数据的可见性迁移）`);
+  }
   // Preserve useful customer identities from pre-SQLite output records.
   for (const record of store.records) {
     const fields = record.fields ?? {};
@@ -1982,7 +2056,12 @@ export async function startServer(runtime: Runtime, port: number): Promise<http.
       sync.recompute(customerId);
     }
   });
-  sync = new PortfolioSyncService(db, runtime.mcp, (recording) => hemorySegments.segmentRecordingDetailed(recording),
+  // 同步按用户各走各的凭证：配置了对应服务器（名称契约 crm/ones/hemory）的活跃用户 × 本人连接池。
+  const syncUsersOf = (serverName: string): SyncUser[] => db.listUsers()
+    .filter((user) => user.status === 'active')
+    .filter((user) => loadUserMcpServers(user.id).some((server) => server.name === serverName))
+    .map((user) => ({ userId: user.id, username: user.username, mcp: runtime.users.get(user.id).mcp }));
+  sync = new PortfolioSyncService(db, syncUsersOf, (recording) => hemorySegments.segmentRecordingDetailed(recording),
     // 公开动态检索注入（同步路径与 agent 工具同源）：key/keyless 与 web_search 工具共用同一配置。
     (customer, options) => new WebIntelService(db, runtime, {
       getApiKey: () => loadSearchConfig().apiKey,

@@ -632,6 +632,14 @@ export class WorkbenchDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS user_customer_access (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        last_synced_at TEXT NOT NULL,
+        PRIMARY KEY(user_id, customer_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_customer_access_customer ON user_customer_access(customer_id);
+
       CREATE TABLE IF NOT EXISTS auth_sessions (
         token_hash TEXT PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -659,6 +667,11 @@ export class WorkbenchDatabase {
     const auditColumns = this.db.prepare('PRAGMA table_info(audit_log)').all() as Row[];
     if (!auditColumns.some((column) => String(column.name) === 'user_id')) {
       this.db.exec('ALTER TABLE audit_log ADD COLUMN user_id INTEGER;');
+    }
+    // 存量库补 source_events.owner_user_id（多人化：Hemory 录音归属同步它的用户）
+    const sourceEventOwnerColumns = this.db.prepare('PRAGMA table_info(source_events)').all() as Row[];
+    if (!sourceEventOwnerColumns.some((column) => String(column.name) === 'owner_user_id')) {
+      this.db.exec('ALTER TABLE source_events ADD COLUMN owner_user_id INTEGER;');
     }
     const draftJobColumns = this.db.prepare('PRAGMA table_info(draft_generation_jobs)').all() as Row[];
     if (!draftJobColumns.some((column) => String(column.name) === 'kind')) {
@@ -795,7 +808,7 @@ export class WorkbenchDatabase {
     return row ? customerFromRow(row) : undefined;
   }
 
-  listCustomers(query = '', sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default'): Customer[] {
+  listCustomers(query = '', sort: 'default' | 'renewal_date' | 'renewal_amount' = 'default', userId?: number): Customer[] {
     const rows = this.db.prepare(`
       SELECT c.*,
         (SELECT COUNT(*) FROM opportunities o WHERE o.customer_id=c.id AND o.status!='dismissed') AS opportunity_count,
@@ -806,7 +819,8 @@ export class WorkbenchDatabase {
         AND COALESCE(c.contract_status, '') <> '已流失'
         AND (?='' OR c.name LIKE ? OR COALESCE(c.short_name,'') LIKE ? OR COALESCE(c.csm_name,'') LIKE ?
           OR EXISTS (SELECT 1 FROM customer_aliases ca WHERE ca.customer_id=c.id AND ca.alias LIKE ?))
-    `).all(query, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`) as Row[];
+        AND (? IS NULL OR EXISTS (SELECT 1 FROM user_customer_access a WHERE a.user_id=? AND a.customer_id=c.id))
+    `).all(query, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, userId ?? null, userId ?? null) as Row[];
     const customers = rows.map((row) => {
       const customer = customerFromRow(row);
       customer.risk = this.latestRisk(customer.id);
@@ -843,6 +857,47 @@ export class WorkbenchDatabase {
 
   setCustomerHealth(customerId: string, health: Customer['health']): void {
     this.db.prepare('UPDATE customers SET health=?, updated_at=? WHERE id=?').run(health, nowIso(), customerId);
+  }
+
+  // ── 客户可见性映射（多人化：你的凭证拉到的客户 = 你可见的客户；领导账号权限大 → 拉到区域全集）──
+
+  /** 授予用户对客户的可见性（幂等 upsert；CRM/ONES 同步命中即调用）。 */
+  grantCustomerAccess(userId: number, customerIds: string[]): void {
+    if (!customerIds.length) return;
+    const stmt = this.db.prepare('INSERT INTO user_customer_access(user_id,customer_id,last_synced_at) VALUES(?,?,?) ' +
+      'ON CONFLICT(user_id,customer_id) DO UPDATE SET last_synced_at=excluded.last_synced_at');
+    const now = nowIso();
+    for (const customerId of customerIds) stmt.run(userId, customerId, now);
+  }
+
+  /** 一次性迁移：把存量全部客户授予指定用户（单用户时代升级，历史客户全归 admin）。 */
+  grantAllCustomersToUser(userId: number): number {
+    const rows = this.db.prepare(`INSERT INTO user_customer_access(user_id,customer_id,last_synced_at)
+      SELECT ?, id, ? FROM customers c
+      WHERE COALESCE(c.source_object,'')='object_Umwnn__c'
+        AND TRIM(COALESCE(c.after_sales_stage,''))<>'流失' AND COALESCE(c.contract_status,'')<>'已流失'
+      ON CONFLICT(user_id,customer_id) DO UPDATE SET last_synced_at=excluded.last_synced_at`).run(userId, nowIso());
+    return Number(rows.changes);
+  }
+
+  customerAccessExists(userId: number, customerId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM user_customer_access WHERE user_id=? AND customer_id=?').get(userId, customerId);
+  }
+
+  countCustomerAccess(): number {
+    return Number((this.db.prepare('SELECT COUNT(*) AS n FROM user_customer_access').get() as Row).n);
+  }
+
+  /** 某用户可见的全部客户 ID（粗粒度集合，供业务列表过滤）。 */
+  customerIdsVisibleTo(userId: number): Set<string> {
+    return new Set((this.db.prepare('SELECT customer_id FROM user_customer_access WHERE user_id=?').all(userId) as Row[])
+      .map((row) => String(row.customer_id)));
+  }
+
+  /** 某用户自己的 Hemory 录音 ID 集（vault 归属）：待归属片段收件箱的可见边界。 */
+  hemoryRecordingIdsOwnedBy(userId: number): Set<string> {
+    return new Set((this.db.prepare("SELECT external_id FROM source_events WHERE source_system='hemory' AND source_type='raw_transcript' AND owner_user_id=?")
+      .all(userId) as Row[]).map((row) => String(row.external_id)));
   }
 
   /** 客户别名（工作台本地叠加层，同步不覆盖）：供口语简称/品牌名解析，顺序稳定。 */
@@ -918,13 +973,13 @@ export class WorkbenchDatabase {
     const syncedAt = input.syncedAt ?? nowIso();
     const attribution = input.attributionStatus ?? (input.customerId ? 'confirmed' : 'unattributed');
     this.db.prepare(`
-      INSERT INTO source_events(id,customer_id,source_system,source_type,external_id,display_id,title,occurred_at,synced_at,confidence,url,payload_json,payload_hash,attribution_status)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO source_events(id,customer_id,source_system,source_type,external_id,display_id,title,occurred_at,synced_at,confidence,url,payload_json,payload_hash,attribution_status,owner_user_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(source_system,source_type,external_id) DO UPDATE SET
         customer_id=excluded.customer_id,display_id=COALESCE(excluded.display_id,source_events.display_id),title=excluded.title,occurred_at=excluded.occurred_at,synced_at=excluded.synced_at,
         confidence=excluded.confidence,url=excluded.url,payload_json=excluded.payload_json,payload_hash=excluded.payload_hash,attribution_status=excluded.attribution_status
     `).run(id, input.customerId ?? null, input.sourceSystem, input.sourceType, input.externalId, input.displayId ?? null, input.title, input.occurredAt,
-      syncedAt, input.confidence ?? 1, input.url ?? null, json(payload), payloadHash, attribution);
+      syncedAt, input.confidence ?? 1, input.url ?? null, json(payload), payloadHash, attribution, input.ownerUserId ?? null);
     const row = this.db.prepare('SELECT * FROM source_events WHERE source_system=? AND source_type=? AND external_id=?')
       .get(input.sourceSystem, input.sourceType, input.externalId) as Row;
     if (input.sourceSystem === 'hemory' && input.sourceType === 'ai_topic_segment') {
