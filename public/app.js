@@ -316,6 +316,7 @@
   function setupAvatarEntry(me) {
     currentDisplayName = me.user.displayName || me.user.username;
     document.getElementById('avatarName').textContent = currentDisplayName;
+    document.getElementById('avatarRole').textContent = me.user.role === 'admin' ? '管理员' : '成员';
     document.getElementById('profileUsername').textContent = me.user.username;
     document.getElementById('profileDisplayName').textContent = me.user.displayName || me.user.username;
     document.getElementById('profileRole').textContent = me.user.role === 'admin' ? '管理员' : '成员';

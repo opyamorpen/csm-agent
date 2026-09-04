@@ -62,9 +62,17 @@
           <img id="userAvatarImg" class="hidden" alt="" />
           <span id="userAvatarInitial" class="user-avatar-initial"></span>
         </button>
-        <span id="avatarName" class="avatar-name"></span>
+        <span class="avatar-text">
+          <span id="avatarName" class="avatar-name"></span>
+          <span id="avatarRole" class="avatar-role"></span>
+        </span>
+        <button id="settingsBtn" class="avatar-gear" type="button" title="连接与模型设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.1"></circle>
+            <path d="M19.1 14.9a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.11a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.11a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.11a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.11a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
       </div>
-      <button id="settingsBtn" class="settings-bottom" title="连接与模型设置">设置</button>
     </aside>
 
     <main id="workbench" class="workbench-main">

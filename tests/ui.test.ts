@@ -2210,6 +2210,11 @@ test('personal center: bottom-left avatar with popover menu and profile modal', 
   assert.match(html, /id="userAvatar"/);
   assert.match(html, /id="userAvatarImg"/);
   assert.match(html, /id="userAvatarInitial"/);
+  // 用户卡片收口：姓名/角色两行文字塔 + 齿轮设置在卡片内（裸文本设置按钮已删）。
+  assert.match(html, /id="avatarRole"/);
+  assert.match(html, /class="avatar-text"/);
+  assert.match(html, /id="settingsBtn" class="avatar-gear"/);
+  assert.doesNotMatch(html, /settings-bottom/);
   assert.match(html, /id="avatarMenu"/);
   assert.match(html, /id="avatarMenuProfile"/);
   assert.match(html, /id="profileModal"/);
