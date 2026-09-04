@@ -15,10 +15,11 @@ import { ONES_CAPABILITY_MAP } from './case-ones-knowledge.js';
 import { parseArchitectureGraph, renderArchitectureSvg } from './case-architecture-figure.js';
 import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
 import { injectValueMapSolutionSvg, parseValueMapBlueprint, renderValueMapSvg } from './case-value-map-figure.js';
+import { styleCaseFigureSvg } from './case-figure-shell.js';
 
-/** v13：业务解决方案图 1 与系统集成图均采用「模型供结构化内容、服务端模板确定性渲染」。
+/** v15：核心蓝图图采用结构化内容+服务端确定性渲染，其余流程/里程碑图采用统一视觉外壳。
  * 提示词实质变化必须升版本破指纹短路。 */
-export const CASE_GENERATION_VERSION = 'case-v14-value-map-deterministic-render';
+export const CASE_GENERATION_VERSION = 'case-v15-unified-figure-shell';
 export const CASE_WEB_FRESH_DAYS = 7;
 
 /**
@@ -1855,13 +1856,15 @@ const CASE_FIGURE_COMMON_RULES = [
   '- 图内文字与正文禁区相同：不得出现人名、联系方式、合同金额、内部系统名（Hemory、CRM）、其他客户信息；caption 是 30 字以内的图注（如「客户现状：三套系统并行、人工汇总对齐」）。',
 ].join('\n');
 
-/** 流程/时间轴类的专属规范（v7 原口径不变：节点 ≤10、2~4k 字符、横向布局）。 */
+/** 流程/时间轴类的专属规范（节点 ≤10；内容由模型绘制，服务端统一视觉外壳）。 */
 const CASE_FIGURE_SIMPLE_KIND_RULES = '- 规模：节点总数不超过 10 个、每个标签不超过 10 个字，SVG 通常 2~4k 字符即可。\n'
-  + '- 画布 viewBox="0 0 800 480"（可按内容在 600~900 × 400~540 间调整）；整体横向布局。';
+  + '- 画布 viewBox 可按内容在 600~1200 × 360~720 间调整，整体保持横向；服务端会等比嵌入统一视觉外壳。\n'
+  + '- 模型只绘制节点、短标签、箭头和必要的关系线；不要绘制整图背景、标题牌或装饰性大色块，避免留出超大空白区。\n'
+  + '- 节点以白底、蓝灰细边框为主，连线使用灰色箭头；服务端会将常见高饱和色安全映射到统一蓝色层级。';
 
 /**
  * 配图 kind 专属条目。v12：capability_map 与 architecture 均改为内容提取契约，
- * SVG 由服务端确定性模板渲染；其余 kind 维持模型手绘 + 专属规范。
+ * SVG 由服务端确定性模板渲染；其余 kind 维持模型内容 + 服务端统一视觉外壳。
  */
 const CASE_FIGURE_KIND_RULES: Record<CaseFigureKind, string> = {
   flow_current: CASE_FIGURE_SIMPLE_KIND_RULES,
@@ -2096,9 +2099,16 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
         }
       } else {
         const rawSvg = typeof record.svg === 'string' ? record.svg.trim() : '';
-        const result = accepted(sanitizeCaseSvg(rawSvg));
+        const sanitized = sanitizeCaseSvg(rawSvg);
+        const styled = sanitized && ['flow_current', 'flow_target', 'milestone'].includes(figure.kind)
+          ? styleCaseFigureSvg({ kind: figure.kind as 'flow_current' | 'flow_target' | 'milestone', svg: sanitized, caption })
+          : sanitized;
+        const result = accepted(styled ? sanitizeCaseSvg(styled) : null);
         if (result) return result;
-        lastError = `配图 SVG 消毒或图注校验未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
+        structureFeedback = sanitized
+          ? '服务端统一外壳适配失败；请使用短业务标签，保持节点/文字在 viewBox 内，不要输出外链、图片、脚本或整图背景'
+          : 'SVG 消毒失败；请仅输出自包含静态 SVG，不要输出外链、图片、脚本或非法文字结构';
+        lastError = `配图${sanitized ? '外壳适配、消毒或图注校验' : 'SVG 消毒或图注校验'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
       }
     } else {
       lastError = `配图未返回可解析 JSON（第 ${attempt}/${MAX_ATTEMPTS} 次，stopReason=${response.stopReason}）`;

@@ -4222,6 +4222,7 @@ import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, b
 import { ARCHITECTURE_FIGURE_PALETTE, parseArchitectureGraph, renderArchitectureSvg, type ArchitectureGraph } from '../src/workbench/case-architecture-figure.js';
 import { CAPABILITY_MAP_PALETTE, parseCapabilityMapBlueprint, renderCapabilityMapSvg, type CapabilityMapBlueprint } from '../src/workbench/case-capability-map-figure.js';
 import { parseValueMapBlueprint, renderValueMapSvg, type ValueMapBlueprint } from '../src/workbench/case-value-map-figure.js';
+import { CASE_FIGURE_SHELL_PALETTE, styleCaseFigureSvg } from '../src/workbench/case-figure-shell.js';
 import { Resvg } from '@resvg/resvg-js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
@@ -4487,7 +4488,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v14-value-map-deterministic-render');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v15-unified-figure-shell');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -5278,6 +5279,26 @@ test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowl
   assert.ok(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><text x="1" y="2">单行文字</text></svg>'), '单行 text 放行');
 });
 
+test('workbench: legacy figure shell adds stable titles, padding, and blue palette', () => {
+  const source = CLEAN_CASE_FIGURE_SVG.replace('#eef3fb', '#FCE9E7').replace('#3a6ea5', '#F0605C');
+  const sanitized = sanitizeCaseSvg(source);
+  assert.ok(sanitized, '源 SVG 先通过消毒');
+  const current = styleCaseFigureSvg({ kind: 'flow_current', svg: sanitized!, caption: '现状流程' });
+  assert.ok(current, '现状流程外壳生成');
+  assert.match(current!, /viewBox="0 0 848 560"/, '按源 viewBox 比例扩展画布');
+  assert.match(current!, /现状流程/);
+  assert.match(current!, new RegExp(`fill="${CASE_FIGURE_SHELL_PALETTE.panel}"`), '统一区域底色');
+  assert.match(current!, new RegExp(`fill="${CASE_FIGURE_SHELL_PALETTE.primary}"`), '统一主蓝');
+  assert.ok(current!.includes('需求提出'), '保留原节点文字');
+  assert.ok(current!.includes('#FCE9E7') === false && current!.includes('#F0605C') === false, '常见高饱和色已安全重着色');
+  assert.equal(styleCaseFigureSvg({ kind: 'flow_current', svg: sanitized!, caption: '现状流程' }), current, '同输入输出稳定');
+  for (const kind of ['flow_target', 'milestone'] as const) {
+    const styled = styleCaseFigureSvg({ kind, svg: sanitized!, caption: kind });
+    assert.ok(styled && styled.includes(kind === 'flow_target' ? '目标流程' : '服务里程碑'));
+  }
+  assert.equal(styleCaseFigureSvg({ kind: 'flow_current', svg: '<svg viewBox="0 0 5001 1"></svg>', caption: 'x' }), null, '异常尺寸 viewBox 被拒绝');
+});
+
 // ── 业务解决方案图 1（capability_map）v12：内容蓝图 + 服务端确定性渲染 ──
 
 const CAPABILITY_BLUEPRINT: CapabilityMapBlueprint = {
@@ -5794,6 +5815,8 @@ test('workbench: figure prompts carry kind-specific rules and ONES capability ma
   assert.match(valueMap, /【ONES 产品能力图谱/, '全景图注入能力图谱');
   const flow = buildCaseFigurePrompt({ ...base, sectionLabel: '业务现状', kind: 'flow_current' });
   assert.match(flow, /节点总数不超过 10 个/, '流程图维持 v7 规模口径');
+  assert.match(flow, /服务端会等比嵌入统一视觉外壳/, '流程图由服务端统一外壳');
+  assert.match(flow, /高饱和色安全映射/, '流程图统一蓝色主题');
   assert.match(flow, /tspan/, '通用 tspan 规则保留');
   assert.match(flow, /dy=/, '通用 dy 规则保留');
   assert.ok(!flow.includes('【ONES 产品能力图谱'), '流程图不注入图谱（省 token）');
