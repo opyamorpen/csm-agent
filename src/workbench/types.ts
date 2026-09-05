@@ -313,6 +313,29 @@ export interface DraftItem {
 
 export type DraftJobKind = 'hemory' | 'weekly_report' | 'case_report';
 
+export interface CaseGenerationCall {
+  id: string;
+  stage: string;
+  attempt: number;
+  requestHash: string;
+  queuedAt: string;
+  startedAt: string | null;
+  firstTokenAt: string | null;
+  finishedAt: string | null;
+  status: 'queued' | 'running' | 'accepted' | 'rejected' | 'error' | 'interrupted' | 'reused';
+  inputTokensEstimate: number;
+  maxOutputTokens: number;
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number } | null;
+  error: string | null;
+}
+
+export interface CaseGenerationCheckpoint<T = unknown> {
+  stage: string;
+  requestHash: string;
+  value: T;
+  updatedAt: string;
+}
+
 export interface DraftGenerationJob {
   id: string;
   customerId: string;

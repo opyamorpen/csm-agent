@@ -1450,6 +1450,17 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
           catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
       }
+      const caseJobMatch = path.match(/^\/api\/case-jobs\/([0-9a-f-]+)(\/resume)?$/);
+      if (caseJobMatch) {
+        const jobId = caseJobMatch[1];
+        const job = workbench.db.getDraftJob(jobId);
+        if (!job || job.kind !== 'case_report' || !hasCustomerAccess(job.customerId)) return json(res, 404, { error: '案例任务不存在' });
+        if (req.method === 'GET' && !caseJobMatch[2]) return json(res, 200, workbench.cases.jobDetail(jobId));
+        if (req.method === 'POST' && caseJobMatch[2]) {
+          try { return json(res, 202, workbench.cases.resume(jobId)); }
+          catch (error) { return json(res, 409, { error: (error as Error).message }); }
+        }
+      }
       if (req.method === 'POST' && path === '/api/case-drafts') {
         const body = await readBody(req);
         if (typeof body.customerId === 'string' && body.customerId && !hasCustomerAccess(body.customerId)) {

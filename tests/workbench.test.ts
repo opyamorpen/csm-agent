@@ -1164,9 +1164,9 @@ function segment(db: WorkbenchDatabase, customerId: string, externalId: string, 
     payload: summary ? { recordingId, speakers: ['CSM'], transcript, summary } : { recordingId, speakers: ['CSM'], transcript } });
 }
 
-async function waitForJob(db: WorkbenchDatabase, jobId: string): Promise<void> {
-  for (let i = 0; i < 200 && db.getDraftJob(jobId)?.status !== 'succeeded'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(db.getDraftJob(jobId)?.status, 'succeeded');
+async function waitForJob(db: WorkbenchDatabase, jobId: string, expected = 'succeeded'): Promise<void> {
+  for (let i = 0; i < 200 && db.getDraftJob(jobId)?.status !== expected; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(db.getDraftJob(jobId)?.status, expected, db.getDraftJob(jobId)?.error ?? undefined);
 }
 
 test('workbench: batch regenerating flag tracks in-flight job and clears on success or failure', async () => {
@@ -4231,6 +4231,7 @@ import { CAPABILITY_MAP_PALETTE, parseCapabilityMapBlueprint, renderCapabilityMa
 import { parseValueMapBlueprint, renderValueMapSvg, type ValueMapBlueprint } from '../src/workbench/case-value-map-figure.js';
 import { CASE_FIGURE_SHELL_PALETTE, findFigureEdgeTextOverlaps, relayerFigureEdges, styleCaseFigureSvg } from '../src/workbench/case-figure-shell.js';
 import { Resvg } from '@resvg/resvg-js';
+import { mergeCaseEnrichment, resolveCaseSourceRef } from '../src/workbench/cases.js';
 import type { HttpPost } from '../src/tools/websearch.js';
 
 /** 从任一阶段 prompt 尾部的上下文 JSON 中解析 allowed_source_refs/source_catalog（规划/章节/补写共用同一份注入）。 */
@@ -4261,6 +4262,26 @@ function publicCaseModelContent(content: any, prompt: string): any {
     { section: 'summary', claim: content.summary, source_refs: [factRef], excerpt: excerptFor(factRef), speaker_role: 'unknown', status_category: 'done', confidence: 0.8 },
   ];
   return { ...content, claim_evidence: claims };
+}
+
+function caseEnrichmentContent(content: any, prompt: string): any {
+  const first = JSON.parse(prompt.split('- 第一稿正文：\n')[1].split('\n')[0]);
+  const mappings = publicCaseModelContent(content, prompt).claim_evidence;
+  const changes: any[] = [];
+  for (const [field, value] of Object.entries(content)) {
+    if (!(field in first) || field === 'title') continue;
+    const values = Array.isArray(value) ? value : [value];
+    const before = Array.isArray(first[field]) ? first[field] : [first[field]];
+    values.forEach((item: any, index) => {
+      if (JSON.stringify(item) === JSON.stringify(before[index])) return;
+      const text = typeof item === 'string' ? item : item.text;
+      const evidence = mappings.find((claim: any) => claim.claim === text);
+      changes.push({ field, index: Array.isArray(value) && index < before.length ? index : null,
+        text, ...(typeof item === 'object' ? { title: item.title } : {}),
+        evidence: { source_refs: evidence.source_refs, excerpt: evidence.excerpt } });
+    });
+  }
+  return { changes };
 }
 
 /** 规划阶段产物：从上下文解析真实 source_ref，为 CASE_CONTENT 六章节生成带证据的 plan 骨架。 */
@@ -4319,7 +4340,7 @@ function casePhaseRespond(content: any, prompt: string, opts: { enrichContent?: 
   const body = String(prompt);
   if (body.includes('压缩为一份保真的分块摘要')) return { text: '# communications\n- 摘要内容（source_ref: fake）' };
   if (body.includes('规划客户成功案例草稿的章节结构')) return casePlanContent(content, body);
-  if (body.includes('补充完善客户成功案例草稿')) return publicCaseModelContent(opts.enrichContent?.(body) ?? content, body);
+  if (body.includes('补充完善客户成功案例草稿')) return caseEnrichmentContent(opts.enrichContent?.(body) ?? content, body);
   if (body.includes('只写这一个章节')) return caseChapterContent(content, body);
   return publicCaseModelContent(content, body);
 }
@@ -4495,7 +4516,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v17-integration-and-value-map');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v18-incremental-repair');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4523,6 +4544,8 @@ test('workbench: case detail marks context stale and summarize sources', async (
 test('workbench: case generation failure marks job failed without draft', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
   const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = caseModelRetryDelays.baseMs;
+  caseModelRetryDelays.baseMs = 1;
   try {
     seedCaseCustomer(db);
     const failing = {
@@ -4543,6 +4566,119 @@ test('workbench: case generation failure marks job failed without draft', async 
     const jobBefore = db.getDraftJob(result.jobId!)!;
     assert.equal(jobBefore.status, 'failed');
     assert.equal(failingDraftsBefore, 0);
+  } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case resume reuses validated stages across restart and rejects source/model drift', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-resume-'));
+  let db = new WorkbenchDatabase(dir);
+  const prompts: string[] = [];
+  let failing = true;
+  const runtime: any = { llm: { provider: 'fake', model: 'same-model' }, models: { complete: async (_model: unknown, context: any) => {
+    const prompt = context.messages[0].content;
+    prompts.push(prompt);
+    if (failing && prompt.includes('「业务解决方案」章节正文')) return { stopReason: 'stop', content: [{ type: 'text', text: '{}' }] };
+    return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }] };
+  } } };
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp(), runtime);
+    const job = service.generate('crm-c1');
+    assert.equal(service.generate('crm-c1', true).jobId, job.jobId, 'repeated clicks share the active customer job');
+    await waitForJob(db, job.jobId!, 'failed');
+    assert.equal(db.getDraftJob(job.jobId!)!.status, 'failed');
+    assert.match(prompts.filter((p) => p.includes('「业务解决方案」章节正文'))[1], /未返回「业务解决方案」小节/);
+    assert.equal(db.listCaseCheckpoints(job.jobId!).filter((item) => item.stage.startsWith('chapter:')).length, 3);
+    const before = prompts.length;
+    db.close();
+    db = new WorkbenchDatabase(dir);
+    const resumed = new CaseService(db, caseMcp(), runtime);
+    assert.equal(resumed.jobDetail(job.jobId!)!.resumable, true, resumed.jobDetail(job.jobId!)!.resumeReason ?? undefined);
+    runtime.llm.model = 'changed-model';
+    assert.throws(() => resumed.resume(job.jobId!), /模型配置或生成规则已变化/);
+    runtime.llm.model = 'same-model';
+    failing = false;
+    resumed.resume(job.jobId!);
+    await waitForJob(db, job.jobId!);
+    assert.equal(db.getDraftJob(job.jobId!)!.status, 'succeeded');
+    assert.equal(prompts.length - before, 3, 'only solution/value/summary need requests after restart');
+    const detail = resumed.jobDetail(job.jobId!)!;
+    assert.equal(detail.calls.filter((call) => call.status === 'reused').length, 4, 'plan plus three chapters reused');
+    assert.equal(detail.draftId, db.listCaseDrafts('crm-c1')[0].id);
+    assert.ok(!JSON.stringify(detail).includes('source_catalog'), 'diagnostics do not expose checkpoint payloads');
+    assert.throws(() => resumed.resume(job.jobId!), /已完成/);
+    failing = true;
+    const next = resumed.generate('crm-c1', true);
+    await waitForJob(db, next.jobId!, 'failed');
+    db.upsertCustomer({ id: 'crm-c1', name: '更名后的案例客户' });
+    assert.throws(() => resumed.resume(next.jobId!), /客户素材已变化/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: case source namespaces are restored only for a unique complete ID with valid evidence', async () => {
+  const suffix = '0123456789abcdef01234567';
+  assert.equal(resolveCaseSourceRef(suffix, new Set([`hemory-${suffix}`])), `hemory-${suffix}`);
+  assert.equal(resolveCaseSourceRef(suffix, new Set([`hemory-${suffix}`, `customer:${suffix}`])), suffix, 'ambiguous aliases stay invalid');
+  assert.equal(resolveCaseSourceRef(suffix.slice(0, 8), new Set([`hemory-${suffix}`])), suffix.slice(0, 8), 'partial IDs are never guessed');
+  for (const invalidExcerpt of [false, true]) {
+    const dir = mkdtempSync(join(tmpdir(), 'csm-case-namespace-'));
+    const db = new WorkbenchDatabase(dir);
+    try {
+      seedCaseCustomer(db);
+      db.upsertSourceEvent({ id: `hemory-${suffix}`, customerId: 'crm-c1', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+        externalId: 'legacy-source-id', title: '客户希望统一协作', occurredAt: '2026-03-05T05:00:00Z',
+        payload: { transcript: '客户希望统一项目协作流程', recordingId: 'legacy-source-id' } });
+      let planCalls = 0;
+      const runtime: any = { llm: { provider: 'fake', model: 'fixture' }, models: { complete: async (_model: unknown, context: any) => {
+        const prompt = context.messages[0].content;
+        let value = casePhaseRespond(CASE_CONTENT, prompt);
+        if (prompt.includes('规划客户成功案例草稿')) {
+          planCalls++;
+          const source = casePromptContext(prompt).source_catalog.find((item: any) => item.source_ref === `hemory-${suffix}`);
+          value.plan.find((entry: any) => entry.section === 'status').items = [{ idea: '协作问题',
+            source_refs: [source.source_ref.replace(/^hemory-/, '')], excerpt: invalidExcerpt ? '找不到的虚构摘录' : source.excerpt }];
+        } else if (prompt.includes('「业务现状」章节')) value = { texts: [CASE_CONTENT.business_status[0]] };
+        return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(value) }] };
+      } } };
+      const service = new CaseService(db, caseMcp(), runtime);
+      const job = service.generate('crm-c1');
+      await waitForJob(db, job.jobId!, invalidExcerpt ? 'failed' : 'succeeded');
+      if (invalidExcerpt) assert.equal(db.listCaseDrafts('crm-c1').length, 0, 'ID restoration never bypasses excerpt validation');
+      else {
+        assert.equal(planCalls, 1, 'a missing namespace does not repeat the full model planning call');
+        const claims = db.listCaseDrafts('crm-c1')[0].fields.claim_evidence as any[];
+        assert.ok(claims.find((claim) => claim.section === 'status').source_refs[0].startsWith('hemory-'));
+      }
+    } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('workbench: enrichment patches retain untouched prose and evidence and reject invalid edits', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-patch-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT));
+    const job = service.generate('crm-c1');
+    await waitForJob(db, job.jobId!);
+    const fields: any = db.listCaseDrafts('crm-c1')[0].fields;
+    const options = { requirePublic: true, allowedRefs: new Set<string>(fields.context_snapshot.sources.map((s: any) => s.id)), sources: fields.context_snapshot.sources };
+    const first = parseCaseContent(fields, options);
+    const proof = first.claim_evidence.find((claim) => claim.section === 'value')!;
+    const patch = { changes: [{ field: 'value_items', index: null, text: '新增的有据价值条目', evidence: { source_refs: proof.source_refs, excerpt: proof.excerpt } }] };
+    const enriched = mergeCaseEnrichment(first, patch, options);
+    assert.deepEqual(enriched.value_items, [...first.value_items, '新增的有据价值条目']);
+    assert.equal(enriched.company_info, first.company_info);
+    assert.deepEqual(enriched.solution_sections, first.solution_sections);
+    for (const claim of first.claim_evidence) assert.deepEqual(enriched.claim_evidence.find((item) => item.section === claim.section && item.claim === claim.claim), claim);
+    assert.deepEqual(mergeCaseEnrichment(first, { changes: [] }, options), first);
+    assert.throws(() => mergeCaseEnrichment(first, { ...patch, customer_id: 'other' }, options), /只允许 changes/);
+    assert.throws(() => mergeCaseEnrichment(first, { changes: [{ ...patch.changes[0], field: 'context_snapshot' }] }, options), /字段不允许/);
+    assert.throws(() => mergeCaseEnrichment(first, { changes: [{ ...patch.changes[0], index: 999 }] }, options), /现有条目/);
+    assert.throws(() => mergeCaseEnrichment(first, { changes: [{ ...patch.changes[0], text: '' }] }, options), /不允许删除/);
+    assert.throws(() => mergeCaseEnrichment(first, { changes: [{ ...patch.changes[0], evidence: { source_refs: ['unknown-source'], excerpt: 'invented' } }] }, options), /未知证据/);
+    assert.throws(() => mergeCaseEnrichment(first, { changes: [{ ...patch.changes[0], evidence: { source_refs: proof.source_refs, excerpt: '完全不存在的连续摘录' } }] }, options), /摘录未在引用证据中找到/);
+    assert.equal(first.value_items.length, CASE_CONTENT.value_items.length, 'failed or successful patches never mutate the original');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -6166,10 +6302,10 @@ test('workbench: case progress log rolls phase lines and replaces streaming tick
   report('[0m05s] 阶段三');
   last = written[written.length - 1]!;
   assert.ok(!last.includes('模型撰写中'), '新阶段行清除流式 tick');
-  for (let i = 0; i < 20; i++) report(`[1m00s] 阶段补充${i}`);
+  for (let i = 0; i < 130; i++) report(`[1m00s] 阶段补充${i}`);
   last = written[written.length - 1]!;
-  assert.equal(last.split('\n').length, 12, '阶段行滚动保留最近 12 条');
-  assert.ok(last.includes('阶段补充19'), '最早阶段行滚出、最新保留');
+  assert.equal(last.split('\n').length, 120, '阶段行滚动保留最近 120 条，逐次调用历史另存');
+  assert.ok(last.includes('阶段补充129'), '最早阶段行滚出、最新保留');
 });
 
 test('workbench: case model slots release during retry backoff so queued chapters proceed', async () => {
@@ -6307,7 +6443,7 @@ test('workbench: case enrichment runs parallel to remaining figures and reuses g
         }
         if (prompt.includes('补充完善客户成功案例草稿')) {
           events.push('enrich');
-          return { content: [{ type: 'text', text: JSON.stringify(publicCaseModelContent(enrichedContent, prompt)) }], stopReason: 'stop' };
+          return { content: [{ type: 'text', text: JSON.stringify(caseEnrichmentContent(enrichedContent, prompt)) }], stopReason: 'stop' };
         }
         if (prompt.includes('规划客户成功案例草稿的章节结构')) {
           const base = casePlanContent(CASE_CONTENT, prompt);
@@ -6386,6 +6522,60 @@ test('workbench: plan salvage mode drops drifted items on final attempt instead 
     const expectedAfterSalvage = CASE_CONTENT.demands.length - 1;
     assert.equal((draft.fields as any).demands.length, expectedAfterSalvage);
   } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: enrichment refreshes affected figures and falls back as a complete document on failure', async () => {
+  for (const scenario of [
+    { field: 'value_items', failFigure: false },
+    { field: 'value_items', failFigure: true },
+    { field: 'solution_sections', failFigure: false },
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), 'csm-case-figure-refresh-'));
+    const db = new WorkbenchDatabase(dir);
+    try {
+      db.upsertCustomer({ id: 'refresh', name: '配图更新客户' });
+      for (let i = 0; i < 6; i++) db.upsertSourceEvent({ customerId: 'refresh', sourceSystem: 'hemory', sourceType: 'ai_topic_segment',
+        externalId: `refresh-${i}`, title: `反馈 ${i}`, occurredAt: '2026-03-05T05:00:00Z', attributionStatus: 'confirmed',
+        payload: { recordingId: `refresh-${i}`, speakers: ['客户'], evidence: [{ speaker: '客户', text: '客户说系统很好用，效率提升明显' }] } });
+      const added = '追加验证成效：流程信息集中呈现，协作记录可追溯';
+      const refined = scenario.field === 'value_items' ? { ...CASE_CONTENT, value_items: [...CASE_CONTENT.value_items, added] }
+        : { ...CASE_CONTENT, solution_sections: [...CASE_CONTENT.solution_sections, { title: '协作信息整合', text: added }] };
+      let refreshed = 0;
+      const runtime: any = { llm: { provider: 'fake', model: 'fixture' }, models: { complete: async (_model: unknown, context: any) => {
+        const prompt = context.messages[0].content;
+        let value: any;
+        if (prompt.includes('章节配图')) {
+          if (prompt.includes(added)) refreshed++;
+          if (scenario.failFigure && prompt.includes(added)) value = {};
+          else if (prompt.includes('方案价值图：')) value = {
+            painPoints: ['信息分散', '流程低效', '协作滞后'].map((title) => ({ title, detail: '不同环节依赖人工核对' })),
+            values: ['信息统一', '流程规范', '协作提升'].map((title) => ({ title, detail: '相关信息能够集中查看' })),
+          };
+          else value = CAPABILITY_BLUEPRINT_RESPONSE;
+        } else if (prompt.includes('规划客户成功案例草稿')) {
+          value = casePlanContent(CASE_CONTENT, prompt);
+          const refs = value.plan.find((item: any) => item.section === 'value').items[0].source_refs;
+          value.figures = [
+            { section: 'solution', kind: 'capability_map', idea: '业务场景图', source_refs: refs },
+            { section: 'value', kind: 'value_map', idea: '价值总览', source_refs: refs },
+          ];
+        } else value = casePhaseRespond(CASE_CONTENT, prompt, { enrichContent: () => refined });
+        return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(value) }] };
+      } } };
+      const service = new CaseService(db, caseMcp(), runtime);
+      const job = service.generate('refresh');
+      await waitForJob(db, job.jobId!);
+      const fields: any = db.listCaseDrafts('refresh')[0].fields;
+      assert.ok(refreshed > 0, 'changed anchors cause a figure request');
+      assert.equal(fields.coverage.enriched, !scenario.failFigure, JSON.stringify(service.jobDetail(job.jobId!)!.calls.filter((call) => call.error)));
+      assert.equal(fields.figures.length, 2, 'optional enrichment never loses an existing valid figure');
+      if (scenario.failFigure) assert.deepEqual(fields.value_items, CASE_CONTENT.value_items, 'failed figure refresh restores the complete first draft');
+      else if (scenario.field === 'value_items') assert.ok(fields.value_items.includes(added));
+      else assert.ok(fields.solution_sections.some((item: any) => item.text === added));
+      const valueFigure = fields.figures.find((item: any) => item.kind === 'value_map');
+      assert.ok(new Resvg(valueFigure.svg).render().width > 0, 'recomposition keeps nested SVG well formed');
+    } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('workbench: case ones records excluded from prompt but still feed fingerprint and stats', async () => {

@@ -10,6 +10,7 @@ import { Store } from '../src/store.js';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
 import { ensureBootstrapAdmin, hashPassword } from '../src/auth.js';
 import type { Runtime } from '../src/bootstrap.js';
+import { CaseService } from '../src/workbench/cases.js';
 
 /**
  * 鉴权矩阵集成测试：buildHandler 直接起在随机端口的真实 HTTP 服务上，
@@ -81,13 +82,14 @@ async function withServer(fn: (ctx: {
   }
   const admin = db.getUserByUsername('admin')!;
   const member = db.createUser({ username: 'csm1', displayName: '一号 CSM', passwordHash: hashPassword('member-pass-1') });
+  const runtime = fakeRuntime();
   const services = {
     db,
     // 只补测试触达的表面：POST /api/sync 会调 refreshAll。
     sync: { refreshAll: () => ({}) },
-    cases: {}, drafts: {}, weekly: {}, wiki: {}, opportunities: {},
+    cases: new CaseService(db, runtime.mcp, runtime), drafts: {}, weekly: {}, wiki: {}, opportunities: {},
   } as never;
-  const server = http.createServer(buildHandler(fakeRuntime(), store, services, admin.id));
+  const server = http.createServer(buildHandler(runtime, store, services, admin.id));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
@@ -114,6 +116,31 @@ test('unauthenticated requests: whitelist passes, everything else gets 401', asy
     assert.equal((await call('POST', '/api/sync', { body: {} })).status, 401);
     assert.equal((await call('GET', '/api/records')).status, 401);
     assert.equal((await call('GET', '/api/auth/me')).status, 401);
+  });
+});
+
+test('case diagnostics and resume enforce customer visibility and do not expose checkpoint contents', async () => {
+  await withServer(async ({ call, db, adminId }) => {
+    db.upsertCustomer({ id: 'case-private', name: '私有案例客户' });
+    db.grantCustomerAccess(adminId, ['case-private']);
+    const job = db.createDraftJob('case-private', 'case-private-fp', [], 'case_report');
+    const path = `/api/case-jobs/${job.id}`;
+    assert.equal((await call('GET', path)).status, 401);
+    const memberLogin = await call('POST', '/api/auth/login', { body: { username: 'csm1', password: 'member-pass-1' } });
+    const memberCookie = cookieFrom(memberLogin);
+    assert.equal((await call('GET', path, { cookie: memberCookie })).status, 404);
+    assert.equal((await call('POST', `${path}/resume`, { cookie: memberCookie })).status, 404);
+    const adminLogin = await call('POST', '/api/auth/login', { body: { username: 'admin', password: 'admin-pass-1' } });
+    const cookie = cookieFrom(adminLogin);
+    db.saveCaseCheckpoint(job.id, 'chapter:example', 'hash', { privateTranscript: 'Do not expose raw checkpoint data' });
+    const detail = await call('GET', path, { cookie });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.data.resumable, false);
+    assert.equal(detail.data.calls.length, 0, 'legacy timing remains unknown');
+    assert.ok(!JSON.stringify(detail.data).includes('privateTranscript'));
+    assert.equal((await call('POST', `${path}/resume`, { cookie })).status, 409, 'no frozen input cannot resume');
+    const nonCase = db.createDraftJob('case-private', 'not-case', [], 'hemory');
+    assert.equal((await call('GET', `/api/case-jobs/${nonCase.id}`, { cookie })).status, 404);
   });
 });
 

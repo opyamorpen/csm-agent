@@ -109,11 +109,15 @@ const CLI_CAPABILITIES = [
   { command: 'action', workflow: 'action-items', access: 'read-write', api: ['/api/action-items', '/api/action-items/:id', '/api/action-items/:id/complete', '/api/action-items/bulk-complete'] },
   { command: 'alerts', workflow: 'risk-watchlist', access: 'read-write', api: ['/api/alerts', '/api/alerts?status=resolved', '/api/alerts?status=all', 'POST /api/alerts/:id/resolve'],
     notes: '风险预警名单：近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
-  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs'],
+  { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs', 'GET /api/case-jobs/:id', 'POST /api/case-jobs/:id/resume'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures'],
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures', 'generation_job_id'],
     notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
+  { command: 'case job', workflow: 'case-generation-diagnostics', access: 'read', api: ['GET /api/case-jobs/:id'],
+    notes: '完整逐次调用诊断：排队/首字/请求耗时、模型报告的 token 与缓存用量、具体校验错误、已验证检查点；未记录值保持 unknown' },
+  { command: 'case resume', workflow: 'case-generation-recovery', access: 'write', api: ['POST /api/case-jobs/:id/resume'],
+    notes: '继续失败或中断的最新案例任务；只复用素材、模型、规则与请求匹配的已验证结果；不改变素材、篇幅与检查要求；--wait 最长 60 分钟' },
   { command: 'wiki', workflow: 'ones-wiki-browse', access: 'read', api: ['/api/ones-wiki/spaces', '/api/ones-wiki/pages'] },
   { command: 'sync', workflow: 'source-sync', access: 'write', api: ['/api/sync', '/api/customers/:id/refresh', '/api/sync-runs/:id'] },
   { command: 'backup', workflow: 'data-backup', access: 'read-write', api: ['POST /api/backup/run', 'GET /api/backups', 'GET /api/sync-runs/:id'],
@@ -249,6 +253,10 @@ function help(): void {
   csm-agent case generate <客户ID或名称> [--force] [--wait]
     （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
      业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；--wait 轮询任务到终态并实时打印生成进度）
+  csm-agent case job <任务ID> [--json]
+    （逐次查看排队/首字/请求耗时、token 用量、校验失败和检查点复用；旧任务未记录的时间显示 unknown）
+  csm-agent case resume <任务ID> [--wait]
+    （继续中断或失败任务；仅复用同素材、同模型与规则下已通过校验的结果，过期或被新任务取代则拒绝；案例 --wait 最长 60 分钟）
   csm-agent case show <草稿ID> [--json]
     （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
@@ -843,6 +851,27 @@ function printCaseDraft(draft: any, markdown = '', coverage?: any): void {
 
 async function caseCommand(subcommand: string, values: string[]): Promise<void> {
   if (subcommand === 'list') return showCases(values.join(' ') || undefined);
+  if (subcommand === 'job' || subcommand === 'resume') {
+    const jobId = values.shift();
+    if (!jobId) throw new Error(`case ${subcommand} 缺少任务 ID`);
+    if (subcommand === 'resume') {
+      const result = await request<any>(`/api/case-jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' });
+      if (values.includes('--wait')) printDraftJobSummary(await waitDraftJobs([result.jobId], 1800));
+      return print(result);
+    }
+    const detail = await request<any>(`/api/case-jobs/${encodeURIComponent(jobId)}`);
+    if (jsonOutput) return print(detail);
+    console.log(`案例任务 ${jobId} · ${detail.job.status}${detail.job.stalled ? '（已中断）' : ''}`);
+    console.log(`检查点 ${detail.checkpoints.length} 个 · ${detail.resumable ? '可继续' : detail.resumeReason}`);
+    if (detail.draftId) console.log(`案例草稿 ${detail.draftId}`);
+    const seconds = (ms: number | null) => ms == null ? 'unknown' : `${(ms / 1000).toFixed(1)}s`;
+    if (detail.preparation) console.log(`公开检索 ${seconds(Date.parse(detail.preparation.finishedAt) - Date.parse(detail.preparation.startedAt))}`);
+    console.table(detail.calls.map((call: any) => ({ stage: call.stage, attempt: call.attempt, status: call.status,
+      queue: seconds(call.queueMs), firstToken: seconds(call.firstTokenMs), request: seconds(call.requestMs),
+      inputTokens: call.usage?.input ?? 'unknown', outputTokens: call.usage?.output ?? 'unknown', cacheRead: call.usage?.cacheRead ?? 'unknown',
+      error: call.error ?? '' })));
+    return;
+  }
   if (subcommand === 'generate') {
     const positional = values.filter((value) => !value.startsWith('--'));
     const customer = await resolveCustomer(positional[0] ?? '');
@@ -855,7 +884,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
       else console.log(`案例生成任务已提交（任务 ${result.jobId}）。`);
     }
     if (values.includes('--wait') && result.jobId) {
-      const jobs = await waitDraftJobs([result.jobId]);
+      const jobs = await waitDraftJobs([result.jobId], 1800);
       printDraftJobSummary(jobs);
       if (jobs.every((job) => job.status === 'succeeded')) {
         const body = await request<any>(`/api/case-drafts?customer_id=${encodeURIComponent(customer.id)}`);
@@ -876,7 +905,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
     const result = await request<any>(`/api/case-drafts/${encodeURIComponent(draftId)}/regenerate`, { method: 'POST' });
     if (!jsonOutput) console.log(`案例重新生成任务已提交（任务 ${result.jobId}）。`);
     if (values.includes('--wait') && result.jobId) {
-      const jobs = await waitDraftJobs([result.jobId]);
+      const jobs = await waitDraftJobs([result.jobId], 1800);
       printDraftJobSummary(jobs);
     }
     return print(result);
@@ -934,7 +963,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, parentPageID, approvalHash }),
     }));
   }
-  throw new Error('case 子命令只允许 list/generate/show/regenerate/update/export/preview/publish');
+  throw new Error('case 子命令只允许 list/generate/job/resume/show/regenerate/update/export/preview/publish');
 }
 
 function printWeeklyReport(report: any, markdown = '', customerName = ''): void {

@@ -9,6 +9,8 @@ import type {
   ActionStatus,
   AlertTriggerKey,
   CaseDraft,
+  CaseGenerationCall,
+  CaseGenerationCheckpoint,
   CasePublishAttempt,
   Customer,
   CustomerAlert,
@@ -573,6 +575,21 @@ export class WorkbenchDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_draft_job_status ON draft_generation_jobs(status, updated_at);
 
+      CREATE TABLE IF NOT EXISTS case_generation_checkpoints (
+        job_id TEXT NOT NULL REFERENCES draft_generation_jobs(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(job_id, stage, request_hash)
+      );
+      CREATE TABLE IF NOT EXISTS case_generation_calls (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES draft_generation_jobs(id) ON DELETE CASCADE,
+        call_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_case_call_job ON case_generation_calls(job_id);
+
       CREATE TABLE IF NOT EXISTS weekly_reports (
         id TEXT PRIMARY KEY,
         customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
@@ -659,6 +676,19 @@ export class WorkbenchDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
     `);
+    const checkpointColumns = this.db.prepare('PRAGMA table_info(case_generation_checkpoints)').all() as Row[];
+    if (checkpointColumns.filter((column) => Number(column.pk) > 0).length < 3) {
+      this.db.exec(`
+        ALTER TABLE case_generation_checkpoints RENAME TO case_generation_checkpoints_legacy;
+        CREATE TABLE case_generation_checkpoints (
+          job_id TEXT NOT NULL REFERENCES draft_generation_jobs(id) ON DELETE CASCADE,
+          stage TEXT NOT NULL, request_hash TEXT NOT NULL, value_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(job_id, stage, request_hash)
+        );
+        INSERT INTO case_generation_checkpoints SELECT * FROM case_generation_checkpoints_legacy;
+        DROP TABLE case_generation_checkpoints_legacy;
+      `);
+    }
     const sourceEventColumns = this.db.prepare('PRAGMA table_info(source_events)').all() as Row[];
     if (!sourceEventColumns.some((column) => String(column.name) === 'display_id')) {
       this.db.exec('ALTER TABLE source_events ADD COLUMN display_id TEXT;');
@@ -1628,14 +1658,27 @@ export class WorkbenchDatabase {
     return (this.db.prepare('SELECT * FROM case_candidates WHERE customer_id=?').get(customerId) as Row | undefined) ?? null;
   }
 
-  createCaseDraft(customerId: string, title: string, fields: Record<string, unknown>, evidenceRefs: string[], meta?: { fingerprint?: string | null; generator?: string | null }): CaseDraft {
+  createCaseDraft(customerId: string, title: string, fields: Record<string, unknown>, evidenceRefs: string[], meta?: { fingerprint?: string | null; generator?: string | null; jobId?: string }): CaseDraft {
     const now = nowIso();
     const draft: CaseDraft = { id: randomUUID(), customerId, version: 1, status: 'draft', title, fields, evidenceRefs,
       fingerprint: meta?.fingerprint ?? null, generator: meta?.generator ?? null, createdAt: now, updatedAt: now };
-    this.db.prepare(`INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,fingerprint,generator,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(draft.id, customerId, 1, 'draft', title, json(fields), json(evidenceRefs), meta?.fingerprint ?? null, meta?.generator ?? null, now, now);
-    // 单版本保留（用户拍板）：新稿落库即删除同客户历史版本行，旧配图随行删除、发布尝试记录 FK 级联清理。
-    this.db.prepare('DELETE FROM case_drafts WHERE customer_id=? AND id<>?').run(customerId, draft.id);
+    this.db.exec('SAVEPOINT case_draft_write');
+    try {
+      this.db.prepare(`INSERT INTO case_drafts(id,customer_id,version,status,title,fields_json,evidence_refs_json,fingerprint,generator,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(draft.id, customerId, 1, 'draft', title, json(fields), json(evidenceRefs), meta?.fingerprint ?? null, meta?.generator ?? null, now, now);
+      // 单版本保留（用户拍板）：新稿落库即删除同客户历史版本行，旧配图随行删除、发布尝试记录 FK 级联清理。
+      this.db.prepare('DELETE FROM case_drafts WHERE customer_id=? AND id<>?').run(customerId, draft.id);
+      if (meta?.jobId) {
+        const job = this.getDraftJob(meta.jobId);
+        if (!job || job.customerId !== customerId || job.kind !== 'case_report') throw new Error('案例任务与草稿客户不一致');
+        this.saveCaseCheckpoint(meta.jobId, 'result', meta.fingerprint ?? '', { draftId: draft.id });
+        this.updateDraftJob(meta.jobId, 'succeeded');
+      }
+      this.db.exec('RELEASE case_draft_write');
+    } catch (error) {
+      this.db.exec('ROLLBACK TO case_draft_write; RELEASE case_draft_write');
+      throw error;
+    }
     return draft;
   }
 
@@ -1953,6 +1996,40 @@ export class WorkbenchDatabase {
    */
   updateDraftJobProgress(id: string, progress: string): void {
     this.db.prepare('UPDATE draft_generation_jobs SET progress=?,updated_at=? WHERE id=?').run(progress, nowIso(), id);
+  }
+
+  getCaseCheckpoint<T>(jobId: string, stage: string, requestHash?: string): CaseGenerationCheckpoint<T> | undefined {
+    const row = requestHash
+      ? this.db.prepare('SELECT * FROM case_generation_checkpoints WHERE job_id=? AND stage=? AND request_hash=?').get(jobId, stage, requestHash) as Row | undefined
+      : this.db.prepare('SELECT * FROM case_generation_checkpoints WHERE job_id=? AND stage=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(jobId, stage) as Row | undefined;
+    return row ? { stage: String(row.stage), requestHash: String(row.request_hash), value: parseJson<T>(row.value_json, null as T), updatedAt: String(row.updated_at) } : undefined;
+  }
+
+  saveCaseCheckpoint(jobId: string, stage: string, requestHash: string, value: unknown): void {
+    this.db.prepare(`INSERT INTO case_generation_checkpoints(job_id,stage,request_hash,value_json,updated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(job_id,stage,request_hash) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+      .run(jobId, stage, requestHash, json(value), nowIso());
+  }
+
+  listCaseCheckpoints(jobId: string): Array<Omit<CaseGenerationCheckpoint, 'value'>> {
+    return (this.db.prepare('SELECT stage,request_hash,updated_at FROM case_generation_checkpoints WHERE job_id=? ORDER BY updated_at,stage').all(jobId) as Row[])
+      .map((row) => ({ stage: String(row.stage), requestHash: String(row.request_hash), updatedAt: String(row.updated_at) }));
+  }
+
+  saveCaseGenerationCall(jobId: string, call: CaseGenerationCall): void {
+    this.db.prepare('INSERT INTO case_generation_calls(id,job_id,call_json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET call_json=excluded.call_json')
+      .run(call.id, jobId, json(call));
+  }
+
+  listCaseGenerationCalls(jobId: string): CaseGenerationCall[] {
+    return (this.db.prepare('SELECT call_json FROM case_generation_calls WHERE job_id=? ORDER BY rowid').all(jobId) as Row[])
+      .map((row) => parseJson<CaseGenerationCall>(row.call_json, null!)).filter(Boolean);
+  }
+
+  latestCaseJob(customerId: string): DraftGenerationJob | undefined {
+    const row = this.db.prepare("SELECT * FROM draft_generation_jobs WHERE customer_id=? AND kind='case_report' ORDER BY created_at DESC,rowid DESC LIMIT 1")
+      .get(customerId) as Row | undefined;
+    return row ? this.draftJobFromRow(row) : undefined;
   }
 
   /**

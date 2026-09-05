@@ -57,9 +57,10 @@ export async function completeModelWithProgress(
   context: Parameters<Runtime['models']['complete']>[1],
   onTick?: ModelProgressCallback,
   options: { maxTokens?: number; timeoutMs?: number } = {},
+  onFirstToken?: () => void,
 ): Promise<Awaited<ReturnType<Runtime['models']['complete']>>> {
   const request = Object.keys(options).length ? options : undefined;
-  if (!onTick || typeof runtime.models.stream !== 'function') {
+  if ((!onTick && !onFirstToken) || typeof runtime.models.stream !== 'function') {
     return runtime.models.complete(runtime.model, context, request);
   }
   const stream = runtime.models.stream(runtime.model, context, request);
@@ -73,9 +74,14 @@ export async function completeModelWithProgress(
     if (!force && (now - lastTickAt < PROGRESS_TICK_MS || textChars === lastChars)) return;
     lastTickAt = now;
     lastChars = textChars;
-    onTick({ chars: textChars, snippet: progressSnippet(textTail, thinkingTail) });
+    onTick?.({ chars: textChars, snippet: progressSnippet(textTail, thinkingTail) });
   };
+  let firstTokenSeen = false;
   for await (const ev of stream) {
+    if (!firstTokenSeen && (ev.type === 'text_delta' || ev.type === 'thinking_delta') && ev.delta) {
+      firstTokenSeen = true;
+      onFirstToken?.();
+    }
     if (ev.type === 'text_delta' && ev.delta) {
       textChars += ev.delta.length;
       textTail = (textTail + ev.delta).slice(-400);

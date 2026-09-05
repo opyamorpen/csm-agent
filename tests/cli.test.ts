@@ -102,6 +102,8 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/publish')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/regenerate')));
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('/api/case-drafts/:id/export')));
+  assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('GET /api/case-jobs/:id')));
+  assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('POST /api/case-jobs/:id/resume')));
   const caseCapability = capabilities.find((item) => item.workflow === 'case-drafts');
   assert.deepEqual(caseCapability.editableFields, ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones']);
   assert.ok(caseCapability.readOnlyFields.includes('claim_evidence') && caseCapability.readOnlyFields.includes('context_snapshot') && caseCapability.readOnlyFields.includes('figures'));
@@ -178,6 +180,8 @@ test('CLI provides standard global help and version commands', () => {
   assert.match(help.stdout, /仅未完成状态生效，已完成跳过/);
   assert.doesNotMatch(help.stdout, /待处理\/进行中/);
   assert.match(help.stdout, /csm-agent case generate <客户ID或名称> \[--force\] \[--wait\]/);
+  assert.match(help.stdout, /csm-agent case job <任务ID> \[--json\]/);
+  assert.match(help.stdout, /csm-agent case resume <任务ID> \[--wait\]/);
   assert.match(help.stdout, /--wait 轮询任务到终态并实时打印生成进度/);
   assert.match(help.stdout, /业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染/);
   assert.match(help.stdout, /csm-agent case show <草稿ID> \[--json\]/);
