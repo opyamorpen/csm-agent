@@ -4225,7 +4225,7 @@ test('workbench: confirm draft edit contract and merge for interactive agent dra
 });
 
 // ── 客户案例：黑盒叙事生成管线（周报同款任务/指纹/重试骨架） ──
-import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseInternalEvidenceLabel, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
+import { CaseService, CASE_GENERATION_VERSION, CASE_SECTIONS, CASE_WEB_ANGLES, buildCaseFigurePrompt, caseFingerprint, caseContentWarnings, caseCoverage, caseDeliveryStats, caseFiguresOf, caseFragmentSignals, caseInternalEvidenceLabel, createCaseProgressLog, caseModelRetryDelays, caseNarrativeWarnings, caseQualityReview, caseSectionTexts, caseSvgValidationProblem, coverageNeedsEnrichment, coverageSummary, parseCaseContent, renderCaseMarkdown, sanitizeCaseSvg, searchCaseWebContext } from '../src/workbench/cases.js';
 import { ARCHITECTURE_FIGURE_PALETTE, parseArchitectureGraph, renderArchitectureSvg, type ArchitectureGraph } from '../src/workbench/case-architecture-figure.js';
 import { CAPABILITY_MAP_PALETTE, parseCapabilityMapBlueprint, renderCapabilityMapSvg, type CapabilityMapBlueprint } from '../src/workbench/case-capability-map-figure.js';
 import { parseValueMapBlueprint, renderValueMapSvg, type ValueMapBlueprint } from '../src/workbench/case-value-map-figure.js';
@@ -5384,6 +5384,31 @@ const CLEAN_CASE_FIGURE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="
   + '<rect x="20" y="20" width="160" height="48" rx="8" fill="#eef3fb" stroke="#3a6ea5" stroke-width="2"/>'
   + '<text x="100" y="48" font-size="14" text-anchor="middle" fill="#1c2b3a">需求提出</text>'
   + '<path d="M180 44 H 240" stroke="#3a6ea5" stroke-width="2" marker-end="url(#arrow)"/></svg>';
+
+test('workbench: SVG rejection explains the exact repair while preserving sanitization', () => {
+  const fixtures: Array<[string, RegExp]> = [
+    ['<svg><rect width="1" height="1"/></svg>', /viewBox/],
+    ['<svg viewBox="0 0 10 10"><style>text {fill:red}</style></svg>', /<style>/],
+    ['<svg viewBox="0 0 10 10"><text>第一行\n第二行</text></svg>', /裸换行/],
+    ['<svg viewBox="0 0 10 10"><text><tspan>第一行</tspan><tspan>第二行</tspan></text></svg>', /第 2 个 tspan 缺少 dy\/y/],
+    ['<svg viewBox="0 0 10 10"><text>来自 &#72;emory</text></svg>', /Hemory/],
+  ];
+  for (const [svg, error] of fixtures) {
+    assert.match(caseSvgValidationProblem(svg)!, error);
+    assert.equal(sanitizeCaseSvg(svg), null);
+  }
+  assert.equal(caseSvgValidationProblem(CLEAN_CASE_FIGURE_SVG), null);
+  assert.equal(sanitizeCaseSvg(CLEAN_CASE_FIGURE_SVG), CLEAN_CASE_FIGURE_SVG);
+});
+
+test('workbench: static SVG gradients use the same normalized tag allowlist', () => {
+  for (const tag of ['linearGradient', 'radialGradient']) {
+    const svg = `<svg viewBox="0 0 10 10"><defs><${tag} id="tone"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#ddd"/></${tag}></defs><rect width="10" height="10" fill="url(#tone)"/></svg>`;
+    assert.equal(caseSvgValidationProblem(svg), null);
+    assert.equal(sanitizeCaseSvg(svg), svg, 'legitimate local static gradients must not trigger a full model retry');
+  }
+  assert.equal(sanitizeCaseSvg('<svg viewBox="0 0 10 10"><animate attributeName="x"/></svg>'), null);
+});
 
 test('workbench: sanitizeCaseSvg rejects unsafe structures and strips non-allowlisted attributes', () => {
   // 干净 SVG 原样放行（kebab-case 绘制属性不被误剥）。

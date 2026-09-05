@@ -1577,7 +1577,7 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
 
 /** SVG 标签白名单：只保留静态绘制元素——script/foreignObject/动画/引用外部资源的元素一律不在名单内。 */
 const FIGURE_SVG_TAG_ALLOWLIST = new Set(['svg', 'g', 'defs', 'marker', 'linearGradient', 'radialGradient', 'stop',
-  'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'path', 'text', 'tspan']);
+  'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'path', 'text', 'tspan'].map((tag) => tag.toLowerCase()));
 /** SVG 属性白名单：布局/绘制/文本属性。style（可藏 url()/expression）、href/xlink:href、on* 事件等一律剥离。
  * dy/dx 必须在名单内（真实验收教训：tspan 的 dy 被剥离后多行文字全部叠在同一基线，v7 的「tspan 叠字」根因）。 */
 const FIGURE_SVG_ATTR_ALLOWLIST = new Set(['xmlns', 'id', 'class', 'viewBox', 'preserveAspectRatio',
@@ -1588,41 +1588,47 @@ const FIGURE_SVG_ATTR_ALLOWLIST = new Set(['xmlns', 'id', 'class', 'viewBox', 'p
   'markerWidth', 'markerHeight', 'markerEnd', 'markerStart', 'refX', 'refY', 'orient', 'markerUnits',
   'gradientUnits', 'offset', 'stop-color', 'stop-opacity']);
 
-/**
- * 配图 SVG 消毒与校验（服务端权威；落库前执行，编辑/精修路径无法覆写 figures）。
- * 返回消毒后的 SVG 字符串；任何结构问题返回 null（调用方丢弃该图，不阻断五段正文）。
- * 无 XML parser 可用，采用「白名单标签 + 白名单属性 + 危险结构拒绝」的正则消毒：
- * 名单外标签/DOCTYPE/ENTITY/非 svg 根直接拒绝，名单外属性逐个剥离。
- */
-export function sanitizeCaseSvg(raw: string): string | null {
+/** Same rejection rules for sanitization and actionable model repair feedback. */
+export function caseSvgValidationProblem(raw: string): string | null {
   const svg = raw.trim();
-  if (!svg.startsWith('<svg') || !svg.endsWith('</svg>')) return null;
-  if (svg.length > FIGURE_SVG_MAX_CHARS) return null;
-  if (/<!DOCTYPE|<!ENTITY|<!\[CDATA\[|<\?xml-stylesheet/i.test(svg)) return null;
+  if (!svg.startsWith('<svg') || !svg.endsWith('</svg>')) return 'svg 字段必须以 <svg 开始、以 </svg> 结束，不得包含 Markdown 围栏或 XML 声明';
+  if (svg.length > FIGURE_SVG_MAX_CHARS) return `SVG 共 ${svg.length} 字，超过 ${FIGURE_SVG_MAX_CHARS} 字上限，请精简重复绘制代码`;
+  if (/<!DOCTYPE|<!ENTITY|<!\[CDATA\[|<\?xml-stylesheet/i.test(svg)) return 'SVG 不允许 DOCTYPE、ENTITY、CDATA 或外部样式声明';
   // 根元素须声明 viewBox（前端按 viewBox 自适应缩放，缺失视为结构不合格）。
   const opening = svg.slice(0, svg.indexOf('>') + 1);
-  if (!/\sviewBox\s*=\s*["'][^"']*["']/.test(opening)) return null;
+  if (!/\sviewBox\s*=\s*["'][^"']*["']/.test(opening)) return 'svg 根元素缺少带引号的 viewBox 属性';
   // 标签白名单：开/闭标签一并检查（闭标签无属性）。
   const tags = [...svg.matchAll(/<\/?([a-zA-Z][\w:-]*)/g)].map((match) => match[1].toLowerCase());
-  if (!tags.length || tags.some((tag) => !FIGURE_SVG_TAG_ALLOWLIST.has(tag))) return null;
+  const forbiddenTag = tags.find((tag) => !FIGURE_SVG_TAG_ALLOWLIST.has(tag));
+  if (!tags.length || forbiddenTag) return `SVG 包含不允许的标签 <${forbiddenTag ?? 'unknown'}>，请仅使用允许的静态绘图与文字标签`;
   // 叠字防御（真实验收教训：<text> 内直接裸换行的多行文字，栅格化后各行叠在同一基线不可读）：
   // ① 文本节点含「非空白\n非空白」直接拒绝；② <text> 里 tspan 从第二个起缺 dy（与上一行同位叠加）拒绝；
   // ③ <text> 自带裸文字又含 tspan（裸文字与首个 tspan 同位叠加）拒绝。拒绝触发逐图重试，仍失败即丢图不阻断正文。
   const rawTextNodes = [...svg.matchAll(/>([^<>]+)</g)].map((match) => match[1]);
-  if (rawTextNodes.some((node) => /\S\s*\n\s*\S/.test(decodeXmlEntities(node)))) return null;
+  const multiline = rawTextNodes.find((node) => /\S\s*\n\s*\S/.test(decodeXmlEntities(node)));
+  if (multiline) return `文字节点含裸换行（${decodeXmlEntities(multiline).trim().slice(0, 80)}），请改用分别定位的 text 或带 dy/y 的 tspan`;
   for (const textMatch of svg.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/g)) {
     const inner = textMatch[2];
     // 裸文字 = 剥掉整个 tspan 元素（含其文字）后仍残留的文字。
     const plainPrefix = inner.replace(/<tspan\b[\s\S]*?<\/tspan>/g, '').replace(/<[^>]+>/g, '').trim();
     const tspans = [...inner.matchAll(/<tspan\b([^>]*)>/g)].map((match) => match[1]);
-    if (plainPrefix && tspans.some((attrs) => /\b(?:x|y)\s*=/.test(attrs))) return null;
+    if (plainPrefix && tspans.some((attrs) => /\b(?:x|y)\s*=/.test(attrs))) return `text 同时含裸文字和绝对定位 tspan（${plainPrefix.slice(0, 60)}），请统一为分别定位的 tspan`;
     // 裸前缀 + 无 x/y 定位的 tspan 是合法行内接排（v10.2 带状板分组头「模块名·副题」的常见写法），
     // 只有 tspan 带 x/y 绝对定位回到 text 原点时才与裸前缀同位叠加（v7 叠字的真实场景），才拒绝。
-    if (tspans.slice(1).some((attrs) => !/\b(?:dy|y)\s*=/.test(attrs))) return null;
+    const unpositioned = tspans.slice(1).findIndex((attrs) => !/\b(?:dy|y)\s*=/.test(attrs));
+    if (unpositioned >= 0) return `text 中第 ${unpositioned + 2} 个 tspan 缺少 dy/y，文字可能叠在同一行，请为每一续行明确纵向位置`;
   }
   // 文本内容过正文禁区词（联系人/金额/内部系统名等不得出现在图内）。
   const textContent = [...svg.matchAll(/>([^<>]+)</g)].map((match) => match[1]).join(' ');
-  if (CASE_INTERNAL_EVIDENCE_PATTERNS.some(({ pattern }) => pattern.test(decodeXmlEntities(textContent)))) return null;
+  const internalLabel = caseInternalEvidenceLabel(decodeXmlEntities(textContent));
+  if (internalLabel) return `图中文字包含客户版禁区词：${internalLabel}，请改写为可公开的业务表述`;
+  return null;
+}
+
+/** Whitelist sanitization retains the same acceptance contract as the repair validator. */
+export function sanitizeCaseSvg(raw: string): string | null {
+  const svg = raw.trim();
+  if (caseSvgValidationProblem(svg)) return null;
   // 属性白名单：名单外属性逐个剥离（含 on* 事件、style、href/xlink:href、data: URI）。
   // SVG 实际属性用 kebab-case（marker-end/stroke-width），白名单按 camelCase 维护，比较前先归一化。
   const camelAttr = (name: string) => name.replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
@@ -2083,9 +2089,11 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
               structureFeedback = `连线与文字重叠（${overlaps.slice(0, 2).join('；')}）——请调整连线起终点或走线绕开所有文字标签（连线从节点边缘连接，不得压住文字）`;
               lastError = `配图连线压字未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
             } else {
-              structureFeedback = sanitized
-                ? '服务端统一外壳适配失败；请使用短业务标签，保持节点/文字在 viewBox 内，不要输出外链、图片、脚本或整图背景'
-                : 'SVG 消毒失败；请仅输出自包含静态 SVG，不要输出外链、图片、脚本或非法文字结构';
+              const captionProblem = !caption ? '图注 caption 不能为空' : caseInternalEvidenceLabel(caption);
+              structureFeedback = !sanitized ? `SVG 消毒失败：${caseSvgValidationProblem(rawSvg)}`
+                : captionProblem ? `图注校验失败：${captionProblem}`
+                : styled && caseSvgValidationProblem(styled) ? `外壳适配后 SVG 消毒失败：${caseSvgValidationProblem(styled)}`
+                : '服务端统一外壳适配失败；请使用短业务标签，保持节点/文字在 viewBox 内，不要输出外链、图片、脚本或整图背景';
               lastError = `配图${sanitized ? '外壳适配、消毒或图注校验' : 'SVG 消毒或图注校验'}未通过（第 ${attempt}/${MAX_ATTEMPTS} 次）`;
             }
           }
