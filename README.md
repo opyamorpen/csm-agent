@@ -293,6 +293,8 @@ ONES_TEAM_ID=RDjYMhKq
 
 ## 验证
 
+产品知识基线为 ONES 私有部署 v7.26.0（2026-09-05 官方文档核对）。[完整知识库](docs/ones-product-knowledge/SKILL.md)包含 317 页正文及来源；普通 Agent 与案例生成共用 `src/workbench/case-ones-knowledge.ts` 的紧凑摘要。知识变更参与草稿与断点缓存指纹，旧案例不会被自动改写。文档能力不代表客户已交付、SaaS 同等支持或许可证已包含。
+
 ```bash
 npm run verify
 csm-agent capabilities --json

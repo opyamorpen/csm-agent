@@ -1,57 +1,57 @@
-/**
- * ONES 产品能力图谱：注入案例规划/章节/配图 prompt 的紧凑知识块（v9 新增）。
- *
- * 案例素材（沟通片段/CRM 跟进/交付统计）里 ONES 模块名只零星出现（ONES 明细自 v6 起剔除输入），
- * 模型缺乏对 ONES 能力体系的稳定认知，导致方案章命名含混、架构图内部画不出能力模块。
- * 本图谱从 ONES V7 官方手册蒸馏（源：ones-product-knowledge 技能库 SKILL.md，2026-05-12 版，
- * 2026-09-02 摘编入仓），运行时不依赖技能目录；改图谱须同步评估各注入 prompt 的 token 预算。
- *
- * 边界（同样写在图谱尾注里）：图谱只解决「命名与描述准确」，不构成交付证据——
- * 是否交付/配置/打通仍以素材证据为准。刻意不收录定价、标准落地经验、痛点映射表，
- * 防止模型把通用方案抄成具体客户的交付事实。
- */
+import { createHash } from 'node:crypto';
+
+/** Compact runtime knowledge; full versioned sources live in docs/ones-product-knowledge. */
+export const ONES_KNOWLEDGE_VERSION = 'private-v7.26.0-20260905';
+export const ONES_KNOWLEDGE_SOURCES = [
+  'https://docs.ones.cn/wiki/#/team/6mRWUuNv/space/FhmJNPFc/page/AzTb9z8u',
+  'https://developer.ones.cn/zh-CN/',
+  'https://open.ones.cn/zh-CN/',
+] as const;
+
 export const ONES_CAPABILITY_MAP = [
-  '【ONES 产品能力图谱（供准确命名产品模块与集成机制）】',
+  '【ONES 产品能力图谱（私有部署 v7.26.0 文档，2026-09-05 核对）】',
+  '版本边界：该文档基线不代表客户已升级；SaaS、其他版本、许可证与配置差异需核对。文档未覆盖的能力保留 unknown，不等同于不支持。',
   '产品域：',
-  '- ONES Project（研发项目管理）：需求/任务/缺陷等工作项管理、迭代与看板、甘特图、版本与发布、测试管理（用例库/测试计划/在线执行/缺陷闭环/「需求→用例→缺陷」追溯）、工时与资源管理（工时登记/成员排期/负载分析）、流程自动化（事件触发状态流转与通知）、效能报表',
-  '- ONES Wiki（知识库）：页面组与页面树、块编辑器协同、数据表格（公式/图表）、页面审批与变更审批、页面公开发布（外链+访问密码）、权限与加密、评论批注、文档导入（Word/Markdown/Confluence）与导出（PDF/Word/Markdown）、知识库数据统计',
-  '- ONES Desk（工单服务台）：工单门户统一收集、自定义表单与工单工作流、工单分派/流转/转化为工作项、客户沟通动态、对外状态别名、微信工单小程序',
-  '- ONES TestCase（测试管理）：用例库与分类、用例关联需求/缺陷、测试计划与轮次、在线执行与一键提缺陷、覆盖率/通过率/缺陷分布报表',
-  '- ONES Performance（研发效能）：交付效能（需求交付周期/部署频率/变更失败率/MTTR）、质量效能（缺陷密度/逃逸率）、过程效能（迭代完成率/吞吐量）、多项目对比与趋势、预制报表仪表盘',
-  '- ONES Plan（项目集管理）：项目集层级、跨项目里程碑与甘特图、资源分配与负载冲突预警',
-  '- ONES Account（账号与安全）：组织架构与用户组、多团队数据隔离、第三方登录（企业微信/钉钉/飞书/LDAP/AD/SAML/CAS 单点登录）、用户目录自动同步、消息通知、MFA/密码策略/操作日志/安全水印',
-  '- ONES Assistant（AI 智能助手）：智能对话与工具调用、工作项创建与状态流转、知识库语义问答、文档生成并存 Wiki、ONESql 数据分析、通知摘要与风险识别',
-  '开放集成能力：',
-  '- 开放 REST API（OpenAPI，OAuth 2.0 授权）：工作项/项目/迭代/工时/Wiki/测试用例/用户部门等 30+ 模块的数据读取与写入',
-  '- Webhook 事件推送：工作项变更等平台事件订阅并推送到外部系统',
-  '- 代码托管集成：GitLab/GitHub/Gitee/Bitbucket 等，Commit/MR 关联工作项、代码提交统计',
-  '- CI/CD 集成：Jenkins/GitLab CI/GitHub Actions 等，构建触发、状态回写、部署审批',
-  '- IM 集成：企业微信/钉钉/飞书/Slack 等，工作项变动通知、扫码登录',
-  '- 数据迁移：Jira 迁移工具（史诗/故事/缺陷/任务映射）、Confluence 空间迁移、CSV/Excel 批量导入工作项',
-  '【图谱边界】以上仅用于准确命名 ONES 产品模块与集成机制；某能力是否已为客户交付/配置/打通，必须以案例素材证据为准，图谱本身不构成交付证据。',
+  '- ONES Project：自定义工作项类型/属性/布局/关联/层级/工作流，需求与史诗、路线图、基线、迭代与看板、甘特图/里程碑/交付物、关系追溯图。测试、工时资源、项目集、效能、DevOps 和流程自动化属于其手册能力域；历史名称 TestCase/Performance/Plan 不代表所有许可证均包含。',
+  '- 需求跟踪矩阵（v7.26.0 版本说明新增）：多级追溯，末级可含代码分支/MR/提交，权限范围内的缺口筛选、覆盖率卡片和 Excel 导出；权限不足不能算已确认缺口，覆盖率按已保存配置计算。',
+  '- 工作项审批：内容确认/内容变更、属性冻结、批量与交接、审批中心；同一工作项仅一个在途审批。审批通过与执行节点成功分开，步骤表单可能先于审批写入。',
+  '- 测试管理（TestCase）：用例库、编写组织用例、计划执行、关联需求/缺陷、测试报告与权限。',
+  '- 工时资源与项目集：预估/登记工时、成员排期、负载与投入跟踪、工时周期冻结；项目集层级和跨项目甘特图。',
+  '- 效能管理（Performance）：仪表盘、卡片、预制模板、SQL 与权限。完整 DORA、MTTR、ROI 等是否现成可用需核对模板、数据源和口径。',
+  '- 流程自动化：事件、条件、动作、动态内容、联动对象、分支和运行历史；具体支持动作依枚举。看板 WIP 超限是饱和告警，仍可流转。工作项公式、ONESQL、效能 SQL、Wiki 表格公式不可混用。',
+  '- ONES Wiki：页面组/页面树、协同编辑、模板历史、数据表格、评论批注、共享加密、页面审批/变更审批/交接、公开发布、导入导出、水印与统计；公开发布、归档及移动端编辑有对象和操作限制。',
+  '- ONES Desk：自定义提单表单、工单门户/H5/微信小程序、登录或免登录收集、分派流转与客户沟通。免登录追踪能力受限；不能据此宣称完整 ITSM/SLA 引擎。',
+  '- ONES Account：组织/团队、成员/部门/用户组、权限、目录同步、登录验证、通知、MFA/密码/会话策略/日志/水印；目录、登录、通知按连接器分别配置。',
+  '- ONES AI 智能助手：上下文对话、工作项创建管理、知识问答与文档生成、数据查询、通知摘要、网络搜索、模型/用量/权限配置及 MCP 服务；实际可用工具受版本、模型、配置、网络和权限约束。',
+  '开放与集成：',
+  '- 原生代码仓文档：GitHub、公有/私有 GitLab、SVN、私有 Bitbucket；提交、分支、MR 与工作项关联，各类型支持范围不同。',
+  '- 原生流水线集成当前文档仅支持 Jenkins，查看运行状态/步骤/日志并关联项目与迭代；其他 CI/CD、部署审批需另行评估，不能写成已具备的标准连接。',
+  '- 账号连接器：企业微信、飞书、钉钉、LDAP/AD、CAS、SAML、有度与 API 同步；不能假定每种都支持目录/登录/通知全部功能。',
+  '- OpenAPI/OAuth、事件、插件和 MCP 可用于扩展；scope 与业务权限同时满足。Plugin 1.0（plugin.yaml/.opk）和 App 2.0（opkx.json/.opkx 或外部托管）协议、SDK 不可混用；审批扩展仅为相应 Web 接入点。',
+  '- 迁移：Jira 评估/映射/迁移，Confluence 工具或空间导入，CSV/XLSX/XLS 工作项创建更新；Service Management、插件、附件、权限与空值处理需核对，导入成功不等于完整恢复。',
+  '【图谱边界】图谱本身不构成交付证据。以上仅是产品文档证据，不构成客户交付/配置/集成/收益证据。所有客户事实以素材为准；缺失保持 unknown。建议区分原生、配置、扩展开发和待核验，不承诺固定实施周期、合规认证或量化收益。AI 只生成待 CSM 确认的草稿。',
 ].join('\n');
 
-/**
- * ONES 平台支撑能力清单（v17）：解决方案架构图「平台支撑」带的确定性渲染词表，模型不参与。
- *
- * 只收录平台底层配置/管理性质能力（用户拍板：一定是 ONES 支持的底层能力），全部词条源自
- * ones-product-knowledge 技能库 SKILL.md（2026-05-12 版）2.7 账号与安全、2.1 基础能力、
- * 2.2.6 页面审批、5.4 开放 API 与第九章部署运维；用户举例的「审批引擎」在产品中的真名是
- * 「审批中心」（页面审批/变更审批），按产品真名收录。全客户恒定展示，不依赖客户素材证据。
- */
+/** Deterministic figure vocabulary; customer adoption still needs separate evidence. */
 export const ONES_PLATFORM_CAPABILITIES: ReadonlyArray<{ title: string; detail: string }> = [
-  { title: '权限管理', detail: '五级权限·角色模板' },
+  { title: '权限管理', detail: '权限点与角色配置' },
   { title: '流程自定义', detail: '工作流与状态流转' },
   { title: '字段自定义', detail: '自定义字段与表单' },
-  { title: '流程自动化', detail: '事件触发流转通知' },
-  { title: '审批中心', detail: '页面与变更审批' },
-  { title: '单点登录', detail: '企微/钉钉/飞书/LDAP' },
-  { title: '开放 API', detail: 'OpenAPI·OAuth 2.0' },
+  { title: '流程自动化', detail: '事件条件与动作' },
+  { title: '审批中心', detail: '工作项与页面审批' },
+  { title: '单点登录', detail: '账号集成与验证' },
+  { title: '开放 API', detail: 'OpenAPI 与 OAuth' },
   { title: '报表仪表盘', detail: '多维报表与仪表盘' },
 ];
 
-/**
- * ONES 开箱即用标准集成（v17）：规划期未从素材识别到集成系统时，解决方案架构图「系统集成」带
- * 的确定性兜底清单（用户拍板），此时不画系统集成架构图。均为 ONES 标准连接能力，无需客户素材证据。
- */
+/** Standard connection names for the existing empty-evidence figure fallback. */
 export const ONES_STANDARD_INTEGRATIONS: readonly string[] = ['企业微信', '钉钉', '飞书', 'LDAP/AD'];
+
+// Knowledge changes must invalidate both generated drafts and resumable model checkpoints.
+export const ONES_KNOWLEDGE_DIGEST = createHash('sha256').update(JSON.stringify({
+  version: ONES_KNOWLEDGE_VERSION,
+  sources: ONES_KNOWLEDGE_SOURCES,
+  map: ONES_CAPABILITY_MAP,
+  platform: ONES_PLATFORM_CAPABILITIES,
+  integrations: ONES_STANDARD_INTEGRATIONS,
+})).digest('hex');

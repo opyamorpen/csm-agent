@@ -14,11 +14,12 @@ import { parseArchitectureGraph, renderArchitectureSvg } from './case-architectu
 import { parseCapabilityMapBlueprint, renderCapabilityMapSvg } from './case-capability-map-figure.js';
 import { injectValueMapSolutionSvg, parseValueMapBlueprint, renderValueMapSvg, VALUE_MAP_PAIN_TITLE_WORDS, VALUE_MAP_VALUE_TITLE_WORDS } from './case-value-map-figure.js';
 import { findFigureEdgeTextOverlaps, relayerFigureEdges, styleCaseFigureSvg } from './case-figure-shell.js';
-import { ONES_CAPABILITY_MAP, ONES_PLATFORM_CAPABILITIES, ONES_STANDARD_INTEGRATIONS } from './case-ones-knowledge.js';
+import { ONES_CAPABILITY_MAP, ONES_PLATFORM_CAPABILITIES, ONES_STANDARD_INTEGRATIONS, ONES_KNOWLEDGE_DIGEST } from './case-ones-knowledge.js';
 import { CASE_CONTENT_VERSION, CASE_CONTENT_DIMENSIONS, caseContentReview, caseLessonsLabel, casePracticeLibrary, casePracticesFor, validatePracticeIds, type CaseContentReview } from './case-content.js';
 
 /** v19: evidence-backed depth and isolated reusable practices; v17 figure contracts remain.
- * Prompt changes must advance this version to invalidate incompatible checkpoints and drafts. */
+ * Prompt changes advance this version; ONES knowledge changes are independently hashed
+ * into both draft fingerprints and resumable model signatures. */
 export const CASE_GENERATION_VERSION = 'case-v19-content-depth';
 
 /** 三张结构化图的规范图名（用户拍板统一叫法）：生成时服务端把 caption 确定性覆盖为规范名，
@@ -1062,7 +1063,7 @@ export function caseFingerprint(customer: Customer | string, timeline: SourceEve
   const opportunityState = [...opportunities].sort((a, b) => a.id.localeCompare(b.id)).map((item) => ({
     id: item.id, title: item.title, detail: item.detail, confidence: item.confidence, status: item.status, evidenceRefs: item.evidenceRefs,
   }));
-  return hash(JSON.stringify({ version: CASE_GENERATION_VERSION, practices: casePracticeLibrary().digest, profile, events, evidence: evidenceParts, risk: riskState, opportunities: opportunityState }));
+  return hash(JSON.stringify({ version: CASE_GENERATION_VERSION, knowledge: ONES_KNOWLEDGE_DIGEST, practices: casePracticeLibrary().digest, profile, events, evidence: evidenceParts, risk: riskState, opportunities: opportunityState }));
 }
 
 /** stats 证据条目 ID（claim_evidence 引用它的 source_ref）。 */
@@ -2958,7 +2959,7 @@ export class CaseService {
   }
 
   private modelSignature(): string {
-    return caseRequestHash({ version: CASE_GENERATION_VERSION, practices: casePracticeLibrary().digest, provider: this.runtime?.llm.provider,
+    return caseRequestHash({ version: CASE_GENERATION_VERSION, knowledge: ONES_KNOWLEDGE_DIGEST, practices: casePracticeLibrary().digest, provider: this.runtime?.llm.provider,
       model: this.runtime?.llm.model, endpoint: this.runtime?.model?.baseUrl ?? this.runtime?.llm.baseUrl,
       protocol: this.runtime?.llm.protocol });
   }

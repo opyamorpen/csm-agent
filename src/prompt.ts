@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ONES_CAPABILITY_MAP } from './workbench/case-ones-knowledge.js';
 
 // Project root is one level above src/ (skills/ and templates/ live there so
 // the "brain" stays portable data rather than compiled code).
@@ -93,6 +94,8 @@ export function buildSystemPrompt(tools: ToolSummary[]): string {
     PERSONA,
     '',
     buildToolsSection(tools),
+    '',
+    ONES_CAPABILITY_MAP,
     '',
     '===== 工作流（Skills） =====',
     skills,
