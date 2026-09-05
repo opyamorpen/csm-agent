@@ -84,6 +84,8 @@ test('version --json prints the install fingerprint for cross-machine comparison
   assert.match(help.stdout, /--set 别名1,别名2\] \[--add 别名\] \[--remove 别名\]/, 'help 应说明别名三种维护方式');
   assert.match(help.stdout, /customers merge --from <客户ID或精确名> --into <客户ID或精确名>/, 'help 应包含客户合并子命令');
   assert.match(help.stdout, /审计 customers_merge/, 'help 应说明合并操作落审计');
+  assert.match(help.stdout, /webintel \[客户ID或名称\] --reclassify/, 'help 应包含存量情感回填命令');
+  assert.match(help.stdout, /「公开负面动态」预警自动解除/, 'help 应说明回填对误报预警的效果');
 });
 
 test('CLI exposes machine-readable core capability coverage without a running server', () => {
@@ -115,8 +117,10 @@ test('CLI exposes machine-readable core capability coverage without a running se
   const webIntelCapability = capabilities.find((item) => item.workflow === 'web-intelligence-refresh')!;
   assert.ok(webIntelCapability.api.includes('/api/web-intel/rotation'), 'webintel capability must expose the rotation drain endpoint');
   assert.ok(webIntelCapability.api.includes('GET /api/customers/:id/web-intel/rounds'), 'webintel capability must expose the rounds report endpoint');
+  assert.ok(webIntelCapability.api.includes('POST /api/web-intel/reclassify'), 'webintel capability must expose the sentiment reclassify endpoint');
   assert.match(webIntelCapability.notes ?? '', /约两周全员轮换/);
   assert.match(webIntelCapability.notes ?? '', /20:00–次日 08:00/, '自动轮换窗口是上海夜间错峰时段');
+  assert.match(webIntelCapability.notes ?? '', /--reclassify/, '存量情感回填是 webintel 工作流的一部分（CLI 平价）');
   // 增购机会 v2：LLM 假设分析能力（读 overview + 强制重新分析端点）与展示口径说明。
   const opportunityCapability = capabilities.find((item) => item.workflow === 'opportunity-analysis');
   assert.ok(opportunityCapability && opportunityCapability.api.includes('POST /api/customers/:id/opportunities/refresh'));

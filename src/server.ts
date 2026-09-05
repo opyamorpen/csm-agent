@@ -29,7 +29,7 @@ import { wecomUseridForCode, wecomLoginUrl, newWecomState, registerWecomState, c
 import { evaluateCustomerAlerts } from './workbench/alerts.js';
 import type { Customer } from './workbench/types.js';
 import { PortfolioSyncService, scheduleHemorySync, schedulePortfolioSync, scheduleWebIntelSync, type SyncUser } from './workbench/sync.js';
-import { WebIntelService } from './workbench/webintel.js';
+import { WebIntelService, reclassifyWebIntelSentiment } from './workbench/webintel.js';
 import { OpportunityService } from './workbench/opportunity.js';
 import { RISK_RULE_VERSION } from './workbench/risk.js';
 import { CaseService, caseNarrativeWarnings } from './workbench/cases.js';
@@ -1062,6 +1062,24 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
       // 日常由 09:00–19:00 整点 tick 自动推进，本端点与 tick 互斥。
       if (req.method === 'POST' && path === '/api/web-intel/rotation') {
         return json(res, 202, workbench.sync.refreshWebIntelRotation());
+      }
+      // 公开动态存量情感回填（web-intel-v2）：把缺 sentiment 的旧证据批给 LLM 补判并改写 detail 前缀，
+      // 随后重算风险与预警——误报的「公开负面动态」预警在条件消失后自动解除。单客户同步契约；
+      // 全量回填由 csm-agent webintel --reclassify 逐客户驱动（避免单个长请求）。
+      if (req.method === 'POST' && path === '/api/web-intel/reclassify') {
+        const body = await readBody(req);
+        const customerId = typeof body.customerId === 'string' ? body.customerId.trim() : '';
+        if (!customerId) return json(res, 400, { error: '需要 {"customerId":"<客户ID>"}；全量回填请用 csm-agent webintel --reclassify 逐客户驱动' });
+        if (!visibleCustomerIds().has(customerId)) return json(res, 404, { error: 'customer not found' });
+        const customer = workbench.db.getCustomer(customerId);
+        if (!customer) return json(res, 404, { error: 'customer not found' });
+        try {
+          const result = await reclassifyWebIntelSentiment(workbench.db, runtime, customer, actor);
+          workbench.sync.recompute(customerId);
+          return json(res, 200, { ...result, customer: { id: customer.id, name: customer.name }, risk: workbench.db.latestRisk(customerId) });
+        } catch (error) {
+          return json(res, 502, { error: (error as Error).message, customerId });
+        }
       }
       if (req.method === 'POST' && path === '/api/hemory/sync') {
         const body = await readBody(req);

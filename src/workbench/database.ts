@@ -1510,6 +1510,12 @@ export class WorkbenchDatabase {
     return { id: this.addEvidence(input), created: true };
   }
 
+  /** 仅限 web_signal 情感回填改写 detail 前缀（保留行 id，预警抑制的 negativeEvidenceIds 语义不变）。 */
+  updateEvidenceDetail(id: string, detail: string): boolean {
+    const result = this.db.prepare('UPDATE evidence SET detail=? WHERE id=? AND kind=?').run(detail, id, 'web_signal');
+    return Number(result.changes) === 1;
+  }
+
   listEvidence(customerId: string): EvidenceInput[] {
     return (this.db.prepare('SELECT * FROM evidence WHERE customer_id=? ORDER BY occurred_at DESC').all(customerId) as Row[]).map((row) => ({
       id: String(row.id), customerId: String(row.customer_id), sourceEventId: row.source_event_id as string | null,

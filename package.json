@@ -1,6 +1,6 @@
 {
   "name": "csm-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Customer-centered CSM workbench with CRM-authoritative identities, ONES/Hemory evidence, renewal and expansion analysis, and case publishing.",
   "type": "module",
   "private": true,

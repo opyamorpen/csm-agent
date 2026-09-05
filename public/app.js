@@ -2749,6 +2749,10 @@
           for (const finding of summary.findings || []) {
             const line = el('div', 'cell-sub web-intel-finding');
             if (finding.is_new) line.append(el('span', 'web-intel-new', '新增'));
+            // 情感徽标（web-intel-v2 起随轮次存档；旧轮次无 sentiment 不显示）：与风险/预警判定同源口径。
+            if (finding.sentiment === 'negative' || finding.sentiment === 'neutral' || finding.sentiment === 'positive') {
+              line.append(el('span', `web-intel-sentiment ${finding.sentiment}`, { negative: '负面', neutral: '中性', positive: '正面' }[finding.sentiment]));
+            }
             const link = el('a', null, finding.label);
             link.href = finding.source_url;
             link.target = '_blank';

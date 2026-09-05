@@ -1096,6 +1096,10 @@ header .quiet-command:hover { border-color: var(--header-text); background: rgba
 .business-record p { margin: 7px 0; color: var(--text-2); }
 .web-intel-finding { margin-top: 5px; }
 .web-intel-new { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 650; }
+.web-intel-sentiment { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 650; border: 1px solid transparent; }
+.web-intel-sentiment.positive { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
+.web-intel-sentiment.negative { color: var(--danger); background: var(--warn-bg); border-color: var(--danger); }
+.web-intel-sentiment.neutral { color: var(--text-2); background: transparent; border-color: var(--border-strong); }
 .web-intel-finding a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--border-strong); overflow-wrap: anywhere; }
 .web-intel-finding a:hover { color: var(--accent); }
 .record-facts { margin-top: 8px; color: var(--ok-text); font-size: 12px; }

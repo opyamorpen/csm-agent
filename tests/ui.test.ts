@@ -1366,6 +1366,14 @@ test('customer detail has a web intelligence tab showing per-round reports', () 
   assert.match(source, /link\.target = '_blank';/);
   // 样式契约：新增徽标是胶囊样式（两主题经 token 取色，不引入硬编码色值）。
   assert.match(styles, /\.web-intel-new \{[\s\S]*?border-radius: 999px;[\s\S]*?var\(--accent-soft\)[\s\S]*?\}/);
+  // 情感徽标契约（web-intel-v2）：条目按落库 sentiment 显示 正面/中性/负面，与风险/预警判定同源；
+  // 旧轮次（无 sentiment）不显示徽标。三档配色经主题 token，不硬编码色值。
+  assert.match(source, /web-intel-sentiment \$\{finding\.sentiment\}/, '情感徽标按 sentiment 渲染类名');
+  assert.match(source, /\{ negative: '负面', neutral: '中性', positive: '正面' \}\[finding\.sentiment\]/, '三档中文文案');
+  assert.match(source, /finding\.sentiment === 'negative' \|\| finding\.sentiment === 'neutral' \|\| finding\.sentiment === 'positive'/, '只认三档合法值（旧轮次缺字段不显示）');
+  assert.match(styles, /\.web-intel-sentiment\.positive \{[\s\S]*?var\(--ok\)[\s\S]*?\}/);
+  assert.match(styles, /\.web-intel-sentiment\.negative \{[\s\S]*?var\(--danger\)[\s\S]*?\}/);
+  assert.match(styles, /\.web-intel-sentiment\.neutral \{[\s\S]*?var\(--text-2\)[\s\S]*?\}/);
 });
 
 test('customer header folds the three refresh commands into a dropdown menu', () => {

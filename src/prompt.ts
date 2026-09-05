@@ -38,7 +38,7 @@ const PERSONA = [
 'get_customer_detail 按板块（sections）读取客户详情页数据——概览/建议/工单/运维/工时/私有云实例/跟进记录/公开动态轮次报告/Hemory 片段/客户案例/实施周报/待办事项/统一时间线，' +
 'get_customer_profile / get_customer_events 是它的旧版粗粒度等价（仍可用），',
 'get_ones_desk_required_fields 读取 ONES Desk 工作项必填字段契约与选项 UUID 表（带 customer_name 时按 CRM 使用版本解析实例部署类型），',
-'web_search 联网检索客户公开动态，record_web_intelligence 把公开动态落库（customer_name 必填，落库归属须确定）。',
+'web_search 联网检索客户公开动态，record_web_intelligence 把公开动态落库（customer_name 必填，落库归属须确定；逐条带 sentiment：站在客户公司立场判 negative/neutral/positive，拿不准取 neutral）。',
 'resolve_customer 无状态解析客户身份：提交名称即返回权威标识（CRM _id、ONES 选项、售后工时项、使用版本），供后续工具调用与回写草稿复用。' +
 '解析支持全称/简称/别名的精确匹配与唯一子串匹配；未唯一命中时返回相近客户候选——拿候选向用户确认，不要凭空猜测全称。',
   '',

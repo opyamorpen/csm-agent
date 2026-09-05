@@ -2,10 +2,11 @@ import type { Runtime } from '../bootstrap.js';
 import { extractText } from '../agent.js';
 import { performRawWebSearch, type HttpPost, type WebResult } from '../tools/websearch.js';
 import type { WorkbenchDatabase } from './database.js';
+import { summarizeWebSignals, webSignalDetailPrefix, webSignalDetailTags, type WebSignalSentiment } from './risk.js';
 import type { CompletionRate, Customer, EvidenceInput } from './types.js';
 
-/** 同步路径公开动态检索版本：提示词/解析契约变更时升版本。 */
-export const WEB_INTEL_VERSION = 'web-intel-v1';
+/** 同步路径公开动态检索版本：提示词/解析契约变更时升版本。v2 起 LLM 逐条判定 sentiment 并入库。 */
+export const WEB_INTEL_VERSION = 'web-intel-v2';
 
 /** csm-web-intelligence 的 8 个检索角度（顺序即优先级）。 */
 export const WEB_INTEL_ANGLES: ReadonlyArray<{ key: string; label: string; query: string }> = [
@@ -39,6 +40,8 @@ export interface WebIntelFinding {
   occurred_at: string;
   source_url: string;
   category: string;
+  /** LLM 判定的情感（公司视角：利空/中性/利好）；缺失时读取端走关键词 + 角度兜底。 */
+  sentiment?: WebSignalSentiment | null;
 }
 
 export interface WebIntelRunResult {
@@ -71,9 +74,9 @@ function cleanJson(text: string): unknown {
   return null;
 }
 
-/** 同步落库与 record_web_intelligence 工具同款 detail 前缀：`[category] 详情`。 */
-function findingDetail(category: string, detail: string): string {
-  return detail.trim() ? `[${category}] ${detail.trim()}` : `[${category}]`;
+/** 同步落库与 record_web_intelligence 工具同款 detail 前缀：`[category|sentiment] 详情`（sentiment 缺省退回 `[category]`）。 */
+function findingDetail(category: string, sentiment: WebSignalSentiment | null, detail: string): string {
+  return webSignalDetailPrefix(category, sentiment, detail);
 }
 
 /** 标题/摘要须包含客户全称或简称才进入 LLM 分类（削减同名公司噪音）。 */
@@ -82,7 +85,7 @@ export function mentionsCustomer(result: WebResult, names: string[]): boolean {
   return names.some((name) => name && haystack.includes(name));
 }
 
-/** 解析 LLM 分类输出：过滤缺 URL/日期/与客户无关的条目，绝不编造。 */
+/** 解析 LLM 分类输出：过滤缺 URL/日期/与客户无关的条目，绝不编造；sentiment 非法值归 null（读取端走兜底）。 */
 export function parseWebIntelFindings(text: string): WebIntelFinding[] {
   const value = cleanJson(text) as { findings?: unknown[] } | null;
   if (!value || !Array.isArray(value.findings)) return [];
@@ -95,8 +98,11 @@ export function parseWebIntelFindings(text: string): WebIntelFinding[] {
     const occurredAt = typeof item.occurred_at === 'string' ? item.occurred_at.trim() : '';
     if (!label || !url || !/^\d{4}-\d{2}-\d{2}/.test(occurredAt)) continue; // 只落有来源、有日期的动态
     const category = typeof item.category === 'string' && WEB_INTEL_CATEGORIES.has(item.category.trim()) ? item.category.trim() : 'other';
+    const sentiment = typeof item.sentiment === 'string' && ['negative', 'neutral', 'positive'].includes(item.sentiment.trim())
+      ? item.sentiment.trim() as WebSignalSentiment
+      : null;
     const detail = typeof item.detail === 'string' ? item.detail.trim() : '';
-    findings.push({ label, detail, occurred_at: occurredAt.slice(0, 10), source_url: url, category });
+    findings.push({ label, detail, occurred_at: occurredAt.slice(0, 10), source_url: url, category, sentiment });
   }
   return findings;
 }
@@ -153,7 +159,7 @@ export class WebIntelService {
           customerId: customer.id,
           kind: 'web_signal',
           label: finding.label,
-          detail: findingDetail(finding.category, finding.detail),
+          detail: findingDetail(finding.category, finding.sentiment ?? null, finding.detail),
           occurredAt: finding.occurred_at,
           confidence: 0.6,
           sourceSystem: 'web',
@@ -183,8 +189,9 @@ ${context}
 
 请完成两件事：
 1. 剔除与该公司无关的同名公司结果（行业/地域明显不符）。
-2. 把确认相关、有日期的动态提炼为结构化列表。每条动态必须：有来源 URL、有日期（YYYY-MM-DD，取不到精确日期就不采用该条）、label 一句话概括、detail 保留关键事实与数字、category 取 financing|contract|product|executive|org|sentiment|hiring|policy|other 之一。
-只输出 JSON：{"findings": [{"label": "", "detail": "", "occurred_at": "YYYY-MM-DD", "source_url": "", "category": ""}]}
+2. 把确认相关、有日期的动态提炼为结构化列表。每条动态必须：有来源 URL、有日期（YYYY-MM-DD，取不到精确日期就不采用该条）、label 一句话概括、detail 保留关键事实与数字、category 取 financing|contract|product|executive|org|sentiment|hiring|policy|other 之一、sentiment 取 negative|neutral|positive 之一——站在该公司的立场判断这条动态对公司自身是利空（negative）、利好（positive）还是无明显影响（neutral）。
+   sentiment 只看动态与该公司的实质关系，不看字面词：如「推出新产品/获得荣誉/中标」是 positive；「人事任命/组织调整/例行披露」通常是 neutral；「被处罚/败诉/裁员/业绩下滑」是 negative；保险/担保类新闻中出现的「破产」「拖欠」若描述的是承保的风险事故而非公司自身，不是 negative。拿不准取 neutral。
+只输出 JSON：{"findings": [{"label": "", "detail": "", "occurred_at": "YYYY-MM-DD", "source_url": "", "category": "", "sentiment": ""}]}
 宁缺毋滥：不编造、不推断；提炼不出就输出空列表。`;
     const response = await this.runtime.models.complete(this.runtime.model, {
       systemPrompt: `你是 CSM 工作台的公开动态整理器（${WEB_INTEL_VERSION}）。你只能整理用户提供的检索结果，不执行任何工具或外部写入。检索主体是「${searchName}」。`,
@@ -196,4 +203,93 @@ ${context}
     }
     return parseWebIntelFindings(extractText(response.content));
   }
+}
+
+/** 每批补判的最大条数：单客户全量 web_signal 证据分批送 LLM，控制单次调用体积。 */
+const RECLASSIFY_BATCH_SIZE = 30;
+
+export interface WebIntelReclassifyResult {
+  customerId: string;
+  status: 'succeeded' | 'skipped' | 'failed';
+  reason?: string;
+  /** 缺 sentiment 的候选条数（本轮回填目标）。 */
+  candidates: number;
+  /** 实际改写 detail 前缀的条数（LLM 未返回或非法值的条目保持原样，可重跑续判）。 */
+  updated: number;
+  /** 回填前后 90 天窗口内负向条数（读取口径与风险/预警同源）。 */
+  negativeBefore: number;
+  negativeAfter: number;
+}
+
+/** 旧 detail 前缀 `[category] ` 剥离：回填改写时保留原文正文。 */
+function stripDetailPrefix(detail: string): string {
+  return detail.replace(/^\[[a-z_]+(?:\|[a-z_]+)?\]\s?/, '');
+}
+
+/**
+ * 存量情感回填：把缺 sentiment 的 web_signal 证据批给 LLM 判定情感，改写 detail 前缀为
+ * `[category|sentiment]`（保留行 id，预警抑制语义不变）。重搜无法回填——addEvidenceIdempotent
+ * 同自然键冲突时跳过不更新；本函数是唯一改写路径。风险/预警重算由调用方在回填后触发。
+ */
+export async function reclassifyWebIntelSentiment(
+  db: WorkbenchDatabase,
+  runtime: Runtime,
+  customer: Customer,
+  actor: string,
+  now = new Date(),
+): Promise<WebIntelReclassifyResult> {
+  const negativeBefore = summarizeWebSignals(db.listEvidence(customer.id), now).negative.length;
+  const pending = db.listEvidence(customer.id).filter((item) => {
+    if (item.kind !== 'web_signal' || !item.id) return false;
+    const { category, sentiment } = webSignalDetailTags(item.detail);
+    // 只回填带 category 前缀但缺 sentiment 的行；无前缀的旧行保持原样（读取端本就只走关键词兜底）。
+    return category !== null && sentiment === null;
+  });
+  if (!pending.length) {
+    return { customerId: customer.id, status: 'skipped', reason: '没有缺情感判定的公开动态记录', candidates: 0, updated: 0, negativeBefore, negativeAfter: negativeBefore };
+  }
+  const searchName = customer.shortName?.trim() || customer.name;
+  let updated = 0;
+  for (let start = 0; start < pending.length; start += RECLASSIFY_BATCH_SIZE) {
+    const batch = pending.slice(start, start + RECLASSIFY_BATCH_SIZE);
+    const context = batch.map((item, index) => (
+      `${index + 1}. [id:${item.id}] ${item.label}\n   详情: ${stripDetailPrefix(item.detail).slice(0, 300)}`
+    )).join('\n');
+    const prompt = `检索主体：${customer.name}${customer.shortName && customer.shortName !== customer.name ? `（简称 ${customer.shortName}）` : ''}
+
+以下是 CSM 工作台已落库的该公司公开动态记录（旧版未判定情感，现逐条补判）：
+
+${context}
+
+请逐条判定 sentiment：站在该公司的立场，这条动态对公司自身是利空（negative）、利好（positive）还是无明显影响（neutral）。
+只看动态与该公司的实质关系，不看字面词：「推出新产品/获得荣誉/中标」是 positive；「人事任命/组织调整/例行披露」通常是 neutral；「被处罚/败诉/裁员/业绩下滑/上市破发」是 negative；保险/担保类内容中出现的「破产」「拖欠」若描述的是承保的风险事故而非公司自身，不是 negative。拿不准取 neutral。
+只输出 JSON：{"items": [{"id": "输入中的 id", "sentiment": "negative|neutral|positive"}]}
+逐条都要覆盖；不编造 id。`;
+    const response = await runtime.models.complete(runtime.model, {
+      systemPrompt: `你是 CSM 工作台的公开动态情感补判器（${WEB_INTEL_VERSION}）。你只能判定用户提供的记录，不执行任何工具或外部写入。检索主体是「${searchName}」。`,
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      tools: [],
+    });
+    if (response.stopReason === 'error') {
+      throw new Error(`情感补判模型调用失败: ${response.errorMessage || '未知错误'}`);
+    }
+    const value = cleanJson(extractText(response.content)) as { items?: unknown[] } | null;
+    const byId = new Map(batch.map((item) => [item.id!, item]));
+    for (const raw of Array.isArray(value?.items) ? value!.items! : []) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const item = raw as Record<string, unknown>;
+      const id = typeof item.id === 'string' ? item.id.trim() : '';
+      const sentiment = typeof item.sentiment === 'string' && ['negative', 'neutral', 'positive'].includes(item.sentiment.trim())
+        ? item.sentiment.trim() as WebSignalSentiment
+        : null;
+      const target = id ? byId.get(id) : undefined;
+      if (!target || !sentiment) continue;
+      const { category } = webSignalDetailTags(target.detail);
+      db.updateEvidenceDetail(id, webSignalDetailPrefix(category ?? 'other', sentiment, stripDetailPrefix(target.detail)));
+      updated += 1;
+    }
+  }
+  const negativeAfter = summarizeWebSignals(db.listEvidence(customer.id), now).negative.length;
+  db.audit(actor, 'web_intel.reclassify', 'customer', customer.id, { candidates: pending.length, updated, negativeBefore, negativeAfter });
+  return { customerId: customer.id, status: 'succeeded', candidates: pending.length, updated, negativeBefore, negativeAfter };
 }

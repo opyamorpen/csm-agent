@@ -249,16 +249,18 @@ test('record_web_intelligence: persists findings as web_signal evidence', () => 
   const r = await handler({
     customer_name: '客户甲',
     findings: [
-      { label: '完成 B 轮融资', detail: '融资 2 亿元', occurred_at: '2026-08-01', source_url: 'https://news.example.com/1', category: 'financing' },
-      { label: '无来源动态', detail: '会被跳过', occurred_at: '2026-08-02', source_url: '', category: 'other' },
+      { label: '完成 B 轮融资', detail: '融资 2 亿元', occurred_at: '2026-08-01', source_url: 'https://news.example.com/1', category: 'financing', sentiment: 'positive' },
+      { label: '人事任命', detail: '聘任副主任', occurred_at: '2026-08-02', source_url: 'https://news.example.com/2', category: 'executive', sentiment: 'bogus' },
+      { label: '无来源动态', detail: '会被跳过', occurred_at: '2026-08-03', source_url: '', category: 'other' },
     ],
   });
   assert.equal(r.isError, undefined);
-  assert.ok(r.text.includes('1 条公开动态'));
+  assert.ok(r.text.includes('2 条公开动态'));
   const evidence = db.listEvidence('crm-1').filter((e) => e.kind === 'web_signal');
-  assert.equal(evidence.length, 1);
-  assert.equal(evidence[0].sourceUrl, 'https://news.example.com/1');
-  assert.ok(evidence[0].detail.includes('[financing]'));
+  assert.equal(evidence.length, 2);
+  assert.equal(evidence.find((e) => e.label === '完成 B 轮融资')!.sourceUrl, 'https://news.example.com/1');
+  assert.equal(evidence.find((e) => e.label === '完成 B 轮融资')!.detail, '[financing|positive] 融资 2 亿元', '合法 sentiment 进前缀（风险/预警权威口径）');
+  assert.equal(evidence.find((e) => e.label === '人事任命')!.detail, '[executive] 聘任副主任', '非法 sentiment 归空退回旧格式');
   // 概览接口能读到落库结果（闭环：下次分析不再重搜）。
   const overview = db.overview('crm-1') as { customer?: { name?: string } };
   assert.ok(overview.customer?.name === '客户甲');

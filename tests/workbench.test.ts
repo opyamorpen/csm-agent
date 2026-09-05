@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WorkbenchDatabase } from '../src/workbench/database.js';
-import { assessRisk } from '../src/workbench/risk.js';
+import { assessRisk, summarizeWebSignals, webSignalDetailPrefix, webSignalDetailTags } from '../src/workbench/risk.js';
 import { buildOnesCustomerQuery, caseSpeakerRole, crmCustomer, crmFollowupEvent, isDeliveredOnesEvent, nextHemorySlot, nextPortfolioSlot, nextWebIntelTick, onesIssueUrl, onesSourceType, parseOnesIssuePage, parseOnesManhourMode, parseOnesManhourPage, PortfolioSyncService, shanghaiDayBounds } from '../src/workbench/sync.js';
 import { applyDeploymentTypeOverride, applyConfirmDraftEdits, applyDraftEdits, computeWorkhours, confirmDraftEditContract, draftDisplayFields, draftEditContract, draftModelRetryDelays, fitFollowupSections, HemoryDraftService, invalidOnesOptionValues, mapOnesDeskRequiredFields, missingOnesDeskDescription, missingOnesDeskSpecFields, missingOnesRequiredFields, ONES_DESK_CLASSIFICATION_HINTS, ONES_DESK_FIELD_SPECS, parseOnesIssueFields, resolveDeploymentType, resolveOnesOption, unknownOnesDeskFieldIds } from '../src/workbench/drafts.js';
 import { HemorySegmentationService, isMeaningfulHemoryFragment } from '../src/workbench/hemory.js';
@@ -25,7 +25,7 @@ test('workbench: CRM id is the stable customer key and missing data stays unknow
   assert.equal(risk.score, null);
   // v3：需求完成率/工单解决率/互动/客户声音/公开动态五维度；续约日期与合同状态退出计分。
   assert.deepEqual(risk.unknowns.sort(), ['公开动态', '客户声音', '工单解决率', '最后互动时间', '需求完成率'].sort());
-  assert.equal(risk.ruleVersion, 'csm-risk-v3');
+  assert.equal(risk.ruleVersion, 'csm-risk-v4');
   assert.equal(db.listCustomers()[0].id, 'crm-1');
 }));
 
@@ -75,9 +75,21 @@ test('workbench: risk v3 dimensions — completion rates tiering, web signals, r
   const positive = assessRisk(base, [webEvidence('完成 B 轮融资', '2026-08-01', '[financing] 融资 2 亿')], now, {});
   assert.equal(positive.dimensions.web.score, 0);
   assert.equal(positive.dimensions.web.known, true);
-  // detail 前缀 [category]（sentiment/org/executive）兜底判负向。
-  const categoryNeg = assessRisk(base, [webEvidence('某公司动态', '2026-08-01', '[org] 组织架构调整')], now, {});
-  assert.equal(categoryNeg.dimensions.web.score, 10);
+  // detail 前缀兜底（v4）：sentiment 角度仍兜底判负；org/executive 不再兜底（人事任命/获奖/峰会等中性动态曾被整类误判）。
+  const sentimentFallback = assessRisk(base, [webEvidence('新增劳动争议判决', '2026-08-01', '[sentiment] 公司作为被告')], now, {});
+  assert.equal(sentimentFallback.dimensions.web.score, 10, 'sentiment 角度零关键词仍兜底判负');
+  const orgNeutral = assessRisk(base, [webEvidence('官网披露连获九项荣誉认可', '2026-08-01', '[org] 荣誉上新栏目')], now, {});
+  assert.equal(orgNeutral.dimensions.web.score, 0, 'org 角度零关键词不再判负');
+  const executiveNeutral = assessRisk(base, [webEvidence('丁一获聘媒体资源部副主任', '2026-08-01', '[executive] 党委会研究决定聘任')], now, {});
+  assert.equal(executiveNeutral.dimensions.web.score, 0, 'executive 角度零关键词不再判负');
+  // 落库 sentiment（web-intel-v2）为权威口径：positive 覆盖负面关键词误伤，negative 直接判负。
+  const insuredPeril = assessRisk(base, [webEvidence('推出跨境专业服务出口保险', '2026-08-03', '[product|positive] 将进口国政局变动、买方破产及恶意拖欠导致的服务费损失纳入承保范围')], now, {});
+  assert.equal(insuredPeril.dimensions.web.score, 0, 'positive 覆盖「买方破产…承保范围」关键词误伤');
+  const sentimentNeg = assessRisk(base, [webEvidence('官网披露连获荣誉', '2026-08-01', '[org|negative] 判定为利空')], now, {});
+  assert.equal(sentimentNeg.dimensions.web.score, 10, 'sentiment=negative 直接判负');
+  const sentimentNeutral = assessRisk(base, [webEvidence('披露年度报告', '2026-08-01', '[org|neutral] 年报例行披露')], now, {});
+  assert.equal(sentimentNeutral.dimensions.web.score, 0, 'neutral 不计负向');
+  assert.ok(sentimentNeutral.dimensions.web.known);
 });
 
 test('workbench: explicit nonrenewal overrides incomplete coverage', () => withDb((db) => {
@@ -85,6 +97,37 @@ test('workbench: explicit nonrenewal overrides incomplete coverage', () => withD
   const risk = assessRisk(customer, []);
   assert.equal(risk.level, 'high');
 }));
+
+test('workbench: web signal detail prefix parses legacy and sentiment formats', () => {
+  assert.deepEqual(webSignalDetailTags('[org] 组织架构调整'), { category: 'org', sentiment: null }, '旧格式无 sentiment');
+  assert.deepEqual(webSignalDetailTags('[org|positive] 连获荣誉'), { category: 'org', sentiment: 'positive' });
+  assert.deepEqual(webSignalDetailTags('[sentiment|negative] 处罚'), { category: 'sentiment', sentiment: 'negative' });
+  assert.deepEqual(webSignalDetailTags('[product|bogus] 保险'), { category: 'product', sentiment: null }, '非法 sentiment 归 null（读取端走兜底）');
+  assert.deepEqual(webSignalDetailTags('无前缀'), { category: null, sentiment: null });
+  assert.equal(webSignalDetailPrefix('product', 'positive', ' 详情 '), '[product|positive] 详情');
+  assert.equal(webSignalDetailPrefix('org', null, ''), '[org]', '无正文时前缀独立成行');
+  assert.equal(webSignalDetailPrefix('org', null, '正文'), '[org] 正文', '缺省 sentiment 退回旧格式（存量兼容）');
+});
+
+test('workbench: summarizeWebSignals buckets by stored sentiment before keyword fallback', () => {
+  const now = new Date('2026-08-25T00:00:00Z');
+  const ev = (id: string, label: string, detail: string) => ({
+    id, customerId: 'crm-s', kind: 'web_signal' as const, label, detail, occurredAt: '2026-08-20', confidence: 0.6, sourceSystem: 'web',
+  });
+  const summary = summarizeWebSignals([
+    ev('n1', '被判处罚款', '[sentiment|negative] 监管处罚'),
+    ev('p1', '推出出口保险', '[product|positive] 买方破产纳入承保范围'),
+    ev('t1', '年度报告披露', '[org|neutral] 例行披露'),
+    ev('f1', '裁员 5%', '[org] 组织调整'),
+    ev('f2', '劳动争议判决', '[sentiment] 公司作为被告'),
+    ev('o1', '官网连获荣誉', '[org] 荣誉上新'),
+  ], now);
+  assert.deepEqual(summary.negative.map((item) => item.id), ['n1', 'f1', 'f2'], 'sentiment=negative 判负 + 缺失时关键词/sentiment 角度兜底');
+  assert.deepEqual(summary.positive.map((item) => item.id), ['p1'], 'sentiment=positive 覆盖关键词误伤且计入正向');
+  assert.equal(summary.total, 6);
+  assert.ok(!summary.negative.some((item) => item.id === 'o1'), 'org 角度零关键词不再兜底判负');
+  assert.ok(!summary.negative.some((item) => item.id === 't1'), 'neutral 不计负向');
+});
 
 test('workbench: customer portfolio excludes lost after-sales stage but keeps direct detail access', () => withDb((db) => {
   db.upsertCustomer({ id: 'crm-active', name: '活跃客户', afterSalesStage: '服务中', renewalDate: '2026-12-01T00:00:00.000Z', contractValue: 100 });
@@ -197,7 +240,7 @@ test('workbench: recompute wires full rates into risk and schedules opportunity 
   db.addEvidence({ customerId: 'crm-web', kind: 'web_signal', label: '完成 B 轮融资', detail: '[financing] 融资 2 亿元', occurredAt: '2026-08-10', confidence: 0.6, sourceSystem: 'web', sourceUrl: 'https://news.example.com/1' });
   sync.recompute('crm-web');
   const risk = db.latestRisk('crm-web')!;
-  assert.equal(risk.ruleVersion, 'csm-risk-v3');
+  assert.equal(risk.ruleVersion, 'csm-risk-v4');
   assert.equal(risk.dimensions.suggestion.score, 0, '50% ≥ 30% 健康线 → 0 分');
   assert.equal(risk.dimensions.ticket.score, 0);
   assert.equal(risk.dimensions.web.score, 0, '正向公开动态不产生风险分');

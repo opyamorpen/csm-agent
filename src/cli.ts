@@ -100,8 +100,8 @@ const CLI_CAPABILITIES = [
   { command: 'customers merge', workflow: 'customer-portfolio', access: 'write', api: ['POST /api/customers/merge'],
     notes: '合并重复客户（管理员，修复同步/导入产生的同一客户双行或幽灵行）：from 行全部挂载数据改挂 into 行后删除 from 行，into 行 NULL 字段回填；同名双行必须用客户 ID 指定，逐表迁移计数 + 审计 customers_merge' },
   { command: 'customer', workflow: 'customer-overview', access: 'read', api: ['/api/customers/:id/overview'] },
-  { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', 'GET /api/customers/:id/web-intel/rounds', '/api/web-intel/rotation'],
-    notes: '单客户强制检索（忽略 14 天门）；--history 查轮次报告（run 即报告：逐条明细带新增标记，同一条旧闻跨轮不重复落库只在报告留痕）；--rotation 手动排空自动轮换队列（夜间窗口每日 20:00–次日 08:00 上海错峰、每小时 1 个客户、约两周全员轮换、最久未查优先，失败次日优先重试）' },
+  { command: 'webintel', workflow: 'web-intelligence-refresh', access: 'write', api: ['/api/customers/:id/web-intel', 'GET /api/customers/:id/web-intel/rounds', '/api/web-intel/rotation', 'POST /api/web-intel/reclassify'],
+    notes: '单客户强制检索（忽略 14 天门）；--history 查轮次报告（run 即报告：逐条明细带新增标记，同一条旧闻跨轮不重复落库只在报告留痕）；--rotation 手动排空自动轮换队列（夜间窗口每日 20:00–次日 08:00 上海错峰、每小时 1 个客户、约两周全员轮换、最久未查优先，失败次日优先重试）；--reclassify 存量情感回填（旧记录逐条按公司视角补判正向/中性/负向并改写，回填后重算风险与预警，误报的公开负面预警自动解除；可单客户或全量逐客户，失败可重跑续判）' },
   { command: 'opportunities', workflow: 'opportunity-analysis', access: 'read-write', api: ['GET /api/customers/:id/overview', 'POST /api/customers/:id/opportunities/refresh'],
     notes: '增购机会假设由 LLM 从会议录音片段+公开动态证据分析产出（数量不固定、按可信度排序、展示前 5 条，逐条附来源）；--refresh 强制重新分析（忽略指纹/24h 门），失败保留旧假设' },
   { command: 'timeline', workflow: 'customer-timeline', access: 'read', api: ['/api/customers/:id/timeline'] },
@@ -236,6 +236,10 @@ function help(): void {
   csm-agent webintel --rotation [--json]
     （手动排空自动轮换队列：14 天门内跳过、当天已尝试不重复；日常自动轮换为每日 20:00–次日 08:00（上海错峰）
      每小时检索 1 个客户、约两周轮完全部客户（最久未查优先，失败次日优先重试）；首次全量排空可能耗时 1 小时以上）
+  csm-agent webintel [客户ID或名称] --reclassify [--json]
+    （存量情感回填：把旧版落库（无 sentiment）的公开动态逐条按公司视角补判 正向/中性/负向 并改写记录，
+     回填后重算风险与预警——曾误判的「公开负面动态」预警自动解除；带客户参数只回填该客户，
+     不带则逐客户回填全部可见客户（每客户一次 LLM 批判，可能耗时数分钟）；失败可重跑续判）
   csm-agent opportunities <客户ID或名称> [--refresh] [--json]
     （列出增购机会假设：LLM 从会议录音片段+公开动态证据分析，按可信度取前 5 条、
      逐条附信息来源（会议录音/公开动态，可带链接）；--refresh 强制重新分析，失败保留旧假设）
@@ -351,7 +355,7 @@ function help(): void {
     （会话不绑定客户——客户全称自动注入指令文本；agent 本地工具按 customer_name 唯一解析取数，
      可按需抓取客户详情页各板块 get_customer_detail、本地已同步事件 get_customer_events、
      联网检索 web_search（未配 key 自动走免费匿名通道，可配 Tavily key）、
-     落库 record_web_intelligence；
+     落库 record_web_intelligence（逐条带 sentiment 正负向判定）；
      --attach 附带本地文件（文本类/Office（docx/xlsx/pptx）/PDF 内容注入上下文，可重复；
      图片要求视觉模型，自定义端点先 config llm set ... --vision=on 声明能力）；
      贴截图/聊天记录说「帮我提 bug/需求」时，agent 从贴入内容分析生成 ONES
@@ -586,8 +590,9 @@ async function customerMerge(input: string[]): Promise<void> {
   console.log('操作已记录审计（customers_merge）');
 }
 
-/** 公开动态检索：单客户强制刷新（忽略 14 天门）；--history 查轮次报告；--rotation 手动排空自动轮换队列。 */
-async function webintel(input: string, options: { rotation?: boolean; history?: boolean } = {}): Promise<void> {
+/** 公开动态检索：单客户强制刷新（忽略 14 天门）；--history 查轮次报告；--rotation 手动排空自动轮换队列；
+ * --reclassify 存量情感回填（单客户或全量逐客户驱动，回填后重算风险/预警）。 */
+async function webintel(input: string, options: { rotation?: boolean; history?: boolean; reclassify?: boolean } = {}): Promise<void> {
   if (options.rotation) {
     const run = await request<any>('/api/web-intel/rotation', { method: 'POST' });
     // 首次全量排空最坏 149 客户 × ~33s ≈ 80+ 分钟；等终态上限放宽到 90 分钟。
@@ -602,6 +607,38 @@ async function webintel(input: string, options: { rotation?: boolean; history?: 
     }
     if (!summary.attempted) console.log('  （当前没有待轮换客户：全部在 14 天新鲜度窗口内，或今天已尝试过）');
     if (completed.status === 'failed') process.exitCode = 2;
+    return;
+  }
+  if (options.reclassify) {
+    // 单客户走一次端点；无客户参数时逐客户驱动（避免单个长请求），失败不中断后续客户。
+    const targets = input ? [await resolveCustomer(input)] : await customers();
+    if (!targets.length) throw new Error('当前账号没有可见客户');
+    let failed = 0;
+    let totalUpdated = 0;
+    const rows: any[] = [];
+    for (const target of targets) {
+      let result: any;
+      try {
+        result = await request<any>('/api/web-intel/reclassify', { method: 'POST', body: JSON.stringify({ customerId: target.id }) });
+      } catch (error) {
+        failed += 1;
+        rows.push({ 客户: target.name, 状态: '失败', 原因: (error as Error).message });
+        if (!jsonOutput) console.log(`  ✗ ${target.name}：${(error as Error).message}`);
+        continue;
+      }
+      totalUpdated += result.updated ?? 0;
+      if (jsonOutput) { rows.push(result); continue; }
+      const suffix = result.status === 'skipped'
+        ? result.reason ?? '无可回填条目'
+        : `补判 ${result.updated}/${result.candidates} 条，90 天窗口负向 ${result.negativeBefore} → ${result.negativeAfter}`;
+      console.log(`  ${result.status === 'failed' ? '✗' : '✓'} ${target.name}：${suffix}`);
+      const web = result.risk?.dimensions?.web;
+      if (web) console.log(`    公开动态维度: ${web.known ? `${web.score}/${web.weight}` : 'unknown'} · ${web.reason}`);
+    }
+    if (jsonOutput) return print({ customers: rows, attempted: targets.length, updated: totalUpdated, failed });
+    console.log(`情感回填完成：${targets.length} 个客户、补判 ${totalUpdated} 条${failed ? `、失败 ${failed} 个（可重跑续判）` : ''}`);
+    console.log('旧版记录（无 sentiment）已按公司视角补判正负向；误报的「公开负面动态」预警已随重算自动解除');
+    if (failed) process.exitCode = 2;
     return;
   }
   const customer = await resolveCustomer(input);
@@ -2229,11 +2266,12 @@ async function main(): Promise<void> {
   if (command === 'webintel') {
     const rotation = rawArgs.includes('--rotation');
     const history = rawArgs.includes('--history');
-    const input = args.filter((item) => item !== '--rotation' && item !== '--history').join(' ').trim();
-    if (rotation && history) throw new Error('--rotation 与 --history 不能同时使用');
+    const reclassify = rawArgs.includes('--reclassify');
+    const input = args.filter((item) => item !== '--rotation' && item !== '--history' && item !== '--reclassify').join(' ').trim();
+    if ([rotation, history, reclassify].filter(Boolean).length > 1) throw new Error('--rotation / --history / --reclassify 不能同时使用');
     if (rotation && input) throw new Error('--rotation 不接受客户参数（单客户强制检索直接用 webintel <客户ID或名称>）');
     if (history && !input) throw new Error('--history 需要客户参数：webintel <客户ID或名称> --history');
-    return webintel(input, { rotation, history });
+    return webintel(input, { rotation, history, reclassify });
   }
   if (command === 'opportunities') {
     const refresh = rawArgs.includes('--refresh');

@@ -35,7 +35,9 @@ description: 联网检索客户最近三个月的公开动态（融资、合同�
 
 ## 落库
 
-汇总完成后，把**有来源、有日期**的动态通过 `record_web_intelligence` 落库为 web_signal 证据（每条带 label/detail/occurred_at/source_url/category）。落库后，后续分析通过 `get_customer_profile` 即可读到，无需重复搜索。
+汇总完成后，把**有来源、有日期**的动态通过 `record_web_intelligence` 落库为 web_signal 证据（每条带 label/detail/occurred_at/source_url/category/sentiment）。落库后，后续分析通过 `get_customer_profile` 即可读到，无需重复搜索。
+
+sentiment 是风险/预警的正负向权威口径，逐条站在**客户公司的立场**判定：对公司利空（被处罚/败诉/裁员/业绩下滑/上市破发）= negative；利好（融资/中标/新品/获得荣誉）= positive；无明显影响（人事任命/例行披露/例行报道）= neutral。只看动态与公司的实质关系，不看字面词——保险/担保类内容里出现的「破产」「拖欠」若描述的是承保的风险事故而非公司自身，不是 negative；拿不准取 neutral。
 
 ## 与分析的结合
 

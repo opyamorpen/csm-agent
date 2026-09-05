@@ -4,7 +4,9 @@ import type { Customer, EvidenceInput, RiskAssessment, RiskStats } from './types
 // v3：评分维度 = 需求完成 / 工单解决 / 互动 / 客户声音 / 公开动态。
 // v2 的「续约临近度」「合同状态」退出计分（续约日期、合同额仍展示）；明确不续约/流失保留为硬覆盖高风险。
 // 完成率按 ONES field005.category==='done' 判定（绝不拿状态名猜）；公开动态按近 90 天 web_signal 证据判定。
-export const RISK_RULE_VERSION = 'csm-risk-v3';
+// v4：公开动态正负向以落库 sentiment（web-intel-v2 起 LLM 判定入库）为权威；缺失时才走关键词 + sentiment 角度兜底
+//（org/executive 退出兜底——人事任命/组织新闻多为中性，曾把「连获荣誉」「获聘」整类误判为负向）。
+export const RISK_RULE_VERSION = 'csm-risk-v4';
 
 /** 公开动态证据回看窗口（天）。 */
 export const WEB_SIGNAL_WINDOW_DAYS = 90;
@@ -14,10 +16,24 @@ export const WEB_NEGATIVE_PATTERN = /裁员|处罚|罚款|诉讼|投诉|违规|�
 /** 公开动态正向关键词（用于增购机会侧，与负向互斥：先判负向）。 */
 export const WEB_POSITIVE_PATTERN = /融资|中标|签约|扩张|发布|招聘|增长|上市|战略合作|收购|增资|订单|扩产|新品/;
 
-/** record_web_intelligence / 同步落库同款 detail 前缀：`[category] 详情`。 */
-export function webSignalCategory(detail: string): string | null {
-  const match = /^\[([a-z_]+)\]\s/.exec(detail);
-  return match ? match[1] : null;
+/** 公开动态情感判定（web-intel-v2 起落库进 detail 前缀，站在该公司视角：利空/中性/利好）。 */
+export type WebSignalSentiment = 'negative' | 'neutral' | 'positive';
+
+const WEB_SIGNAL_SENTIMENTS = new Set<string>(['negative', 'neutral', 'positive']);
+
+/** record_web_intelligence / 同步落库同款 detail 前缀：`[category] 详情` 或 `[category|sentiment] 详情`。 */
+export function webSignalDetailPrefix(category: string, sentiment: WebSignalSentiment | null, detail: string): string {
+  const tag = sentiment ? `[${category}|${sentiment}]` : `[${category}]`;
+  const text = detail.trim();
+  return text ? `${tag} ${text}` : tag;
+}
+
+/** 解析 detail 前缀的 category 与 sentiment；旧格式 `[category]`（及无前缀行）的 sentiment 为 null。 */
+export function webSignalDetailTags(detail: string): { category: string | null; sentiment: WebSignalSentiment | null } {
+  const match = /^\[([a-z_]+)(?:\|([a-z_]+))?\]/.exec(detail);
+  if (!match) return { category: null, sentiment: null };
+  const sentiment = match[2] && WEB_SIGNAL_SENTIMENTS.has(match[2]) ? match[2] as WebSignalSentiment : null;
+  return { category: match[1] ?? null, sentiment };
 }
 
 export interface WebSignalSummary {
@@ -27,7 +43,7 @@ export interface WebSignalSummary {
   positive: EvidenceInput[];
 }
 
-/** 近 N 天 web_signal 证据归类：负向/正向（关键词优先，category 兜底；同一证据先判负向）。 */
+/** 近 N 天 web_signal 证据归类：负向/正向。sentiment（web-intel-v2 起入库）为权威口径；缺失时关键词优先、sentiment 角度兜底。 */
 export function summarizeWebSignals(evidence: EvidenceInput[], now: Date, days = WEB_SIGNAL_WINDOW_DAYS): WebSignalSummary {
   const cutoff = now.getTime() - days * 86_400_000;
   const inWindow: EvidenceInput[] = [];
@@ -41,9 +57,17 @@ export function summarizeWebSignals(evidence: EvidenceInput[], now: Date, days =
   const positive: EvidenceInput[] = [];
   for (const item of inWindow) {
     const text = `${item.label} ${item.detail}`;
-    const category = webSignalCategory(item.detail);
-    // 组织变动/高管变动/舆情角度本身即风险信号（csm-web-intelligence 口径），融资/合同/招聘是扩张信号。
-    if (WEB_NEGATIVE_PATTERN.test(text) || (category && ['sentiment', 'org', 'executive'].includes(category))) negative.push(item);
+    const { category, sentiment } = webSignalDetailTags(item.detail);
+    // 情感判定入库（csm-risk-v4）：LLM 落库 sentiment 是权威——negative 直接计负；
+    // positive/neutral 一律不计负（覆盖「买方破产…纳入承保范围」这类关键词/角度误伤）。
+    if (sentiment) {
+      if (sentiment === 'negative') negative.push(item);
+      else if (sentiment === 'positive') positive.push(item);
+      continue;
+    }
+    // 存量行/未判定 sentiment 的兜底：关键词优先，category 仅「负面舆情」角度计负（org/executive 不再兜底），
+    // 融资/合同/招聘角度视为扩张信号。
+    if (WEB_NEGATIVE_PATTERN.test(text) || category === 'sentiment') negative.push(item);
     else if (WEB_POSITIVE_PATTERN.test(text) || (category && ['financing', 'contract', 'hiring'].includes(category))) positive.push(item);
   }
   return { total: inWindow.length, negative, positive };

@@ -1,9 +1,12 @@
 import { Type } from '@earendil-works/pi-ai';
 import type { Tool } from '@earendil-works/pi-ai';
 import { randomUUID } from 'node:crypto';
+import { webSignalDetailPrefix, type WebSignalSentiment } from '../workbench/risk.js';
 
 export const WEB_SEARCH_TOOL_NAME = 'web_search';
 export const RECORD_WEB_INTELLIGENCE_TOOL_NAME = 'record_web_intelligence';
+
+const WEB_SIGNAL_SENTIMENT_VALUES = ['negative', 'neutral', 'positive'] as const;
 
 const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
 const SEARCH_TIMEOUT_MS = 15_000;
@@ -31,7 +34,8 @@ export const recordWebIntelligenceTool: Tool = {
   description:
     '把联网搜索汇总后的客户公开动态落库为 web_signal 证据，供后续分析直接读取（get_customer_profile 会带回最近记录）。' +
     'customer_name 指定归属客户（全称/简称/别名，与工作台客户唯一匹配——落库归属必须确定性，匹配不上宁可不落）。' +
-    '每条动态须带日期与来源 URL；只记录有来源依据的内容。这是本地工作台写入，不涉及外部系统，无需 confirm_write。',
+    '每条动态须带日期与来源 URL；只记录有来源依据的内容。sentiment 是风险/预警的正负向权威口径，请站在客户公司立场逐条判定（拿不准取 neutral）。' +
+    '这是本地工作台写入，不涉及外部系统，无需 confirm_write。',
   parameters: Type.Object({
     customer_name: Type.String({ description: '客户全称/简称/别名（与工作台客户唯一匹配，落库归属）' }),
     findings: Type.Array(
@@ -41,6 +45,7 @@ export const recordWebIntelligenceTool: Tool = {
         occurred_at: Type.String({ description: '动态发生日期，ISO 格式 YYYY-MM-DD' }),
         source_url: Type.String({ description: '来源 URL' }),
         category: Type.String({ description: '角度分类：financing|contract|product|executive|org|sentiment|hiring|policy|other' }),
+        sentiment: Type.Optional(Type.String({ description: '情感判定（站在客户公司立场）：negative=对公司利空、neutral=无明显影响、positive=利好；只看实质关系不看字面词，拿不准取 neutral' })),
       }),
       { description: '本次搜索汇总出的公开动态列表' },
     ),
@@ -379,12 +384,15 @@ export function makeRecordWebIntelligenceHandler(
       const occurredAt = typeof f.occurred_at === 'string' ? f.occurred_at.trim() : '';
       if (!label || !url || !occurredAt) continue; // 只落有来源、有日期的动态
       const category = typeof f.category === 'string' && f.category.trim() ? f.category.trim() : 'other';
+      const sentiment = typeof f.sentiment === 'string' && (WEB_SIGNAL_SENTIMENT_VALUES as readonly string[]).includes(f.sentiment.trim())
+        ? f.sentiment.trim() as WebSignalSentiment
+        : null;
       const detail = typeof f.detail === 'string' ? f.detail.trim() : '';
       deps.addEvidence({
         customerId: customer.id,
         kind: 'web_signal',
         label,
-        detail: detail ? `[${category}] ${detail}` : `[${category}]`,
+        detail: webSignalDetailPrefix(category, sentiment, detail),
         occurredAt,
         confidence: 0.6,
         sourceSystem: 'web',
