@@ -49,7 +49,13 @@ if (gitSha) {
 }
 const builtAt = new Date().toISOString();
 const buildId = `${gitSha ? gitSha.slice(0, 12) : 'nogit'}-${dirty ? 'dirty' : 'clean'}-${builtAt}`;
-const info = { buildId, gitSha, dirty, builtAt };
+// 语义版本随构建冻结（单测 --repo 临时仓库可能没有 package.json，容忍缺失为 null）。
+let version = null;
+try {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  if (typeof pkg.version === 'string' && pkg.version) version = pkg.version;
+} catch { /* 无 package.json 时版本按 unknown 处理 */ }
+const info = { buildId, gitSha, dirty, builtAt, version };
 
 const stampsPublicAnchor = outDir === join(repoRoot, 'dist');
 

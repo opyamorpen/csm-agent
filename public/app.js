@@ -313,6 +313,16 @@
     applyAvatar(null);
   }
 
+  // 系统版本（/api/version 免登录）：展示构建时冻结的语义版本（v 前缀）；旧服务无该字段时按 unknown。
+  async function loadProfileVersion() {
+    const field = document.getElementById('profileVersion');
+    try {
+      const response = await fetch('/api/version', { cache: 'no-store' });
+      const info = response.ok ? await response.json() : null;
+      field.textContent = info && info.version ? `v${info.version}` : 'unknown';
+    } catch (error) { /* 取不到版本按 unknown 展示 */ }
+  }
+
   function setupAvatarEntry(me) {
     currentDisplayName = me.user.displayName || me.user.username;
     document.getElementById('avatarName').textContent = currentDisplayName;
@@ -322,6 +332,7 @@
     document.getElementById('profileRole').textContent = me.user.role === 'admin' ? '管理员' : '成员';
     avatarEntry.classList.remove('hidden');
     void refreshAvatar();
+    void loadProfileVersion();
   }
 
   document.getElementById('userAvatar').addEventListener('click', (event) => {

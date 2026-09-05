@@ -8,6 +8,8 @@ export interface BuildInfo {
   gitSha: string | null;
   dirty: boolean;
   builtAt: string;
+  /** 构建时冻结的语义版本（package.json version）；旧构建产物无此字段 → null（展示 unknown）。 */
+  version: string | null;
 }
 
 export interface ServiceVersionInfo extends BuildInfo {
@@ -33,7 +35,8 @@ export function readBuildInfo(distDir?: string): BuildInfo | null {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<BuildInfo>;
     if (typeof raw.buildId !== 'string' || !raw.buildId) return null;
     return { buildId: raw.buildId, gitSha: typeof raw.gitSha === 'string' ? raw.gitSha : null,
-      dirty: raw.dirty === true, builtAt: typeof raw.builtAt === 'string' ? raw.builtAt : '' };
+      dirty: raw.dirty === true, builtAt: typeof raw.builtAt === 'string' ? raw.builtAt : '',
+      version: typeof raw.version === 'string' && raw.version ? raw.version : null };
   } catch { return null; }
 }
 
@@ -41,7 +44,7 @@ export function readBuildInfo(distDir?: string): BuildInfo | null {
 export function serviceVersionInfo(loaded: BuildInfo | null, startedAt: string, distDir?: string): ServiceVersionInfo {
   const onDisk = readBuildInfo(distDir);
   return {
-    ...(loaded ?? { buildId: 'unknown', gitSha: null, dirty: false, builtAt: '' }),
+    ...(loaded ?? { buildId: 'unknown', gitSha: null, dirty: false, builtAt: '', version: null }),
     startedAt,
     pid: process.pid,
     cwd: process.cwd(),

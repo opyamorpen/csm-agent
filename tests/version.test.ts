@@ -15,8 +15,13 @@ test('version: readBuildInfo parses stamped file and tolerates missing or broken
   const dir = mkdtempSync(join(tmpdir(), 'csm-version-'));
   try {
     assert.equal(readBuildInfo(join(dir, 'no-such-dist')), null, '缺失文件返回 null 而非抛错');
-    writeStamp(dir, { buildId: 'b-1', gitSha: 'deadbeef', dirty: true, builtAt: '2026-08-28T00:00:00Z' });
-    assert.deepEqual(readBuildInfo(dir), { buildId: 'b-1', gitSha: 'deadbeef', dirty: true, builtAt: '2026-08-28T00:00:00Z' });
+    writeStamp(dir, { buildId: 'b-1', gitSha: 'deadbeef', dirty: true, builtAt: '2026-08-28T00:00:00Z', version: '0.2.0' });
+    assert.deepEqual(readBuildInfo(dir), { buildId: 'b-1', gitSha: 'deadbeef', dirty: true, builtAt: '2026-08-28T00:00:00Z', version: '0.2.0' });
+    // 旧构建产物（version 机制之前）无 version 字段：解析成功且 version 落 null，展示层按 unknown 处理。
+    writeFileSync(join(dir, 'build-info.json'), JSON.stringify({ buildId: 'b-0', gitSha: 'x', dirty: false, builtAt: 't', version: 1 }));
+    assert.equal(readBuildInfo(dir)?.version, null, '非字符串 version 一律回退 null');
+    writeFileSync(join(dir, 'build-info.json'), JSON.stringify({ buildId: 'b-0', gitSha: 'x', dirty: false, builtAt: 't' }));
+    assert.equal(readBuildInfo(dir)?.version, null, '缺 version 字段回退 null');
     writeFileSync(join(dir, 'build-info.json'), 'not json');
     assert.equal(readBuildInfo(dir), null, '损坏 JSON 返回 null');
     writeFileSync(join(dir, 'build-info.json'), JSON.stringify({ gitSha: 'x' }));
@@ -28,7 +33,7 @@ test('version: serviceVersionInfo reports stale only when disk build differs fro
   const dir = mkdtempSync(join(tmpdir(), 'csm-version-'));
   const previousSupervised = process.env.CSM_SUPERVISED;
   try {
-    const loaded: BuildInfo = { buildId: 'b-1', gitSha: null, dirty: false, builtAt: '' };
+    const loaded: BuildInfo = { buildId: 'b-1', gitSha: null, dirty: false, builtAt: '', version: '0.2.0' };
     // 磁盘同构建：fresh。
     writeStamp(dir, loaded);
     process.env.CSM_SUPERVISED = undefined;
@@ -37,8 +42,9 @@ test('version: serviceVersionInfo reports stale only when disk build differs fro
     assert.equal(info.supervised, false);
     assert.equal(info.pid, process.pid);
     assert.equal(info.startedAt, '2026-08-28T00:00:00Z');
+    assert.equal(info.version, '0.2.0', '语义版本随加载的构建透传');
     // 磁盘换成新构建：stale=true，且 buildId 仍报告进程加载的旧构建。
-    writeStamp(dir, { buildId: 'b-2', gitSha: null, dirty: false, builtAt: '' });
+    writeStamp(dir, { buildId: 'b-2', gitSha: null, dirty: false, builtAt: '', version: '0.3.0' });
     info = serviceVersionInfo(loaded, '2026-08-28T00:00:00Z', dir);
     assert.equal(info.stale, true);
     assert.equal(info.buildId, 'b-1', '进程版本以启动时加载的构建为准');
@@ -51,6 +57,7 @@ test('version: serviceVersionInfo reports stale only when disk build differs fro
     info = serviceVersionInfo(null, '2026-08-28T00:00:00Z', dir);
     assert.equal(info.stale, false);
     assert.equal(info.buildId, 'unknown');
+    assert.equal(info.version, null, '无构建信息时版本为 null（展示 unknown）');
   } finally {
     if (previousSupervised === undefined) delete process.env.CSM_SUPERVISED;
     else process.env.CSM_SUPERVISED = previousSupervised;
@@ -61,14 +68,14 @@ test('version: serviceVersionInfo reports stale only when disk build differs fro
 test('version: staleness watch fires onReload when the disk build changes and stays quiet otherwise', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-version-'));
   try {
-    const loaded: BuildInfo = { buildId: 'b-1', gitSha: null, dirty: false, builtAt: '' };
+    const loaded: BuildInfo = { buildId: 'b-1', gitSha: null, dirty: false, builtAt: '', version: '0.2.0' };
     writeStamp(dir, loaded);
     let reloads = 0;
     const timer = startStalenessWatch(loaded, { distDir: dir, intervalMs: 10, onReload: () => reloads++ });
     assert.ok(timer, '有加载构建时必须启动自检');
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(reloads, 0, '磁盘未变化不得触发');
-    writeStamp(dir, { buildId: 'b-2', gitSha: null, dirty: false, builtAt: '' });
+    writeStamp(dir, { buildId: 'b-2', gitSha: null, dirty: false, builtAt: '', version: '0.3.0' });
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.ok(reloads >= 1, '磁盘构建变化必须触发 onReload');
     clearInterval(timer);
@@ -90,6 +97,8 @@ test('version: stamp-build --out 临时目录只写 dist 戳，不得改写 publ
     assert.equal(result.status, 0, result.stderr);
     const distInfo = JSON.parse(readFileSync(join(outDir, 'build-info.json'), 'utf8'));
     assert.match(distInfo.buildId, /^([0-9a-f]{12}|nogit)-(dirty|clean)-/, 'buildId 形如 sha12-dirty-时间');
+    assert.equal(distInfo.version, JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version,
+      '构建戳冻结 package.json 的语义版本');
     const after = existsSync(publicAnchor) ? readFileSync(publicAnchor, 'utf8') : null;
     assert.equal(after, before, '--out 临时目录运行不得改写 public/build-info.js');
   } finally { rmSync(outDir, { recursive: true, force: true }); }
@@ -114,6 +123,7 @@ test('version: 受管安装标记不算 dirty——一键安装的干净克隆�
     const info = JSON.parse(readFileSync(join(out, 'build-info.json'), 'utf8'));
     assert.equal(info.dirty, false, '仅有安装标记的工作区应报 clean（指纹不失真）');
     assert.match(info.buildId, /^([0-9a-f]{12})-clean-/);
+    assert.equal(info.version, null, '临时仓库无 package.json 时版本回退 null 而非报错');
     // 真实源码改动仍然算 dirty
     writeFileSync(join(base, 'src', 'a.ts'), 'export const x = 1;\n');
     const dirtyResult = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'stamp-build.mjs'), '--repo', base, '--out', out], { encoding: 'utf8' });

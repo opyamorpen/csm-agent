@@ -64,7 +64,8 @@ test('build script stamps only after tsc succeeds (failed builds never advance t
 test('version --json prints the install fingerprint for cross-machine comparison', () => {
   const plain = runCli('version');
   assert.equal(plain.status, 0, plain.stderr);
-  assert.equal(plain.stdout.trim(), packageJson.version);
+  // 明文输出统一 v 前缀（与个人中心「系统版本」同格式）；--json 保持裸值便于脚本比较。
+  assert.equal(plain.stdout.trim(), `v${packageJson.version}`);
   const json = runCli('version', '--json');
   assert.equal(json.status, 0, json.stderr);
   const fingerprint = JSON.parse(json.stdout) as Record<string, unknown>;
@@ -254,7 +255,7 @@ test('CLI provides standard global help and version commands', () => {
 
   const version = runCli('--version');
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  assert.match(version.stdout.trim(), /^v\d+\.\d+\.\d+$/);
 });
 
 test('alerts resolve requires a note and supports space/equal flag forms', () => {

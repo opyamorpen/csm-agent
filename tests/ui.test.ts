@@ -2239,4 +2239,10 @@ test('personal center: bottom-left avatar with popover menu and profile modal', 
   assert.ok(start > -1, 'avatar styles missing');
   const block = styles.slice(start);
   assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/);
+  // 系统版本展示契约：个人中心信息列显示 v 前缀语义版本，数据源为免登录的 /api/version，缺失回退 unknown。
+  assert.match(html, /<div class="profile-field"><span>系统版本<\/span><b id="profileVersion"><\/b><\/div>/);
+  assert.match(source, /async function loadProfileVersion/);
+  assert.match(source, /fetch\('\/api\/version', \{ cache: 'no-store' \}\)/);
+  assert.match(source, /`v\$\{info\.version\}`/);
+  assert.match(source, /void loadProfileVersion\(\)/);
 });

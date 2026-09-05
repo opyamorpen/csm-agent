@@ -89,12 +89,20 @@ npm run dev
 - **安全要点**：密码 scrypt 加盐哈希（`node:crypto`，无外部依赖）；登录失败按 用户名+来源IP 连续 5 次锁 15 分钟；cookie 变更请求校验同源（CSRF 防御）；服务默认只监听 `127.0.0.1`（此前未绑 host 会监听全部网卡），多人局域网/公网部署用 `CSM_HOST` 打开（公网务必置于 HTTPS 反代之后）。
 - **CLI/CI 令牌**：`csm-agent token create [--name=X]` 生成 PAT（明文仅显示一次、无过期、可 `token revoke` 吊销），供脚本以 `Authorization: Bearer <token>` 调用 API。
 
+### 版本号（语义版本）
+
+- **唯一权威源**是 `package.json` 的 `"version"`（裸值 `MAJOR.MINOR.PATCH`，npm 惯例）；所有面向人的展示统一加 `v` 前缀（如 `v0.2.0`），`--json` 等机器可读输出保持裸值。
+- **构建时冻结**：`npm run build` 的构建戳把该版本一并写入 `dist/build-info.json` 与 `public/build-info.js`——运行中的进程汇报「自己那次构建」的版本，不受磁盘上后续更新的 `package.json` 影响（与 buildId 同一设计动机）。旧构建产物无此字段时各处展示 `unknown`。
+- **消费方**：网页个人中心「系统版本」、`csm-agent version`（明文 `v` 前缀）、`/api/version`（`version` 字段）、`csm-agent doctor`（`serviceVersion`）与 `csm-agent service status`，全部同源。
+- **升版规则**：patch（0.x.**N**）= 缺陷修复与小调整；minor（0.**N**.0）= 新功能/新工作流；major（**N**.0.0）= 不兼容变更或对外里程碑。升版随当轮交付 commit 手动完成。
+- 语义版本与 buildId 分工：buildId（gitSha+构建时刻）管「构建一致性/新旧进程检测」，语义版本管「发布标识」；`csm-agent update` 仍按 git HEAD 判断是否更新。
+
 ### 构建版本与旧进程检测
 
 `public/` 静态文件每次请求从磁盘实时读取（页面永远最新），而 API 路由在进程启动时加载进内存——**构建后若进程不重启，就会出现「新 UI + 旧 API」分裂**（新端点 404、新按钮失效）。防护体系：
 
 - `npm run build` 在 tsc 成功后执行 `scripts/stamp-build.mjs`：git SHA + dirty 标记 + 构建时刻写入 `dist/build-info.json` 与 `public/build-info.js`（`window.__CSM_BUILD__`，gitignore），同一次构建的服务端与前端共享同一 buildId；**构建戳只在编译成功后落盘**——失败的构建不推进 buildId，受监管进程不会自退出换新到坏 dist 上；`npm run dev` 为 `tsx watch`（源码改动自动重载）。
-- 服务暴露 `GET /api/version`（buildId/startedAt/pid/supervised/stale）；前端每 30s 比对自己脚本的 buildId 与进程的 buildId，不一致或端点缺失（进程早于该机制）时页面顶部常亮红色横幅提示重启，恢复一致自动消隐。
+- 服务暴露 `GET /api/version`（version/buildId/startedAt/pid/supervised/stale，其中 `version` 为构建冻结的语义版本，旧进程缺失时为 `null`）；前端每 30s 比对自己脚本的 buildId 与进程的 buildId，不一致或端点缺失（进程早于该机制）时页面顶部常亮红色横幅提示重启，恢复一致自动消隐。
 - **自愈（推荐 launchd 托管）**：`csm-agent service install` 安装的 launchd 服务注入 `CSM_SUPERVISED=1` + KeepAlive——服务每 10s 自检 dist 变化，检测到新构建后自动退出（exit 0），launchd 拉起新构建，全程无人工介入；Mac App 自带子进程监管（terminationHandler 自动重启，短命退避 1s→60s 封顶）。
 - 无监管的手动进程（如终端 `nohup node dist/index.js`）不自动退出（可用性优先），只在 `/api/version` 报告 stale 并触发前端横幅；`csm-agent doctor` 与 `csm-agent service status` 均会比对服务端与本地构建并提示重启。
 - 端口被旧进程占用时启动不再裸崩：输出「端口已被占用，请 csm-agent service restart 或结束旧进程」后退出。
