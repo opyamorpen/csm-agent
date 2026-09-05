@@ -4398,6 +4398,49 @@ function seedCaseCustomer(db: WorkbenchDatabase): void {
   db.activateHemoryFragments(recording.id, 'fp-case-r1', [db.findSourceEvent('hemory', 'ai_topic_segment', 'case-r1:t1')!.id]);
 }
 
+test('workbench: v19 practices survive generation, enrichment and editing without entering figure inputs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-depth-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const content = structuredClone(CASE_CONTENT) as any;
+    content.solution_sections[0].practice_ids = ['intake-governance'];
+    const prompts: string[] = [];
+    const runtime: any = { llm: { provider: 'fake', model: 'fake-model' }, models: { complete: async (_: unknown, request: any) => {
+      const prompt = request.messages[0].content;
+      prompts.push(prompt);
+      const value = prompt.includes('规划客户成功案例草稿的章节结构') ? casePlanContentWithFigures(content, prompt)
+        : prompt.includes('章节配图') ? { svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400"><text x="100" y="100">需求收集</text></svg>', caption: '现状流程' }
+        : casePhaseRespond(content, prompt);
+      return { content: [{ type: 'text', text: JSON.stringify(value) }], stopReason: 'stop' };
+    } } };
+    const service = new CaseService(db, caseMcp(), runtime);
+    const job = service.generate('crm-c1');
+    await waitForJob(db, job.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.equal(draft.fields.content_version, 'case-content-v19');
+    assert.deepEqual((draft.fields.solution_sections as any[])[0].practice_ids, ['intake-governance']);
+    const library = draft.fields.practice_library as any;
+    assert.ok(renderCaseMarkdown(draft).includes(library.items[0].text));
+    const figurePrompts = prompts.filter((prompt) => prompt.includes('章节配图'));
+    assert.equal(figurePrompts.length, 1);
+    assert.ok(figurePrompts.every((prompt) => !prompt.includes(library.items[0].text) && !prompt.includes('intake-governance')));
+    assert.ok(!(draft.fields.context_snapshot as any).sources.some((item: any) => item.id === 'intake-governance'));
+    assert.ok(!(draft.fields.claim_evidence as any[]).some((item) => item.claim.includes(library.items[0].text)));
+    const originalFigures = structuredClone(draft.fields.figures);
+    const updated = service.update(draft.id, draft.version, undefined, { solution_sections: (draft.fields.solution_sections as any[]).map((section, index) => ({ ...section, practice_ids: index === 0 ? ['role-usability'] : [] })), practice_library: { items: [] }, content_version: 'forged' })!;
+    assert.deepEqual(updated.fields.practice_library, library, 'client cannot replace the frozen knowledge');
+    assert.deepEqual(updated.fields.figures, originalFigures, 'practice selection preserves exact SVG bytes');
+    assert.equal((updated.fields.content_review as any).practiceCount, 1);
+    assert.equal(updated.fields.content_version, 'case-content-v19');
+    assert.throws(() => service.update(updated.id, updated.version, undefined, { solution_sections: [{ title: '方案', text: '正文', practice_ids: ['invalid'] }] }), /practice_ids/);
+    assert.equal(db.getCaseDraft(updated.id)!.version, updated.version);
+    const parsed = parseCaseContent(draft.fields);
+    const merged = mergeCaseEnrichment(parsed, { changes: [{ field: 'solution_sections', index: 0, text: `${content.solution_sections[0].text} 有据补充。`, evidence: (draft.fields.claim_evidence as any[]).find((item) => item.claim === content.solution_sections[0].text) }] }, {});
+    assert.deepEqual(merged.solution_sections[0].practice_ids, ['intake-governance']);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('workbench: case generation runs full-context model job and persists narrative draft', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'csm-case-'));
   const db = new WorkbenchDatabase(dir);
@@ -4418,7 +4461,8 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.equal(result.fingerprint.length, 64);
     await waitForJob(db, result.jobId!);
     // v8 流水线调用序：规划 1 次 + 六章节各 1 次（素材未超预算不触发摘要、覆盖度达标不触发补写）。
-    assert.equal(prompts.length, 7, '规划 + 6 章节共 7 次模型调用');
+    assert.equal(prompts.filter((prompt) => !prompt.includes('补充完善客户成功案例草稿')).length, 7, '规划 + 6 章节，至多一次内容补写');
+    assert.ok(prompts.filter((prompt) => prompt.includes('补充完善客户成功案例草稿')).length <= 1);
     assert.match(prompts[0], /规划客户成功案例草稿的章节结构/, '首调用必须是规划阶段');
     assert.match(prompts[1], /只写这一个章节/);
     // v7 前序章节注入（v8 沿用；v8.1 起第二波并行，波内两章只见首章锚点——与波次语义一致）：
@@ -4488,16 +4532,16 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.match(capturedPrompt, /收进 unknowns/);
     assert.match(capturedPrompt, /六个章节|四章深结构/);
     // v8 客户简介纪律与复盘纪律。
-    assert.match(capturedPrompt, /禁止虚构排名/);
-    assert.match(capturedPrompt, /不得负面定性客户/);
+    assert.match(capturedPrompt, /客户身份、规模、排名/);
+    assert.match(capturedPrompt, /可复制实践及适用条件/);
     // v2 取材契约：痛点/价值优先客户原话信号、方案级举措主线、联网检索纪律。
     assert.match(capturedPrompt, /pain_point_signals/);
     assert.match(capturedPrompt, /value_signals/);
     assert.match(capturedPrompt, /web_context/);
     assert.match(capturedPrompt, /标题命中客户名不能单独成文/);
     assert.match(capturedPrompt, /同名或业务不符/);
-    assert.match(capturedPrompt, /以「我们为客户提供了什么方案」为主线/);
-    assert.match(capturedPrompt, /不得写成功能点罗列/);
+    assert.match(capturedPrompt, /业务场景与约束/);
+    assert.match(capturedPrompt, /不要将实施排期作为主线、堆砌产品功能/);
     assert.ok(capturedPrompt.includes('"pain_point_signals":'), '上下文须含痛点信号块');
     assert.ok(capturedPrompt.includes('"value_signals":'), '上下文须含价值信号块');
     assert.ok(!capturedPrompt.includes('"delivered_records":'), '已交付记录明细块已移除（v6）');
@@ -4516,7 +4560,7 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v18-incremental-repair');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v19-content-depth');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -4601,7 +4645,7 @@ test('workbench: case resume reuses validated stages across restart and rejects 
     resumed.resume(job.jobId!);
     await waitForJob(db, job.jobId!);
     assert.equal(db.getDraftJob(job.jobId!)!.status, 'succeeded');
-    assert.equal(prompts.length - before, 3, 'only solution/value/summary need requests after restart');
+    assert.equal(prompts.slice(before).filter((prompt) => !prompt.includes('补充完善客户成功案例草稿')).length, 3, 'only solution/value/summary need chapter requests after restart');
     const detail = resumed.jobDetail(job.jobId!)!;
     assert.equal(detail.calls.filter((call) => call.status === 'reused').length, 4, 'plan plus three chapters reused');
     assert.equal(detail.draftId, db.listCaseDrafts('crm-c1')[0].id);
@@ -5254,10 +5298,10 @@ test('workbench: case generation injects delivery stats as citable source and co
     assert.ok(coverage, 'coverage 必须落库');
     assert.equal(coverage.enriched, false);
     assert.equal(coverage.delivered, undefined, 'v6 覆盖度不再含交付记录池');
-  // 篇幅契约进入 prompt（v8 口径：项目背景 200~500 字、方案小节 250~600 字、诉求条目 60~180 字）。
-  assert.match(capturedPrompt, /200~500 字/);
-  assert.match(capturedPrompt, /250~600 字/);
-  assert.match(capturedPrompt, /60~180 字/);
+  // v19 expands mechanisms and decision context without padding sparse material.
+  assert.match(capturedPrompt, /400~550 字/);
+  assert.match(capturedPrompt, /500~750 字/);
+  assert.match(capturedPrompt, /100~160 字/);
   assert.match(capturedPrompt, /篇幅契约是质量要求而非硬性字符数/);
     // 摘录抄写规则（防「摘录未在引用证据中找到」复发）。
     assert.match(capturedPrompt, /连续逐字截取/);
@@ -5940,7 +5984,7 @@ test('workbench: case figures generated, sanitized, persisted and rendered as ma
     await waitForJob(db, result.jobId!);
     // 规划 + 6 章节 + 1 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）；
     // v8.1 并行化后 prompt 顺序不再确定（配图与后续波次章节重叠），按内容定位断言。
-    assert.equal(prompts.length, 8, '规划+6章+1图共 8 次模型调用');
+    assert.equal(prompts.filter((prompt) => !prompt.includes('补充完善客户成功案例草稿')).length, 8, '规划+6章+1图；内容线索可触发一次补写');
     const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图'))!;
     assert.ok(figurePrompt, '逐图生成调用必须存在');
     assert.match(figurePrompt, /绘图规范/, '图 prompt 含画法规范');
@@ -6265,7 +6309,7 @@ test('workbench: value_map merges pain/value anchors and embeds capability_map f
     const result = service.generate('crm-c1');
     await waitForJob(db, result.jobId!);
     // 规划 + 6 章节 + 2 张合法配图（两条非法 figures 条目被丢弃，不产生模型调用）。
-    assert.equal(prompts.length, 9, '规划+6章+2图共 9 次模型调用');
+    assert.equal(prompts.filter((prompt) => !prompt.includes('补充完善客户成功案例草稿')).length, 9, '规划+6章+2图；内容线索可触发一次补写');
     const draft = db.listCaseDrafts('crm-c1')[0];
     const figures = (draft.fields as any).figures ?? [];
     assert.equal(figures.length, 2, '非法条目（value_map 挂 solution、capability_map 挂 value）被丢弃');
@@ -6526,6 +6570,9 @@ test('workbench: plan salvage mode drops drifted items on final attempt instead 
           return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
         }
         // 业务诉求章的产出条数与打捞后的规划对位（漂移条目已丢弃）。
+        if (prompt.includes('补充完善客户成功案例草稿')) {
+          return { content: [{ type: 'text', text: '{"changes":[]}' }], stopReason: 'stop' };
+        }
         if (prompt.includes('「业务诉求」章节')) {
           return { content: [{ type: 'text', text: JSON.stringify({ texts: CASE_CONTENT.demands.slice(1) }) }], stopReason: 'stop' };
         }

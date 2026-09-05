@@ -1506,10 +1506,12 @@ export function buildHandler(runtime: Runtime, store: Store, workbench: Workbenc
         if (req.method === 'PATCH' && sub === '') {
           const body = await readBody(req);
           const fields = isRecord(body.fields) ? body.fields : {};
-          const draft = workbench.cases.update(draftId, Number(body.version), typeof body.title === 'string' ? body.title : undefined, fields);
-          // 写回护栏（非阻断）：编辑结果异常（条目失控/超长/内部残留）时随响应返回 warnings，由 CSM 复核。
-          const warnings = draft ? caseNarrativeWarnings(draft.fields) : [];
-          return draft ? json(res, 200, { ...draft, warnings: warnings.length ? warnings : undefined }) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
+          try {
+            const draft = workbench.cases.update(draftId, Number(body.version), typeof body.title === 'string' ? body.title : undefined, fields);
+            // 写回护栏（非阻断）：编辑结果异常时返回 warnings，由 CSM 复核。
+            const warnings = draft ? caseNarrativeWarnings(draft.fields) : [];
+            return draft ? json(res, 200, { ...draft, warnings: warnings.length ? warnings : undefined }) : json(res, 409, { error: '草稿版本已变化或不可编辑' });
+          } catch (error) { return json(res, 400, { error: (error as Error).message }); }
         }
         if (req.method === 'POST' && sub === '/publish-preview') {
           const body = await readBody(req);

@@ -4,6 +4,7 @@ import {
 } from 'docx';
 import { Resvg } from '@resvg/resvg-js';
 import type { CaseDraft } from './types.js';
+import { caseLessonsLabel, casePracticesFor } from './case-content.js';
 import {
     CASE_LEGACY_SECTIONS, caseFiguresOf, caseMilestonesOf, caseSectionTexts, caseSystemUsageOf, caseV8NarrativeOf, isV8CaseDraft,
 } from './cases.js';
@@ -123,6 +124,7 @@ export async function renderCaseDocx(draft: CaseDraft): Promise<Buffer> {
     push(heading('（三）业务解决方案', HeadingLevel.HEADING_2));
     v8.solution_sections.forEach((section, index) => {
       push(heading(`${index + 1}、${section.title || '方案举措'}`, HeadingLevel.HEADING_3), textParagraph(section.text));
+      for (const practice of casePracticesFor(draft.fields, section)) push(textParagraph(practice.text));
     });
     push(...figureBlocks(draft, 'solution'));
     push(heading('三、方案价值概述', HeadingLevel.HEADING_1));
@@ -134,7 +136,7 @@ export async function renderCaseDocx(draft: CaseDraft): Promise<Buffer> {
     push(heading('价值成效', HeadingLevel.HEADING_2));
     v8.value_items.forEach((item, index) => push(listItemParagraph(index, item)));
     if (v8.lessons.length) {
-      push(heading('经验复盘与沉淀', HeadingLevel.HEADING_2));
+      push(heading(caseLessonsLabel(draft.fields), HeadingLevel.HEADING_2));
       v8.lessons.forEach((item, index) => push(listItemParagraph(index, item)));
     }
     // value_map（痛点-方案-价值全景图）插在价值章末尾、项目总结之前，与 Markdown 渲染同位。

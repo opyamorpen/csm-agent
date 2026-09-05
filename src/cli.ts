@@ -111,7 +111,9 @@ const CLI_CAPABILITIES = [
     notes: '风险预警名单：近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs', 'GET /api/case-jobs/:id', 'POST /api/case-jobs/:id/resume'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures', 'generation_job_id'],
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures', 'generation_job_id', 'content_version', 'practice_library', 'content_review'],
+    solutionSectionFields: ['title', 'text', 'practice_ids'],
+    contentNotes: 'v19 目标 5000-8000 字；保留联网检索；七维内容线索诊断；每节可选 0-2 个 practice_ids，全篇不重复；通用实践不进入客户证据与配图输入',
     notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'case job', workflow: 'case-generation-diagnostics', access: 'read', api: ['GET /api/case-jobs/:id'],
@@ -251,6 +253,7 @@ function help(): void {
     （消除风险必须写明原因或动作，写入审计；消除后情况无新变化不重报）
   csm-agent cases [客户ID或名称] [--json]
   csm-agent case generate <客户ID或名称> [--force] [--wait]
+    （v19 行业解决方案母稿目标 5000-8000 字，素材不足可收缩；七维内容线索诊断，通用实践与配图隔离）
     （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
      业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；--wait 轮询任务到终态并实时打印生成进度）
   csm-agent case job <任务ID> [--json]
@@ -261,6 +264,7 @@ function help(): void {
     （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
+    （solution_sections 支持 {title,text,practice_ids}；每节 0-2 个实践 ID，全篇不重复，ID 目录见 case show --json 的 fields.practice_library）
     （只更新 title 与 fields 中的公开正文：v8 为公司简介三小节/项目背景/业务现状/业务诉求/方案小节/价值与复盘/项目总结及派生表 system_usage、milestones；
      客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
   csm-agent case export <草稿ID> [--out <文件路径>]
@@ -843,6 +847,11 @@ function printCaseDraft(draft: any, markdown = '', coverage?: any): void {
     console.log(`素材覆盖率：价值信号 ${valueSignals.cited}/${valueSignals.total} · 痛点信号 ${painSignals.cited}/${painSignals.total}${deliveredPart}${fallbackPart}${enriched ? ' · 已自动补充完善' : ''}`);
   }
   // v7 配图：Markdown 以图注占位（图形本体在工作台详情渲染），CLI 列出图注供审核。
+  const review = draft.fields?.content_review;
+  if (review) {
+    console.log(`内容线索 ${review.dimensions.filter((item: any) => item.status === 'covered').length}/7 · 正文 ${review.characters} 字（目标 5000-8000）· 通用实践 ${review.practiceCount} 项`);
+    for (const warning of review.warnings ?? []) console.log(`内容提醒：${warning}`);
+  }
   const figures = Array.isArray(draft?.fields?.figures) ? draft.fields.figures : [];
   if (figures.length) console.log(`配图 ${figures.length} 张：${figures.map((figure: any) => figure.caption || figure.kind).join('；')}`);
   if (markdown) console.log(`\n${markdown}`);
@@ -932,7 +941,7 @@ async function caseCommand(subcommand: string, values: string[]): Promise<void> 
     const out = inlineOptionOf(values, '--out');
     let response: Response;
     try {
-      response = await fetch(`${baseUrl}/api/case-drafts/${encodeURIComponent(draftId)}/export`);
+      response = await fetch(`${baseUrl}/api/case-drafts/${encodeURIComponent(draftId)}/export`, { headers: authHeaders() });
     } catch (error) {
       throw new Error(`无法连接 ${baseUrl}；请先运行 npm run dev。${(error as Error).message}`);
     }

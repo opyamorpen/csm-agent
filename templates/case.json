@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "客户案例 Customer Case Study（v8 四章深结构）",
+  "title": "客户案例 Customer Case Study（v19 内容增强，四章深结构）",
   "description": "每个成功案例一篇，可直接对外的四章深结构客户叙事（客户及背景介绍 → 场景及解决方案 → 方案价值概述 → 项目总结）。内部证据仅供审核，不进入公开正文。",
   "type": "object",
   "required": ["customer_id", "customer_name", "company_info", "project_background", "business_status", "demands", "solution_sections", "value_items", "summary"],
@@ -43,7 +43,8 @@
         "required": ["title", "text"],
         "properties": {
           "title": { "type": "string", "description": "20 字以内小节标题" },
-          "text": { "type": "string", "description": "250~600 字小节正文" }
+          "text": { "type": "string", "description": "500~750 字有据客户正文：场景、决策约束、管理机制与已确认变化；素材不足时收缩" },
+          "practice_ids": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "enum": ["intake-governance", "phased-adoption", "identity-lifecycle", "migration-continuity", "role-usability", "deployment-boundaries", "operating-feedback"] }, "description": "可选通用实践；全篇不重复，独立渲染，不进入客户事实或配图" }
         }
       }
     },
@@ -67,7 +68,7 @@
     "lessons": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "三 · 经验复盘与沉淀（0~3 条，可空）：只写沟通记录中有出处的复盘结论，措辞正面建设性"
+      "description": "三 · 可复制实践（v19，旧稿为经验复盘与沉淀；0~3 条，可空）：从有出处的客户做法归纳机制、适用条件和边界"
     },
     "summary": { "type": "string", "description": "四、项目总结：150~400 字收束，不引入前文未出现的新事实" },
     "claim_evidence": {

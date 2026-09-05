@@ -2845,6 +2845,7 @@
       + `- 先通读草稿并概述各章节现状与你发现的待改进点（如证据不足、叙事断裂、内部信息残留），等待我的修改意见。\n`
       + `- 修改时输出完整章节字段并调用 confirm_write（target_system=ones, record_type=case）：fields 必须原样保留 case_draft_id="${draft.id}" 和 case_version=${draft.version}，并包含 customer_id="${customer.id}"、customer_name="${customer.name}" 与完整章节字段（${sectionContract}）。\n`
       + `- 保持客户叙事视角与证据纪律：只写有证据的事实，价值与复盘不虚构数字，正文不出现内部系统名、风险评分、工时统计、联系人信息与合同金额。\n`
+      + `- solution_sections 中 practice_ids 原样保留；通用实践由服务端渲染，不得复制到 text、客户事实或配图中。新版 lessons 写有材料支撑的可复制实践，聚焦适用条件与机制。\n`
       + `- 本次会话只修改本地草稿，不得调用任何 CRM/ONES 外部写工具；发布到 ONES Wiki 由我在工作台完成。`;
     await newSession();
     showView('agent');
@@ -3802,6 +3803,14 @@
       const edit = el('button', 'quiet-command small', '编辑');
       edit.onclick = () => editCase(draft);
       buttons.append(edit);
+      const review = draft.fields?.content_review;
+      if (review) {
+        const diagnostics = el('details', 'cell-sub');
+        diagnostics.append(el('summary', null, `内容线索 ${review.dimensions.filter((item) => item.status === 'covered').length}/7 · ${review.characters} 字 · 通用实践 ${review.practiceCount} 项`));
+        for (const dimension of review.dimensions) diagnostics.append(el('div', null, `${dimension.label}：${{ covered: '有据展开', available: '素材有线索，正文待展开', missing: '未识别到有据内容' }[dimension.status]}`));
+        for (const warning of review.warnings || []) diagnostics.append(el('div', null, warning));
+        card.append(diagnostics);
+      }
       if (customerMode && customerId) {
         const refine = el('button', 'quiet-command small', '对话精修');
         refine.onclick = async () => {
@@ -3973,6 +3982,10 @@
       const sections = Array.isArray(fields.solution_sections) ? fields.solution_sections.filter((section) => section && str(section.text)) : [];
       sections.forEach((section, index) => {
         doc.append(h4(`${index + 1}、${section.title || '方案举措'}`), p(str(section.text)));
+        for (const id of section.practice_ids || []) {
+          const practice = fields.practice_library?.items?.find((item) => item.id === id);
+          if (practice) doc.append(p(practice.text));
+        }
       });
       doc.append(...figureBlocks('solution'));
       doc.append(h2('三、方案价值概述'));
@@ -3983,7 +3996,7 @@
         doc.append(h3('服务里程碑'), milestoneList, ...figureBlocks('value', 'milestone'));
       }
       doc.append(h3('价值成效'), ol(arr(fields.value_items)));
-      if (arr(fields.lessons).length) doc.append(h3('经验复盘与沉淀'), ol(arr(fields.lessons)));
+      if (arr(fields.lessons).length) doc.append(h3(fields.content_version === 'case-content-v19' ? '可复制实践' : '经验复盘与沉淀'), ol(arr(fields.lessons)));
       // value_map（痛点-方案-价值全景图）是全案收束图，位置固定在价值章末尾、项目总结之前。
       doc.append(...figureBlocks('value', 'value_map'));
       doc.append(h2('四、项目总结'), p(str(fields.summary)));
@@ -4061,17 +4074,48 @@
       const companyInfo = addField('一（一）客户简介 · 公司信息（100~250 字，仅档案与可信公开信息）', fields.company_info || '');
       const businessScope = addField('一（一）客户简介 · 核心业务范围', fields.business_scope || '');
       const strategy = addField('一（一）客户简介 · 竞争优势与发展战略', fields.competitive_strategy || '');
-      const projectBackground = addField('一（二）项目背景（200~500 字，合作动因与目标）', fields.project_background || '');
+      const projectBackground = addField('一（二）项目背景', fields.project_background || '');
       const usage = addField('一（三）系统使用情况（每行「项目：内容」，派生表可补充账号数/有效期/使用部门）',
         (fields.system_usage || []).map((row) => `${row.item}：${row.content}`).join('\n'));
       const status = addField('二（一）业务现状（每行一段，2~4 段）', (fields.business_status || []).join('\n'));
       const demands = addField('二（二）业务诉求（每行一项）', (fields.demands || []).join('\n'));
-      const solution = addField('二（三）业务解决方案（每节以「## 小节标题」行开头，随后为该节正文 250~600 字）',
-        (fields.solution_sections || []).map((section) => `## ${section.title || ''}\n${section.text}`).join('\n\n'));
+      const solutionEditor = el('div');
+      solutionEditor.append(el('h3', null, '二（三）业务解决方案'));
+      inputs.push({ field: solutionEditor });
+      const solutionRows = [];
+      const library = fields.practice_library?.items || [];
+      const addSolution = (section = { title: '', text: '' }) => {
+        const container = el('div', 'form-stack');
+        const sectionTitle = inputField('方案标题', section.title, 'text');
+        const sectionText = inputField('方案正文', section.text, 'textarea');
+        container.append(sectionTitle.field, sectionText.field);
+        const selects = [];
+        for (let i = 0; i < (library.length ? 2 : 0); i++) {
+          const label = el('label', 'form-field');
+          label.append(el('span', null, `通用实践 ${i + 1}`));
+          const select = el('select', 'draft-edit-select');
+          const empty = el('option', null, '无'); empty.value = ''; select.append(empty);
+          for (const practice of library) { const option = el('option', null, practice.title); option.value = practice.id; select.append(option); }
+          select.value = section.practice_ids?.[i] || '';
+          const preview = el('p', 'cell-sub');
+          const refreshPreview = () => { preview.textContent = library.find((item) => item.id === select.value)?.text || ''; };
+          select.onchange = refreshPreview; refreshPreview();
+          label.append(select, preview); container.append(label); selects.push(select);
+        }
+        const row = { container, sectionTitle, sectionText, selects };
+        solutionRows.push(row);
+        const remove = el('button', 'quiet-command small', '删除方案'); remove.type = 'button';
+        remove.onclick = () => { solutionRows.splice(solutionRows.indexOf(row), 1); container.remove(); };
+        container.append(remove);
+        solutionEditor.append(container);
+      };
+      for (const section of fields.solution_sections || []) addSolution(section);
+      const add = el('button', 'quiet-command small', '添加方案'); add.type = 'button'; add.onclick = () => addSolution();
+      inputs.push({ field: add });
       const milestones = addField('三 · 服务里程碑（每行「YYYY-MM 事件」，服务端派生、可增删改）',
         (fields.milestones || []).map((milestone) => `${milestone.date} ${milestone.label}`).join('\n'));
       const valueItems = addField('三 · 价值成效（每行一项；量化优先，无量化写有据定性价值）', (fields.value_items || []).join('\n'));
-      const lessons = addField('三 · 经验复盘与沉淀（每行一项，可空；只写有出处的复盘结论）', (fields.lessons || []).join('\n'));
+      const lessons = addField(fields.content_version === 'case-content-v19' ? '三 · 可复制实践' : '三 · 经验复盘与沉淀', (fields.lessons || []).join('\n'));
       const summary = addField('四、项目总结（150~400 字收束）', fields.summary || '');
       buildFields = () => ({
         company_info: companyInfo.value.trim(),
@@ -4085,12 +4129,10 @@
         business_status: lines(status),
         demands: lines(demands),
         solution_sections: (() => {
-          const sections = [];
-          for (const line of solution.value.split('\n')) {
-            if (line.startsWith('## ')) sections.push({ title: line.slice(3).trim(), text: '' });
-            else if (sections.length) sections[sections.length - 1].text += (sections[sections.length - 1].text ? '\n' : '') + line;
-          }
-          return sections.map((section) => ({ title: section.title.slice(0, 40), text: section.text.trim() })).filter((section) => section.text);
+          return solutionRows.map(({ sectionTitle, sectionText, selects }) => ({
+            title: sectionTitle.input.value.trim().slice(0, 40), text: sectionText.input.value.trim(),
+            ...(selects.length ? { practice_ids: selects.map((select) => select.value).filter(Boolean) } : {}),
+          })).filter((section) => section.text);
         })(),
         milestones: lines(milestones).map((line) => {
           const split = line.match(/^(\d{4}-\d{2}(?:-\d{2})?)\s+(.*)$/);
@@ -4127,7 +4169,10 @@
       }
       return updated;
     }
-    save.onclick = async () => { draft = await afterSave(await saveDraft()); closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases(); };
+    save.onclick = async () => {
+      try { draft = await afterSave(await saveDraft()); closeWorkbenchModal(); activeCustomerId ? openCustomer(activeCustomerId) : loadCases(); }
+      catch (error) { await alertDialog(error.message); }
+    };
     publish.onclick = async () => {
       try {
         draft = await afterSave(await saveDraft());

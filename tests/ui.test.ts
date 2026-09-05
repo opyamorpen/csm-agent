@@ -1592,7 +1592,11 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   assert.match(editCase, /一（三）系统使用情况（每行「项目：内容」/);
   assert.match(editCase, /二（一）业务现状（每行一段/);
   assert.match(editCase, /二（二）业务诉求（每行一项）/);
-  assert.match(editCase, /二（三）业务解决方案（每节以「## 小节标题」行开头/);
+  assert.match(editCase, /二（三）业务解决方案/);
+  assert.match(editCase, /solutionRows\.map/);
+  assert.match(editCase, /practice_ids: selects\.map/);
+  assert.match(editCase, /fields\.practice_library\?\.items/);
+  assert.match(editCase, /三 · 可复制实践/);
   assert.match(editCase, /三 · 服务里程碑（每行「YYYY-MM 事件」/);
   assert.match(editCase, /三 · 价值成效（每行一项/);
   assert.match(editCase, /三 · 经验复盘与沉淀/);

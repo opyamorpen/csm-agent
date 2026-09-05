@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync, execFile } from 'node:child_process';
+import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
@@ -14,6 +18,32 @@ function runCli(...args: string[]) {
     encoding: 'utf8',
   });
 }
+
+test('case export authenticates its download and preserves the response bytes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-cli-export-'));
+  const bytes = Buffer.from('isolated docx transport fixture');
+  const requests: string[] = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.url ?? '');
+    if (req.headers.authorization !== 'Bearer fixture-export-token') { res.writeHead(401); res.end('{}'); return; }
+    res.writeHead(200, { 'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    res.end(bytes);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    writeFileSync(join(dir, 'cli-auth.json'), JSON.stringify({ [base]: { token: 'fixture-export-token', username: 'fixture' } }));
+    const target = join(dir, 'case.docx');
+    await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'case', 'export', 'draft-id', '--out', target], {
+      cwd: new URL('..', import.meta.url), env: { ...process.env, CSM_DATA_DIR: dir, CSM_BASE_URL: base },
+    });
+    assert.deepEqual(requests, ['/api/case-drafts/draft-id/export']);
+    assert.deepEqual(readFileSync(target), bytes);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('package exposes the canonical global CLI and verification gate', () => {
   assert.equal(packageJson.bin?.['csm-agent'], 'dist/cli.js');
@@ -106,6 +136,9 @@ test('CLI exposes machine-readable core capability coverage without a running se
   assert.ok(capabilities.some((item) => item.workflow === 'case-drafts' && item.api.includes('POST /api/case-jobs/:id/resume')));
   const caseCapability = capabilities.find((item) => item.workflow === 'case-drafts');
   assert.deepEqual(caseCapability.editableFields, ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones']);
+  assert.deepEqual(caseCapability.solutionSectionFields, ['title', 'text', 'practice_ids']);
+  assert.ok(caseCapability.readOnlyFields.includes('practice_library') && caseCapability.readOnlyFields.includes('content_review'));
+  assert.match(caseCapability.contentNotes, /5000-8000/);
   assert.ok(caseCapability.readOnlyFields.includes('claim_evidence') && caseCapability.readOnlyFields.includes('context_snapshot') && caseCapability.readOnlyFields.includes('figures'));
   // 生成进度可见契约：case/weekly-report 能力含 draft-jobs 轮询端点与 --wait 进度说明。
   assert.ok(caseCapability.api.includes('/api/draft-jobs'));
