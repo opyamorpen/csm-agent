@@ -5,7 +5,7 @@ description: 客户案例的对话精修：基于工作台证据化生成的四�
 
 # 客户案例对话精修
 
-案例草稿由工作台后台任务生成（客户详情「生成案例」按钮或 `csm-agent case generate`）：服务端组装客户全量上下文（客户公开档案、时间线、已确认 Hemory 片段、Evidence、结构化信号、已交付记录），并按公司概况、项目管理、需求管理、知识管理、行业动态、招投标、中标采购七个角度检索公开信息，模型按四章深结构（对齐手写案例标准）产出可直接对外的完整草稿；系统使用情况表与服务里程碑由服务端从 CRM 档案与交付统计确定性派生（模型不写，防虚构）。本 skill 处理**生成之后的精修环节**。
+案例草稿由工作台后台任务生成（客户详情「生成案例」按钮或 `csm-agent case generate`）：服务端组装客户全量上下文（客户公开档案、时间线、已确认 Hemory 片段、Evidence、结构化信号、已交付记录），并按公司概况、项目管理、需求管理、知识管理、行业动态、招投标、中标采购七个角度检索公开信息，模型按四章深结构（对齐手写案例标准）产出可直接对外的完整草稿；系统使用情况表由服务端从 CRM 档案与交付统计确定性派生（模型不写，防虚构）；服务里程碑由规划模型基于已确认 Hemory 片段推理（阶段 start/completion 成对、日级日期，日期无法推理时回退引用片段发生日并降低置信度），内部证据 `milestone_evidence` 只读。本 skill 处理**生成之后的精修环节**。
 
 ## 字段契约
 
@@ -17,7 +17,7 @@ description: 客户案例的对话精修：基于工作台证据化生成的四�
 4. `business_status`（二 · （一）业务现状）：2~4 段合作前或当前的现状与痛点
 5. `demands`（二 · （二）业务诉求）：客户明确提出的功能诉求、交付要求与服务标准
 6. `solution_sections`（二 · （三）业务解决方案）：`{title, text, practice_ids?}` 数组，v19 每节事实正文目标 500~750 字。`practice_ids` 每节 0~2 个、全篇不重复；从草稿 `practice_library.items` 选择，精修默认保留原 ID，通用实践由服务端独立渲染，不得抄入 text。
-7. `milestones`（三 · 服务里程碑）：服务端派生的 `{date, label}` 时间线，CSM 可增删改
+7. `milestones`（三 · 服务里程碑）：规划模型基于已确认沟通记录推理的 `{date: YYYY-MM-DD, label}` 时间线，CSM 可增删改；人工改动后质检会提示与内部证据复核
 8. `value_items`（三 · 价值成效）：已确认价值，量化优先，无量化写有据定性价值
 9. `lessons`（三 · 可复制实践，可空；v18 及更早仍为经验复盘与沉淀）：从有出处的客户做法归纳机制、适用条件和边界，避免重复实施过程。
 10. `summary`（四、项目总结）：150~400 字收束，不引入前文未出现的新事实
@@ -31,7 +31,7 @@ description: 客户案例的对话精修：基于工作台证据化生成的四�
 3. 完成后调用 `confirm_write`：
    - `target_system=ones`，`record_type=case`
    - `fields` 必须包含 `case_draft_id`（原样带回）、`case_version`（原样带回）、`customer_id`、`customer_name` 与完整章节字段（含未修改章节的原文；`system_usage`/`milestones` 未被要求修改时原样带回）
-   - 不提交或改写 `claim_evidence`、`figures`（配图）、`context_snapshot`、`web_search`、`unknowns`、客户绑定等内部字段；服务端会原样保留
+   - 不提交或改写 `claim_evidence`、`figures`（配图）、`milestone_evidence`（里程碑内部证据）、`context_snapshot`、`web_search`、`unknowns`、客户绑定等内部字段；服务端会原样保留
 4. CSM 批准后，服务端只把标题与各章公开正文写回 `case_drafts`（本地草稿更新，版本+1）；这不是外部系统写入。正文改写后如不再与原逐条证据完全对应，公开检查会给出警告，CSM 应逐条复核或重新生成。
 
 ## 写作纪律

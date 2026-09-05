@@ -1605,7 +1605,7 @@ test('case narrative generation contract: v8 chapter editor, refine entry, singl
   assert.match(editCase, /practice_ids: selects\.map/);
   assert.match(editCase, /fields\.practice_library\?\.items/);
   assert.match(editCase, /三 · 可复制实践/);
-  assert.match(editCase, /三 · 服务里程碑（每行「YYYY-MM 事件」/);
+  assert.match(editCase, /三 · 服务里程碑（每行「YYYY-MM-DD 事件」，基于沟通记录推理、可增删改）/);
   assert.match(editCase, /三 · 价值成效（每行一项/);
   assert.match(editCase, /三 · 经验复盘与沉淀/);
   assert.match(editCase, /四、项目总结/);

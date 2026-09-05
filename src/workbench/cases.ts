@@ -17,10 +17,12 @@ import { findFigureEdgeTextOverlaps, relayerFigureEdges, styleCaseFigureSvg } fr
 import { ONES_CAPABILITY_MAP, ONES_PLATFORM_CAPABILITIES, ONES_STANDARD_INTEGRATIONS, ONES_KNOWLEDGE_DIGEST } from './case-ones-knowledge.js';
 import { CASE_CONTENT_VERSION, CASE_CONTENT_DIMENSIONS, caseContentReview, caseLessonsLabel, casePracticeLibrary, casePracticesFor, validatePracticeIds, type CaseContentReview } from './case-content.js';
 
-/** v19: evidence-backed depth and isolated reusable practices; v17 figure contracts remain.
+/** v20: service milestones are inferred by the planning model from confirmed Hemory
+ * fragments (stage start/completion pairs, day-level dates, fragment-occurred-at fallback);
+ * v19 evidence-backed depth and v17 figure contracts remain.
  * Prompt changes advance this version; ONES knowledge changes are independently hashed
  * into both draft fingerprints and resumable model signatures. */
-export const CASE_GENERATION_VERSION = 'case-v19-content-depth';
+export const CASE_GENERATION_VERSION = 'case-v20-hemory-milestones';
 
 /** 三张结构化图的规范图名（用户拍板统一叫法）：生成时服务端把 caption 确定性覆盖为规范名，
  * 系统内展示与导出 Word 的「图：…」图注随之统一；流程/里程碑图沿用模型图注（图内已有标题牌）。 */
@@ -76,10 +78,24 @@ export interface CaseSystemUsageRow {
   content: string;
 }
 
-/** 服务里程碑（服务端从已交付事件确定性挑选，CSM 可编辑；LLM 不写）。 */
+/** 服务里程碑公开节点：规划模型基于已确认 Hemory 片段推理（v20），CSM 可编辑。 */
 export interface CaseMilestone {
   date: string;
   label: string;
+}
+
+/** 里程碑内部证据（只读落库字段 milestone_evidence）：规划产物按节点保留阶段、phase、来源、
+ * 摘录、置信度与日期依据；公开 Markdown/Web/CLI/Word 只消费 {date, label} 投影。
+ * date_basis 仅在日期无法推理、回退为引用片段发生日时标记。 */
+export interface CaseMilestoneEvidence {
+  stage: string;
+  phase: 'start' | 'completion';
+  date: string;
+  label: string;
+  source_refs: string[];
+  excerpt?: string;
+  confidence?: number;
+  date_basis?: 'fragment_occurred_at';
 }
 
 export type CaseSectionKey = CaseChapterKey | keyof CaseNarrativeFields;
@@ -256,6 +272,9 @@ interface CasePlan {
   /** v17：规划期从素材提取的集成系统清单（≤6、仅名称、逐字来自素材原文）——解决方案架构图
    * 「系统集成」带与系统集成架构图 systems 的单一事实源；为空时不画系统集成架构图。 */
   integrationSystems: string[];
+  /** v20：规划模型从已确认 Hemory 片段推理的服务里程碑（阶段 start/completion 成对、日级日期）。
+   * 公开 fields.milestones 是其 {date,label} 投影，内部 fields.milestone_evidence 原样落库（只读）。 */
+  milestones?: CaseMilestoneEvidence[];
   unknowns?: string[];
 }
 
@@ -673,6 +692,35 @@ export function caseMilestonesOf(fields: Record<string, unknown>): CaseMilestone
   });
 }
 
+/** 读取内部里程碑证据（v20 只读字段 milestone_evidence；存量缺失返回空数组）。 */
+export function caseMilestoneEvidenceOf(fields: Record<string, unknown> | undefined): CaseMilestoneEvidence[] {
+  if (!fields || !Array.isArray(fields.milestone_evidence)) return [];
+  return fields.milestone_evidence.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const stage = typeof row.stage === 'string' ? row.stage.trim() : '';
+    const phase = row.phase === 'start' || row.phase === 'completion' ? row.phase : undefined;
+    const date = typeof row.date === 'string' ? row.date.trim().slice(0, 10) : '';
+    const label = typeof row.label === 'string' ? row.label.trim().slice(0, 80) : '';
+    const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).filter(Boolean) : [];
+    if (!stage || !phase || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !label || !refs.length) return [];
+    return [{
+      stage, phase, date, label, source_refs: refs,
+      excerpt: typeof row.excerpt === 'string' ? row.excerpt : undefined,
+      confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : undefined,
+      date_basis: row.date_basis === 'fragment_occurred_at' ? 'fragment_occurred_at' : undefined,
+    }];
+  });
+}
+
+/** 内部里程碑证据 → 公开 {date,label} 投影：按日期升序（同日 start 先于 completion），截节点上限。 */
+export function caseMilestonesFromEvidence(evidence: CaseMilestoneEvidence[]): CaseMilestone[] {
+  return [...evidence]
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.phase === b.phase ? 0 : a.phase === 'start' ? -1 : 1))
+    .slice(0, CASE_MILESTONE_LIMIT)
+    .map((node) => ({ date: node.date, label: node.label }));
+}
+
 /**
  * 客户版 Markdown 的唯一权威渲染（Web 复制、Wiki 发布正文、CLI 默认输出均复用本函数产物，
  * 不允许任何一端自行拼装第二份格式）。v8：四章深结构（一、客户及背景介绍（一~三子节，含系统使用情况表）
@@ -1085,39 +1133,10 @@ export function caseSystemUsageRows(customer: Customer, stats: CaseDeliveryStats
   return { rows, missing: [...CASE_SYSTEM_USAGE_SUGGESTED_ROWS] };
 }
 
-/** 里程碑上限：合作起点 + 各类交付首单 + 私有云部署，通常 5 条以内；超过按时间截尾。 */
+/** 里程碑节点上限：阶段 × start/completion 两节点（v20：里程碑由规划模型基于已确认 Hemory 片段推理）。 */
 const CASE_MILESTONE_LIMIT = 8;
-
-/**
- * 服务端派生「服务里程碑」时间线（v8，确定性）：合作起点（最早 confirmed 事件）+ 各交付类别的首个闭环事件
- * + 首个私有云实例，日期取年月、标签取事件标题（可被 CSM 编辑）。LLM 不写里程碑（防虚构）。
- * 少于 2 条视为素材不足返回空数组（渲染时整节约略）。
- */
-export function caseMilestoneEvents(input: { timeline: SourceEvent[]; hemory: SourceEvent[] }): CaseMilestone[] {
-  const confirmed = [...input.timeline, ...input.hemory].filter((event) => event.attributionStatus === 'confirmed');
-  if (!confirmed.length) return [];
-  const byDate = [...confirmed].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-  const picks: CaseMilestone[] = [{ date: byDate[0].occurredAt.slice(0, 7), label: '合作启动（据最早服务记录）' }];
-  const delivered = confirmed.filter((event) => event.sourceSystem === 'ones' && isDeliveredOnesEvent(event))
-    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-  for (const sourceType of ['suggestion_feedback', 'support_ticket', 'operations_ticket', 'private_cloud_instance']) {
-    const first = sourceType === 'private_cloud_instance'
-      ? [...confirmed].filter((event) => event.sourceSystem === 'ones' && event.sourceType === sourceType)
-        .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))[0]
-      : delivered.find((event) => event.sourceType === sourceType);
-    if (!first) continue;
-    const label = sourceType === 'private_cloud_instance' ? '私有云实例部署' : `${CASE_STATS_CATEGORY_LABELS[sourceType] ?? sourceType}首个闭环`;
-    picks.push({ date: first.occurredAt.slice(0, 7), label: `${label}：${first.title.replace(/\s+/g, ' ').trim().slice(0, 30)}` });
-  }
-  const seen = new Set<string>();
-  const unique = picks.filter((item) => {
-    const key = `${item.date}|${item.label}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return unique.length >= 2 ? unique.sort((a, b) => a.date.localeCompare(b.date)).slice(0, CASE_MILESTONE_LIMIT) : [];
-}
+/** 里程碑服务阶段上限（每阶段恰好 start/completion 两个单日期节点）。 */
+const CASE_MILESTONE_STAGE_LIMIT = 4;
 
 function buildContextSnapshot(input: CasePromptInput): CaseContextSnapshot {
   const generatedAt = new Date().toISOString();
@@ -1256,6 +1275,9 @@ function renderInputBlocks(input: CasePromptInput, snapshot: CaseContextSnapshot
   const perFragment = Math.max(400, Math.floor(budget.transcriptBudget / Math.max(1, fragments.length)));
   const communications = fragments.map((event) => ({
     id: event.id, occurred_at: event.occurredAt, topic: event.title, recording_id: String(event.payload?.recordingId ?? ''),
+    // 片段起止时刻（v20）：服务里程碑的日期推理锚点——模型据 occurred_at/start_at/end_at 判定阶段发生日。
+    start_at: typeof event.payload?.startAt === 'string' ? event.payload.startAt : '',
+    end_at: typeof event.payload?.endAt === 'string' ? event.payload.endAt : '',
     speakers: Array.isArray(event.payload?.speakers) ? event.payload.speakers.map(String) : [],
     summary: typeof event.payload?.summary === 'string' ? event.payload.summary : '',
     transcript: textOf(event).slice(0, perFragment),
@@ -1352,7 +1374,7 @@ async function summarizeCaseInput(runtime: Runtime, input: CasePromptInput, mate
   const prompt = `以下是客户「${input.customer.name}」案例生成的全部素材上下文（JSON）。素材总量超出模型输入预算，需要你压缩为一份保真的分块摘要，供后续案例写作使用。\n`
     + `要求：\n`
     + `- 输出纯文本摘要（非 JSON）：按素材块分组（communications 转写、records CRM 记录、crm_followups 跟进、各 signal 信号、web_context 公开信息），每块先写「# 块名」，块内逐 source_ref 归并要点。\n`
-    + `- 必须保留每个素材条目的 source_ref ID（形如 xxxxxxxx-xxxx 的 ID 或 customer:/stats:/web: 前缀 ID）与日期、状态、说话人角色——这些是后续引用与摘录校验的锚点，丢失即无法对位。\n`
+    + `- 必须保留每个素材条目的 source_ref ID（形如 xxxxxxxx-xxxx 的 ID 或 customer:/stats:/web: 前缀 ID）与日期、状态、说话人角色——这些是后续引用与摘录校验的锚点，丢失即无法对位。communications 片段的 occurred_at 日期必须逐条保留（服务里程碑的日期推理依赖片段发生日）。\n`
     + `- 客户原话（痛点/诉求/正面反馈）尽量保留原句或压缩句；数字、日期、状态、规模逐字保留。\n`
     + `- 不新增任何素材中没有的事实，不推测。\n`
     + `素材：${materialText}`;
@@ -1379,7 +1401,8 @@ function renderSummaryContext(summary: string, snapshot: CaseContextSnapshot): s
   const fragments = ranked.filter((item) => item.source_system === 'hemory').slice(0, SUMMARY_CATALOG_FRAGMENT_LIMIT);
   const rest = ranked.filter((item) => item.source_system !== 'hemory').slice(0, SUMMARY_CATALOG_ROW_LIMIT);
   const catalog = [...fragments, ...rest].map((item) => ({ source_ref: item.id, title: item.title, excerpt: item.excerpt,
-    speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type }));
+    speaker_lines: item.speaker_lines, status_category: item.status_category, source_type: item.source_type,
+    ...(item.source_system === 'hemory' ? { occurred_at: item.occurred_at.slice(0, 10) } : {}) }));
   return JSON.stringify({
     input_summary: summary,
     source_catalog: catalog,
@@ -1390,6 +1413,129 @@ function renderSummaryContext(summary: string, snapshot: CaseContextSnapshot): s
 
 /** 章节规划 prompt 的共用说明（规划与逐章生成共用同一份契约说明）。 */
 const CASE_SYSTEM_PROMPT = '你是 ONES 客户成功案例撰写助手。你产出的是经 CSM 审核后用于对外复用的客户成功案例正文：只能基于用户提供的证据写作，客观克制、客户叙事视角，不执行任何工具或外部写入。';
+
+/** 规划期服务里程碑校验（v20）：模型从已确认 Hemory 片段推理服务阶段，每阶段恰好 start/completion
+ * 两个单日期节点（YYYY-MM-DD，开始不得晚于完成）。只允许引用 Hemory 片段来源且摘录必须逐字可定位
+ * （与章节条目同一口径，含全量转写兜底查找）。日期无法解析/缺失时回退该节点引用片段的最早发生日
+ * （date_basis=fragment_occurred_at、置信度压低、unknowns 复核提示）——不回退 ONES 事件，也不回退
+ * 全局最早服务记录。严格模式（第 1~3 次尝试）违规整份拒绝走规划重试；salvage（第 4 次）丢弃违规
+ * 阶段并记录原因。空产物允许（案例继续生成，不渲染里程碑节）。 */
+function parsePlanMilestones(value: unknown, allowedRefs: Set<string>, sources: CaseEvidenceSnapshotItem[],
+  communications: CaseCommunicationSource[] | undefined, salvage: boolean, unknowns: string[]): CaseMilestoneEvidence[] {
+  const rawList = Array.isArray(value) ? value : [];
+  if (!rawList.length) {
+    unknowns.push('服务里程碑：已确认沟通记录不足以推理出成对的服务阶段节点，未生成里程碑（可由 CSM 在工作台手工补充）');
+    return [];
+  }
+  const sourceMap = new Map(sources.map((item) => [item.id, item]));
+  const problems: string[] = [];
+  const dropped: string[] = [];
+  const nodes: CaseMilestoneEvidence[] = [];
+  const seen = new Set<string>();
+  for (const entry of rawList) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const row = entry as Record<string, unknown>;
+    const stage = typeof row.stage === 'string' ? row.stage.replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+    const phase = String(row.phase ?? '');
+    const label = typeof row.label === 'string' ? row.label.replace(/\s+/g, ' ').trim() : '';
+    if (!stage || (phase !== 'start' && phase !== 'completion')) {
+      problems.push('存在阶段名缺失或 phase 不是 start/completion 的里程碑节点');
+      continue;
+    }
+    if (seen.has(`${stage}|${phase}`)) {
+      problems.push(`阶段「${stage}」的 ${phase === 'start' ? '开始' : '完成'}节点重复`);
+      continue;
+    }
+    const refs = Array.isArray(row.source_refs) ? row.source_refs.map(String).map((ref) => resolveCaseSourceRef(ref.trim(), allowedRefs)).filter(Boolean) : [];
+    const supported = refs.map((ref) => sourceMap.get(ref)).filter((source): source is CaseEvidenceSnapshotItem =>
+      !!source && source.source_system === 'hemory');
+    if (!refs.length || supported.length !== refs.length) {
+      problems.push(`里程碑「${stage}（${phase}）」引用了非 Hemory 片段来源`);
+      continue;
+    }
+    const excerpt = typeof row.excerpt === 'string' ? row.excerpt.trim() : '';
+    if (!excerpt || !supported.some((source) => sourceSupportsExcerpt(source, excerpt, communications))) {
+      problems.push(`里程碑「${stage}（${phase}）」缺少原文摘录或摘录未在引用片段中找到`);
+      continue;
+    }
+    // 日期归一为日级：接受 YYYY-MM-DD 或 ISO 前缀，日历合法性用 UTC 回读比对；相对日期一律不收。
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(typeof row.date === 'string' ? row.date.trim() : '');
+    const dayOf = (y: string, m: string, d: string) => {
+      const probe = new Date(`${y}-${m}-${d}T00:00:00Z`);
+      return probe.getUTCFullYear() === Number(y) && probe.getUTCMonth() === Number(m) - 1 && probe.getUTCDate() === Number(d)
+        ? `${y}-${m}-${d}` : null;
+    };
+    const date = match ? dayOf(match[1], match[2], match[3]) : null;
+    const confidence = Number.isFinite(Number(row.confidence)) ? Math.max(0, Math.min(1, Number(row.confidence))) : undefined;
+    let node: CaseMilestoneEvidence;
+    if (date) {
+      node = { stage, phase, date, label, source_refs: refs, excerpt, confidence };
+    } else {
+      const fallback = supported.map((source) => source.occurred_at.slice(0, 10)).filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day)).sort()[0];
+      if (!fallback) {
+        problems.push(`里程碑「${stage}（${phase}）」日期无法解析且引用片段缺少发生日`);
+        continue;
+      }
+      node = { stage, phase, date: fallback, label, source_refs: refs, excerpt,
+        confidence: Math.min(confidence ?? 0.3, 0.3), date_basis: 'fragment_occurred_at' };
+      unknowns.push(`服务里程碑「${stage}」${phase === 'start' ? '开始' : '完成'}日期无法从素材推理，已回退为引用片段发生日 ${fallback}，请复核`);
+    }
+    seen.add(`${stage}|${phase}`);
+    nodes.push(node);
+  }
+  // 阶段配对：同 stage 必须同时有 start+completion；按阶段最早节点日期排序稳定时间线顺序。
+  const byStage = new Map<string, CaseMilestoneEvidence[]>();
+  for (const node of nodes) {
+    const list = byStage.get(node.stage) ?? [];
+    list.push(node);
+    byStage.set(node.stage, list);
+  }
+  const stageOrder = [...byStage.entries()]
+    .map(([stage, list]) => ({ stage, list, at: list.map((node) => node.date).sort()[0] }))
+    .sort((a, b) => a.at.localeCompare(b.at));
+  let kept = stageOrder;
+  if (stageOrder.length > CASE_MILESTONE_STAGE_LIMIT) {
+    const excess = stageOrder.slice(CASE_MILESTONE_STAGE_LIMIT).map((entry) => entry.stage);
+    if (!salvage) problems.push(`服务里程碑阶段超过 ${CASE_MILESTONE_STAGE_LIMIT} 个上限（${excess.join('、')}）`);
+    else {
+      dropped.push(`超出 ${CASE_MILESTONE_STAGE_LIMIT} 个阶段上限被丢弃：${excess.join('、')}`);
+      kept = stageOrder.slice(0, CASE_MILESTONE_STAGE_LIMIT);
+    }
+  }
+  const paired: CaseMilestoneEvidence[] = [];
+  for (const { stage, list } of kept) {
+    const start = list.find((node) => node.phase === 'start');
+    const completion = list.find((node) => node.phase === 'completion');
+    if (!start || !completion) {
+      dropped.push(`阶段「${stage}」缺少${!start ? '开始' : '完成'}节点，不成对整阶段丢弃`);
+      continue;
+    }
+    if (start.date > completion.date) {
+      if (!salvage) { problems.push(`里程碑阶段「${stage}」开始日期 ${start.date} 晚于完成日期 ${completion.date}`); continue; }
+      dropped.push(`阶段「${stage}」开始日期晚于完成日期，整阶段丢弃`);
+      continue;
+    }
+    // 标签归一：空标签回退阶段名；同阶段两标签相同则补（启动）/（完成），保证客户能看出开始/完成含义。
+    const normalizeLabel = (text: string) => (text || stage).slice(0, 80);
+    const startLabel = normalizeLabel(start.label);
+    const completionLabel = normalizeLabel(completion.label);
+    paired.push(
+      startLabel === completionLabel
+        ? { ...start, label: `${startLabel}（启动）`.slice(0, 80) }
+        : { ...start, label: startLabel },
+      startLabel === completionLabel
+        ? { ...completion, label: `${completionLabel}（完成）`.slice(0, 80) }
+        : { ...completion, label: completionLabel },
+    );
+  }
+  if (problems.length && !salvage) {
+    throw new Error(`milestones 存在违规条目：${[...new Set(problems)].slice(0, 3).join('；')}——里程碑只能引用已确认沟通片段（communications）并附逐字摘录，每阶段恰好 start/completion 两个 YYYY-MM-DD 日期节点（开始不得晚于完成），至多 ${CASE_MILESTONE_STAGE_LIMIT} 个阶段；素材不足时输出空数组`);
+  }
+  if (dropped.length) unknowns.push(`规划期 ${dropped.length} 个里程碑节点因校验不通过被丢弃（末次尝试打捞模式）：${dropped.join('；')}`);
+  const limited = paired.slice(0, CASE_MILESTONE_LIMIT);
+  if (!limited.length) unknowns.push('服务里程碑：规划产物未形成任何成对阶段节点，未渲染服务里程碑（可由 CSM 手工补充）');
+  return limited;
+}
 
 /** 规划产物契约校验：六章节齐全且条目形态合规、source_refs 合法；excerpt 必须能在来源原文定位
  * （与组装后的 parseCaseContent 同一口径——规划期即拦截摘录漂移，让规划重试真正兜住，
@@ -1567,6 +1713,11 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
   if (integrationInvalid.length && options.salvage) {
     unknowns.push(`规划期 ${integrationInvalid.length} 个集成系统名称未通过校验被丢弃（打捞模式），集成清单以保留项为准`);
   }
+  // 服务里程碑（v20）：规划模型从已确认 Hemory 片段推理服务阶段（start/completion 成对、日级日期）。
+  // ONES 不参与日期生成；日期无法推理时回退引用片段发生日（date_basis 标记），不回退全局最早服务记录。
+  const milestones = sources?.length
+    ? parsePlanMilestones(raw.milestones, allowedRefs, sources, communications, !!options.salvage, unknowns)
+    : [];
   // 配图骨架：非法条目直接丢弃（配图是可选增强，不值得为它触发整份规划重试）；每 kind 至多 1 张、总量至多 6 张（六类图可共存）。
   const figures: PlanFigure[] = [];
   if (Array.isArray(raw.figures)) {
@@ -1592,7 +1743,8 @@ function parseCasePlan(value: unknown, allowedRefs: Set<string>, sources?: CaseE
       figures.push({ section, kind, idea, source_refs: refs });
     }
   }
-  return { title, plan, figures: figures.length ? figures : undefined, integrationSystems, unknowns };
+  return { title, plan, figures: figures.length ? figures : undefined, integrationSystems,
+    milestones: milestones.length ? milestones : undefined, unknowns };
 }
 
 /** SVG 标签白名单：只保留静态绘制元素——script/foreignObject/动画/引用外部资源的元素一律不在名单内。 */
@@ -1760,7 +1912,7 @@ function parseChapterOutput(section: CaseChapterKey, value: unknown): ChapterOut
 async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot, contextText: string,
   communications: CaseCommunicationSource[], run: CaseGenerationRun, onProgress?: (text: string) => void): Promise<CasePlan> {
   const prompt = `为客户「${input.customer.name}」规划客户成功案例草稿的章节结构。这份案例经 CSM 审核后用于对外展示（深度长文：客户及背景介绍 → 场景及解决方案 → 方案价值概述 → 项目总结）。你只做规划不写正文，只输出 JSON：\n`
-    + `{"title":"...","plan":[{"section":"intro|status|demands|solution|value|summary","items":[{"slot":"intro/value 章需要","idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"integrationSystems":["OA 系统"],"figures":[{"section":"status|demands|solution|value","kind":"flow_current|flow_target|architecture|milestone","idea":"这张图画什么","source_refs":["..."]}],"unknowns":["..."]}\n`
+    + `{"title":"...","plan":[{"section":"intro|status|demands|solution|value|summary","items":[{"slot":"intro/value 章需要","idea":"本条写作要点的简明描述（非最终正文）","excerpt":"支持该要点的原文摘录","source_refs":["上下文中的 source_ref"],"speaker_role":"customer|csm|unknown","status_category":"done|in_progress|to_do|unknown","confidence":0.0}]}],"integrationSystems":["OA 系统"],"milestones":[{"stage":"服务阶段名","phase":"start|completion","date":"YYYY-MM-DD","label":"节点标签","source_refs":["hemory片段id"],"excerpt":"原文摘录","confidence":0.0}],"figures":[{"section":"status|demands|solution|value","kind":"flow_current|flow_target|architecture|milestone","idea":"这张图画什么","source_refs":["..."]}],"unknowns":["..."]}\n`
     + `规划规则：\n`
     + `- 先在思考中通读素材再输出：思考从简（只做章节路由与证据挑选判断），plan JSON 是唯一交付物。\n`
     + `- 六个章节都必须有条目：intro 恰好 4 条且按 slot 顺序 company_info（公司信息）/business_scope（核心业务范围）/competitive_strategy（竞争优势与发展战略）/project_background（项目背景）；status 2~4 条（每条一段现状/痛点）；demands 3~6 条；solution 2~6 条（每条一个方案级举措小节）；value 2~6 条（slot=value）另可加 0~3 条复盘条目（slot=lesson，合作过程中的研讨与优化结论）；summary 恰好 1 条。素材不足时允许在下限以内收缩、宁少勿注水，没有把握写入的素材收进 unknowns。\n`
@@ -1771,7 +1923,8 @@ async function planCaseWithModel(runtime: Runtime, input: CasePromptInput, snaps
     + `- 每个条目必须绑定真实 source_refs 与一段 excerpt 原文摘录（60 字以内，从对应来源的 title/excerpt/事实原文中连续逐字截取，不得改写拼接）；摘录是后续正文逐字校验的锚点。\n`
     + `- 客户简介三小节（intro 前三槽）的摘录必须真的可抄：优先逐字取 customer 档案行（如「客户名称：…；行业：…」）或 web_context snippet 中的完整原句；档案与检索都查不到的信息（成立年份、规模、排名等具体事实）不得凭常识补写来源——对应小节写基于档案的收缩要点，缺失信息收进 unknowns（服务端会把无法定位摘录的简介/总结条目回退到档案锚点，但凭常识编造的事实仍会被公开检查标记）。\n`
     + `- integrationSystems（集成系统清单）：通读素材（重点 communications 片段转写）中提到 集成/打通/同步/对接/联动/接口/导入/单点登录/统一认证 的表述，列出明确要与本方案集成的**外部系统名称**——只写系统名称（如「OA 系统」「费控系统」）、逐字使用素材原文中的称谓、至多 6 个、不含 ONES/Hemory/CRM；名称必须能在素材原文中逐字找到（服务端校验）。没有明确的集成表述时输出空数组。\n`
-    + `- 配图（figures）：capability_map=解决方案架构图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序横排、ONES 模块与能力按场景列对位，idea 写明场景顺序与对应能力主线）；value_map=方案价值图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序一一对位，方案区由服务端嵌入解决方案架构图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当 integrationSystems 非空时才在 capability_map 之外加画——此时解决方案章共两张图，systems 必须与 integrationSystems 完全一致，idea 写明各系统的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实由服务端交付统计提供）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
+    + `- milestones（服务里程碑）：从 communications 片段（含 occurred_at/片段起止时刻与转写中提到的日期）推理合作的服务阶段——如合作启动、试点验证、平台上线、推广深化，至多 4 个阶段；每阶段恰好 start/completion 两个节点，date 为 YYYY-MM-DD（开始不得晚于完成，同日允许），label 写客户能看出开始/完成含义的短标签；只能引用 hermory 片段 id 并附逐字摘录（摘录含日期表述时优先选带日期的原句）；日期无法从素材确定时该节点 date 输出空字符串（服务端将回退为引用片段发生日并降低置信度）；不得依据 ONES 交付统计、CRM 跟进或其他来源推日期；沟通素材不足以推理阶段时输出空数组。\n`
+    + `- 配图（figures）：capability_map=解决方案架构图（业务解决方案章标配——只要方案章有举措就规划：客户需求场景按业务先后顺序横排、ONES 模块与能力按场景列对位，idea 写明场景顺序与对应能力主线）；value_map=方案价值图（方案价值概述章末尾标配——痛点与价值成效条目具备即规划：痛点与价值按序一一对位，方案区由服务端嵌入解决方案架构图、模型不画方案区，source_refs 绑定痛点/价值来源）；architecture=系统集成架构图（业务解决方案章，仅当 integrationSystems 非空时才在 capability_map 之外加画——此时解决方案章共两张图，systems 必须与 integrationSystems 完全一致，idea 写明各系统的数据流向）；此外素材中还有客户用一段话描述的流程（现状流程/期望流程）或值得呈现的合作里程碑时再加画——flow_current=现状流程（业务现状/业务诉求章）、flow_target=目标流程（业务现状/业务诉求章）、milestone=服务里程碑时间轴（方案价值概述章，节点事实来自本次规划的 milestones 字段——milestones 为空时勿规划此图）；至多 6 张、每 kind 至多 1 张，每张绑定支撑该图的 source_refs；除两张标配图外其余图无合适素材就省略，宁缺毋滥。\n`
     + `- 章节路由：客户简介三小节（company_info/business_scope/competitive_strategy）只取客户档案与 web_context 可信公开信息（customer_official、government_procurement 优先，media 只能辅助）；项目背景取合作动因（档案、早期沟通记录、招采与政策类公开信息）；业务现状必须是合作前或当前问题；诉求是客户明确诉求；方案条目须有沟通记录或 CRM 跟进中的交付事实支撑、或 delivery_stats 佐证——讨论、计划和待办不得写成已交付；价值与复盘条目必须来自客户说话人或可复核指标，价值发生在方案落地之后、复盘发生在合作期间。\n`
     + `- 信号表兜底：pain_point_signals/value_signals 是关键词预扫描的线索而非全集——若在 communications 片段原文中发现未被收录、但确属客户痛点或方案落地后价值反馈的表述，可直接引用该片段（source_ref 取片段 id）建条目，不受信号表限制，摘录从片段原文逐字截取。\n`
     + `- 公开检索信息只能依据 snippet 中可直接核验的事实；customer_official、government_procurement（以及旧版 official）可用于客户简介/项目背景/正式要求，media 只能辅助背景。标题命中客户名不能单独成文，同名或业务不符结果必须丢弃。\n`
@@ -2031,8 +2184,8 @@ async function generateFigureWithModel(runtime: Runtime, input: CasePromptInput,
     return source ? [`[${ref}] ${source.title}\n${source.excerpt}`] : [];
   });
   if (figure.kind === 'milestone') {
-    if (!milestones.length) return null; // 无派生里程碑事实可画，直接放弃该图
-    materials.unshift(`[milestones] 服务端派生的合作里程碑清单（时间轴节点的唯一事实来源，日期与标签逐项对应）：\n${milestones.map((item) => `- ${item.date} ${item.label}`).join('\n')}`);
+    if (!milestones.length) return null; // 无里程碑事实可画，直接放弃该图
+    materials.unshift(`[milestones] 基于已确认沟通记录推理的合作里程碑清单（时间轴节点的唯一事实来源，日期与标签逐项对应）：\n${milestones.map((item) => `- ${item.date} ${item.label}`).join('\n')}`);
   }
   if (!materials.length) return null; // 规划引用的来源已不可解析（如降级摘要后），直接放弃该图
   const prompt = buildCaseFigurePrompt({
@@ -2265,13 +2418,13 @@ export function createCaseProgressLog(write: (text: string) => void): (text: str
  * 2. 规划章节骨架（plan，一次小 JSON 调用，注入全量上下文）；
  * 3. 章节按波次并行撰写（波间串行保前序锚点；章节注入瘦身形态——只带写作素材不带规划脚手架）；
  * 4. 配图流水线：单章定稿立即开画（不等兄弟章节，限并发），与后续波次重叠；
- * 5. 服务端派生系统使用情况表与服务里程碑（LLM 不写，防虚构）；
+ * 5. 服务端派生系统使用情况表（LLM 不写，防虚构）；服务里程碑由规划阶段从已确认 Hemory 片段推理（v20）；
  * 6. 服务端组装 + 全套公开契约校验（含摘录逐字校验）——只依赖章节正文，先于收图完成；
  * 7. 覆盖度补写只输出变更条目，与剩余配图并行；改变正文锚点时同步更新关联配图。
  * 返回 inputSummary/contextText/coverage 供 process 落库（input_summary 降级轨迹、补写上下文与覆盖度审计）。
  */
 async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, snapshot: CaseContextSnapshot,
-  run: CaseGenerationRun, onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; figures: CaseFigure[]; inputSummary: Record<string, unknown> | null; contextText: string; coverage: CaseCoverage; enriched: boolean; systemUsage: { rows: CaseSystemUsageRow[]; missing: string[] }; milestones: CaseMilestone[] }> {
+  run: CaseGenerationRun, onProgress?: (text: string) => void): Promise<{ content: ParsedCaseContent; figures: CaseFigure[]; inputSummary: Record<string, unknown> | null; contextText: string; coverage: CaseCoverage; enriched: boolean; systemUsage: { rows: CaseSystemUsageRow[]; missing: string[] }; milestones: CaseMilestone[]; milestoneEvidence: CaseMilestoneEvidence[] }> {
   const startedAt = Date.now();
   const stamped = onProgress ? (text: string) => onProgress(`${elapsedStamp(startedAt)} ${text}`) : undefined;
   const finishChapters = run.scheduler.beginChapters();
@@ -2279,12 +2432,15 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
   try {
     const communications = caseCommunicationSources(input);
     const { contextText, chapterContextText, inputSummary } = await prepareCaseInput(runtime, input, snapshot, run, stamped);
-    // 服务端派生数据（确定性，LLM 不写）：系统使用情况表 + 服务里程碑。
+    // 服务端派生数据（确定性，LLM 不写）：系统使用情况表。服务里程碑自 v20 起由规划模型
+    // 从已确认 Hemory 片段推理（阶段 start/completion 成对），不再由 ONES/最早事件确定性派生。
     const stats = caseDeliveryStats(input);
     const systemUsage = caseSystemUsageRows(input.customer, stats);
-    const milestones = caseMilestoneEvents(input);
     stamped?.('规划章节结构…');
     const plan = await planCaseWithModel(runtime, input, snapshot, contextText, communications, run, stamped);
+    // 里程碑取规划产物：内部证据原样落库（milestone_evidence 只读），公开时间线是其 {date,label} 投影。
+    const milestoneEvidence = plan.milestones ?? [];
+    const milestones = caseMilestonesFromEvidence(milestoneEvidence);
     const chapters = new Map<CaseChapterKey, ChapterOutput>();
     const priorChapters: Array<{ label: string; text: string }> = [];
     // All case jobs share two slots. While chapters remain, figures occupy at most one.
@@ -2404,7 +2560,7 @@ async function proposeCaseWithModel(runtime: Runtime, input: CasePromptInput, sn
         figures = finalFigures;
       }
     }
-    return { content, figures, inputSummary, contextText, coverage, enriched, systemUsage, milestones };
+    return { content, figures, inputSummary, contextText, coverage, enriched, systemUsage, milestones, milestoneEvidence };
   } finally {
     finishChapters();
     // No abandoned figure may keep writing checkpoints after the job has become terminal.
@@ -2743,6 +2899,13 @@ export function caseNarrativeWarnings(fields: Record<string, unknown>): string[]
   ];
   for (const guard of pseudoGuards) {
     if (guard.items.some((item) => item && /待确认|待补充|\bunknown\b/i.test(item))) warnings.push(`「${guard.label}」包含待确认/待补充占位词，请改为有证据的表述或移入待确认清单`);
+  }
+  // 里程碑人工编辑检测（v20，非阻断）：公开时间线与生成时的内部证据投影不一致时提醒 CSM 复核——
+  // 内部 milestone_evidence 永不被编辑覆写，差异即人工改动。
+  const milestoneEvidence = caseMilestoneEvidenceOf(fields);
+  if (milestoneEvidence.length
+    && JSON.stringify(caseMilestonesFromEvidence(milestoneEvidence)) !== JSON.stringify(caseMilestonesOf(fields))) {
+    warnings.push('服务里程碑已人工修改，与生成时基于沟通记录推理的内部证据（阶段/来源/日期依据）不一致，请复核日期与标签');
   }
   warnings.push(...caseTextsContentWarnings('', fields));
   return [...new Set(warnings)];
@@ -3102,6 +3265,7 @@ export class CaseService {
       let enriched = false;
       let systemUsage: { rows: CaseSystemUsageRow[]; missing: string[] } = { rows: [], missing: [] };
       let milestones: CaseMilestone[] = [];
+      let milestoneEvidence: CaseMilestoneEvidence[] = [];
       try {
         // 素材覆盖度诊断与从严阈值补写在编排内完成：补写与剩余配图并行（v5 语义不变——补写沿用
         // 生成阶段同一份 contextText；补写失败保留第一稿，不因补写失败判任务失败）。
@@ -3113,9 +3277,12 @@ export class CaseService {
         enriched = proposed.enriched;
         systemUsage = proposed.systemUsage;
         milestones = proposed.milestones;
+        milestoneEvidence = proposed.milestoneEvidence;
       } catch (error) { throw new Error(`模型未生成案例: ${(error as Error).message}`); }
       const generator = `${runtime.llm.provider}/${runtime.llm.model}`;
-      const evidenceRefs = [...new Set(content.claim_evidence.flatMap((item) => item.source_refs))];
+      // 里程碑引用并入证据台账：引用的 Hemory 片段变化会让案例上下文对不上号。
+      const evidenceRefs = [...new Set([...content.claim_evidence.flatMap((item) => item.source_refs),
+        ...milestoneEvidence.flatMap((node) => node.source_refs)])];
       const fields: Record<string, unknown> = {
         content_version: CASE_CONTENT_VERSION,
         practice_library: casePracticeLibrary(),
@@ -3136,6 +3303,8 @@ export class CaseService {
       const unknowns = [...(content.unknowns ?? []), ...systemUsage.missing.map((item) => `系统使用情况表缺「${item}」，建议向客户成功经理或合同记录确认后在工作台补充`)];
       if (unknowns.length) fields.unknowns = [...new Set(unknowns)];
       if (milestones.length) fields.milestones = milestones;
+      // 里程碑内部证据（v20 只读）：阶段/phase/来源/摘录/置信度/日期依据，仅 case show --json 与质检消费。
+      if (milestoneEvidence.length) fields.milestone_evidence = milestoneEvidence;
       // 配图与最终采用的正文版本一致，增量补写的关联图失败则一起回退首稿。
       if (figures.length) fields.figures = figures;
       // 检索审计快照：不渲染进正文，case show --json 可见生成时用了哪些公开信息。

@@ -111,10 +111,10 @@ const CLI_CAPABILITIES = [
     notes: '风险预警名单：近 30 天 CRM 跟进与 ONES 工作项/工时活动同时停滞、或公开动态检索到负面信息的客户自动进入；resolve 消除风险必须填写原因/动作（写审计），条件自动解除由系统标记' },
   { command: 'case', workflow: 'case-drafts', access: 'approved-write', api: ['/api/case-drafts', '/api/case-drafts/:id', '/api/case-drafts/:id/regenerate', '/api/case-drafts/:id/publish-preview', '/api/case-drafts/:id/publish', '/api/case-drafts/:id/export', '/api/draft-jobs', 'GET /api/case-jobs/:id', 'POST /api/case-jobs/:id/resume'],
     editableFields: ['title', 'company_info', 'business_scope', 'competitive_strategy', 'project_background', 'business_status', 'demands', 'solution_sections', 'value_items', 'lessons', 'summary', 'system_usage', 'milestones'],
-    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures', 'generation_job_id', 'content_version', 'practice_library', 'content_review'],
+    readOnlyFields: ['customer_id', 'customer_name', 'claim_evidence', 'context_snapshot', 'web_search', 'unknowns', 'coverage', 'figures', 'generation_job_id', 'content_version', 'practice_library', 'content_review', 'milestone_evidence'],
     solutionSectionFields: ['title', 'text', 'practice_ids'],
     contentNotes: 'v19 目标 5000-8000 字；保留联网检索；七维内容线索诊断；每节可选 0-2 个 practice_ids，全篇不重复；通用实践不进入客户证据与配图输入',
-    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
+    notes: 'generate/regenerate --wait 实时打印生成进度（阶段/检索角度/模型输出字数）；服务里程碑由规划模型基于已确认沟通片段推理（阶段 start/completion 成对、日级日期，日期无法推理时回退引用片段发生日并记 unknowns；内部证据 milestone_evidence 只读，--json 可见）；业务解决方案图 1、系统集成图和价值全景图由模型提取结构化内容，服务端按确定性分层版式渲染；现状流程图、目标流程图、服务里程碑图采用模型内容加服务端统一视觉外壳与蓝色主题（历史草稿原样保留）；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；show 输出素材覆盖率（价值/痛点信号被正文引用比例；ONES 记录明细不注入案例生成，交付事实只经服务端统计聚合参与）；export 导出 Word 文档（v8 四章深结构，含目录/客户信息表/配图）' },
   { command: 'weekly-report', workflow: 'weekly-reports', access: 'approved-write', api: ['/api/customers/:id/weekly-reports', '/api/weekly-reports/:id', '/api/weekly-reports/:id/regenerate', '/api/weekly-reports/:id/publish-preview', '/api/weekly-reports/:id/publish', '/api/draft-jobs'], notes: 'generate/regenerate --wait 实时打印生成进度（阶段/模型输出字数）' },
   { command: 'case job', workflow: 'case-generation-diagnostics', access: 'read', api: ['GET /api/case-jobs/:id'],
     notes: '完整逐次调用诊断：排队/首字/请求耗时、模型报告的 token 与缓存用量、具体校验错误、已验证检查点；未记录值保持 unknown' },
@@ -259,18 +259,18 @@ function help(): void {
   csm-agent case generate <客户ID或名称> [--force] [--wait]
     （v19 行业解决方案母稿目标 5000-8000 字，素材不足可收缩；七维内容线索诊断，通用实践与配图隔离）
     （生成时自动联网检索客户公开信息：公司概况/项目管理/需求管理/知识管理/行业动态/招投标/中标采购；
-     业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；--wait 轮询任务到终态并实时打印生成进度）
+     服务里程碑由规划模型基于已确认沟通片段推理（阶段开始/完成成对、日期精确到日，无法推理时回退片段发生日）；业务解决方案图 1 采用结构化内容提取与服务端分层蓝图渲染；系统集成图和价值全景图采用结构化内容提取与服务端确定性分层渲染；现状流程图、目标流程图、服务里程碑图采用统一视觉外壳与蓝色主题，历史草稿原样保留；价值全景图固定从左到右为痛点及挑战/方案/价值三栏，中间方案区占最大空间，痛点与价值各 3~5 条并按序对应；--wait 轮询任务到终态并实时打印生成进度）
   csm-agent case job <任务ID> [--json]
     （逐次查看排队/首字/请求耗时、token 用量、校验失败和检查点复用；旧任务未记录的时间显示 unknown）
   csm-agent case resume <任务ID> [--wait]
     （继续中断或失败任务；仅复用同素材、同模型与规则下已通过校验的结果，过期或被新任务取代则拒绝；案例 --wait 最长 60 分钟）
   csm-agent case show <草稿ID> [--json]
-    （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns 的完整审核对象）
+    （默认输出可直接对外的案例 Markdown（与复制/Wiki 发布同源），有配图时列出图注一行；--json 输出含 claim_evidence/figures/context_snapshot/unknowns/milestone_evidence 的完整审核对象）
   csm-agent case regenerate <草稿ID> [--wait]
   csm-agent case update <草稿ID> <版本> <JSON>
     （solution_sections 支持 {title,text,practice_ids}；每节 0-2 个实践 ID，全篇不重复，ID 目录见 case show --json 的 fields.practice_library）
-    （只更新 title 与 fields 中的公开正文：v8 为公司简介三小节/项目背景/业务现状/业务诉求/方案小节/价值与复盘/项目总结及派生表 system_usage、milestones；
-     客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留）
+    （只更新 title 与 fields 中的公开正文：v8 为公司简介三小节/项目背景/业务现状/业务诉求/方案小节/价值与复盘/项目总结及 system_usage、milestones（里程碑基于沟通记录推理，人工改动会触发与内部证据的复核提醒）；
+     客户绑定、逐条证据、上下文、联网快照和 unknowns 由服务端保留，里程碑内部证据 milestone_evidence 同样只读）
   csm-agent case export <草稿ID> [--out <文件路径>]
     （导出 Word 文档：四章深结构版式（目录/客户信息表/服务里程碑/配图），默认保存到当前目录；
      与复制/Wiki 发布同一内容口径）

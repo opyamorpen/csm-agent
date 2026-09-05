@@ -50,13 +50,32 @@
     },
     "milestones": {
       "type": "array",
-      "description": "三 · 服务里程碑：服务端从已交付事件确定性派生的 {date, label} 时间线，CSM 可增删改；LLM 不写",
+      "description": "三 · 服务里程碑：案例规划模型基于已确认 Hemory 沟通片段推理的服务阶段时间线（每阶段 start/completion 两个单日期节点投影为 {date, label}，日期 YYYY-MM-DD；日期无法推理时由服务端回退为引用片段发生日并降低置信度），CSM 可增删改",
       "items": {
         "type": "object",
         "required": ["date", "label"],
         "properties": {
-          "date": { "type": "string", "description": "YYYY-MM（或 YYYY-MM-DD）" },
+          "date": { "type": "string", "description": "YYYY-MM-DD（旧稿兼容 YYYY-MM）" },
           "label": { "type": "string" }
+        }
+      }
+    },
+    "milestone_evidence": {
+      "type": "array",
+      "readOnly": true,
+      "description": "内部只读字段：里程碑生成证据（阶段 stage、phase=start|completion、日期依据、来源片段、逐字摘录、置信度），不进入公开正文，编辑与精修时由服务端保留",
+      "items": {
+        "type": "object",
+        "required": ["stage", "phase", "date", "label", "source_refs"],
+        "properties": {
+          "stage": { "type": "string" },
+          "phase": { "enum": ["start", "completion"] },
+          "date": { "type": "string", "description": "YYYY-MM-DD" },
+          "label": { "type": "string" },
+          "source_refs": { "type": "array", "items": { "type": "string" } },
+          "excerpt": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "date_basis": { "enum": ["fragment_occurred_at"], "description": "日期非模型推理、回退为引用片段发生日时标记" }
         }
       }
     },

@@ -4127,7 +4127,7 @@
       for (const section of fields.solution_sections || []) addSolution(section);
       const add = el('button', 'quiet-command small', '添加方案'); add.type = 'button'; add.onclick = () => addSolution();
       inputs.push({ field: add });
-      const milestones = addField('三 · 服务里程碑（每行「YYYY-MM 事件」，服务端派生、可增删改）',
+      const milestones = addField('三 · 服务里程碑（每行「YYYY-MM-DD 事件」，基于沟通记录推理、可增删改）',
         (fields.milestones || []).map((milestone) => `${milestone.date} ${milestone.label}`).join('\n'));
       const valueItems = addField('三 · 价值成效（每行一项；量化优先，无量化写有据定性价值）', (fields.value_items || []).join('\n'));
       const lessons = addField(fields.content_version === 'case-content-v19' ? '三 · 可复制实践' : '三 · 经验复盘与沉淀', (fields.lessons || []).join('\n'));

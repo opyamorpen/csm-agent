@@ -4345,6 +4345,12 @@ function casePlanContent(content: any, prompt: string): any {
   const excerptFor = (ref: string) => String(sourceCatalog.get(ref)?.speaker_lines?.[0]?.text ?? sourceCatalog.get(ref)?.excerpt ?? sourceCatalog.get(ref)?.title ?? 'source');
   const item = (idea: string, ref: string, extra: Record<string, unknown> = {}) =>
     ({ idea, excerpt: excerptFor(ref), source_refs: [ref], speaker_role: 'customer', status_category: 'unknown', confidence: 0.8, ...extra });
+  // v20：服务里程碑由规划模型从已确认 Hemory 片段推理——假规划器引用真实片段，输出两阶段 start/completion 成对节点
+  //（摘录取目录原文 excerpt，与摘录校验同源；无片段客户输出空数组=素材不足）。
+  const hermoryRef = refs.find((ref) => sourceCatalog.get(ref)?.source_type === 'ai_topic_segment');
+  const hermoryExcerpt = hermoryRef ? String(sourceCatalog.get(hermoryRef)?.excerpt ?? '') : '';
+  const milestoneNode = (stage: string, phase: string, date: string, label: string, confidence: number) =>
+    ({ stage, phase, date, label, source_refs: [hermoryRef], excerpt: hermoryExcerpt, confidence });
   return {
     title: content.title,
     plan: [
@@ -4363,6 +4369,12 @@ function casePlanContent(content: any, prompt: string): any {
       ] },
       { section: 'summary', items: [item(content.summary, factRef, { status_category: 'done' })] },
     ],
+    milestones: hermoryRef ? [
+      milestoneNode('合作启动', 'start', '2026-03-05', '合作启动', 0.9),
+      milestoneNode('合作启动', 'completion', '2026-03-18', '完成调研与方案确认', 0.9),
+      milestoneNode('平台上线', 'start', '2026-03-10', '平台上线启动', 0.8),
+      milestoneNode('平台上线', 'completion', '2026-03-20', '平台上线完成', 0.8),
+    ] : [],
     unknowns: content.unknowns,
   };
 }
@@ -4552,10 +4564,16 @@ test('workbench: case generation runs full-context model job and persists narrat
     const usageRows = (draft.fields as any).system_usage as any[];
     assert.ok(Array.isArray(usageRows) && usageRows.some((row) => row.item === '客户名称' && row.content === '案例客户一'), '系统使用情况表含客户名称行');
     assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('购买账号数')), '缺失行提示进 unknowns');
-    // seedCaseCustomer 有已交付建议工单（2026-03 交付）→ 派生里程碑至少含合作启动与工单首单。
+    // v20 里程碑来自规划模型（基于已确认 Hemory 片段推理）：两阶段 4 个日级节点 + 内部证据同源落库。
     const milestones = (draft.fields as any).milestones as any[];
-    assert.ok(Array.isArray(milestones) && milestones.length >= 2, '派生服务里程碑');
+    assert.ok(Array.isArray(milestones) && milestones.length === 4, '推理服务里程碑（两阶段 4 节点）');
+    assert.ok(milestones.every((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.date)), '里程碑日期为日级');
     assert.ok(milestones.some((item) => item.label.includes('合作启动')));
+    assert.ok(!milestones.some((item) => item.label.includes('据最早服务记录') || item.label.includes('首个闭环')), '不再有确定性派生标签（seed 的 ONES 工单不进时间线）');
+    const milestoneEvidence = (draft.fields as any).milestone_evidence as any[];
+    assert.ok(Array.isArray(milestoneEvidence) && milestoneEvidence.length === 4
+      && milestoneEvidence.every((node) => node.stage && (node.phase === 'start' || node.phase === 'completion')
+        && Array.isArray(node.source_refs) && node.source_refs.length >= 1 && typeof node.confidence === 'number'), '内部里程碑证据落库（阶段/phase/来源/置信度）');
     const expectedClaims = [CASE_CONTENT.company_info, CASE_CONTENT.business_scope, CASE_CONTENT.competitive_strategy, CASE_CONTENT.project_background,
       ...CASE_CONTENT.business_status, ...CASE_CONTENT.demands, ...CASE_CONTENT.solution_sections.map((section: any) => section.text),
       ...CASE_CONTENT.value_items, ...CASE_CONTENT.lessons, CASE_CONTENT.summary];
@@ -4574,6 +4592,8 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.ok(!capturedPrompt.includes('"delivered_records"'), 'delivered_records 注入块已移除');
     // 交付事实仍以聚合统计形态注入（ONES 数据只经 delivery_stats 参与）。
     assert.ok(capturedPrompt.includes('"delivery_stats"'), '上下文须含交付统计聚合');
+    // v20 Hemory 片段注入起止时刻（里程碑日期推理锚点；seed 片段无起止字段 → 空串键仍在）。
+    assert.ok(capturedPrompt.includes('"start_at"') && capturedPrompt.includes('"end_at"'), 'communications 含 start_at/end_at 锚点');
     // 叙事契约关键规则（规划与章节 prompt 合并断言）。
     assert.match(capturedPrompt, /客户叙事视角/);
     assert.match(capturedPrompt, /禁止流水账/);
@@ -4609,8 +4629,123 @@ test('workbench: case generation runs full-context model job and persists narrat
     assert.notEqual(drafts[0].id, draft.id, 'force 生成必须落新行而非原地覆盖');
     assert.equal(db.getCaseDraft(draft.id), undefined, '历史版本行已被删除');
     // 生成版本锁定。
-    assert.equal(CASE_GENERATION_VERSION, 'case-v19-content-depth');
+    assert.equal(CASE_GENERATION_VERSION, 'case-v20-hemory-milestones');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: milestones stay Hemory-only even when ONES events are earlier', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-mile-ones-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    // 早期已交付 ONES 工单（2026-01）：旧确定性派生会把它当时间线素材，v20 时间线仍只来自 Hemory 推理。
+    db.upsertSourceEvent({ customerId: 'crm-c1', sourceSystem: 'ones', sourceType: 'support_ticket',
+      externalId: 'case-T-0', displayId: 'T-2000', title: '早期工单', occurredAt: '2026-01-05T03:00:00Z',
+      payload: { field005: { name: '已完成', category: 'done' } } });
+    const service = new CaseService(db, caseMcp(), fakeCaseModel(CASE_CONTENT));
+    const queued = service.generate('crm-c1');
+    await waitForJob(db, queued.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const milestones = (draft.fields as any).milestones as any[];
+    assert.ok(Array.isArray(milestones) && milestones.length === 4, '两阶段 4 节点');
+    assert.ok(milestones.every((item) => item.date.startsWith('2026-03')), '里程碑日期全部来自 Hemory 片段所在月份');
+    assert.ok(!milestones.some((item) => item.date.startsWith('2026-01')), '早期 ONES 工单不进时间线');
+    assert.ok(!milestones.some((item) => /据最早服务记录|首个闭环|私有云实例部署/.test(item.label)), '无确定性派生标签');
+    // 详情出口（case show --json 体）：内部证据可见；Markdown 只渲染 {date,label} 投影。
+    const detail = service.detail(draft.id)!;
+    assert.ok(Array.isArray((detail.draft.fields as any).milestone_evidence) && (detail.draft.fields as any).milestone_evidence.length === 4);
+    assert.match(detail.markdown, /### 服务里程碑/);
+    assert.match(detail.markdown, /- 2026-03-05 合作启动/);
+    assert.ok(!detail.markdown.includes('milestone_evidence') && !detail.markdown.includes('"stage"') && !detail.markdown.includes('"phase"'), 'Markdown 不泄露内部证据字段');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: milestone dates without inference fall back to fragment occurred_at', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-mile-fallback-'));
+  const db = new WorkbenchDatabase(dir);
+  try {
+    seedCaseCustomer(db);
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const plan = casePlanContent(CASE_CONTENT, prompt);
+          const context = casePromptContext(prompt);
+          const hermoryRef = (context.allowed_source_refs as string[]).find((ref: string) => (context.source_catalog as any[]).some((row) => row.source_ref === ref && row.source_type === 'ai_topic_segment'));
+          // 「深化推广」两节点日期分别为空串与非法相对表述 → 服务端回退引用片段发生日（2026-03-05）。
+          plan.milestones = [
+            { stage: '深化推广', phase: 'start', date: '', label: '', source_refs: [hermoryRef], excerpt: '客户提出希望统一管理研发项目', confidence: 0.9 },
+            { stage: '深化推广', phase: 'completion', date: '上周三', label: '', source_refs: [hermoryRef], excerpt: '客户提出希望统一管理研发项目', confidence: 0.9 },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const queued = service.generate('crm-c1');
+    await waitForJob(db, queued.jobId!);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    const milestones = (draft.fields as any).milestones as any[];
+    assert.ok(Array.isArray(milestones) && milestones.length === 2, '回退后仍保留成对节点');
+    assert.ok(milestones.every((item) => item.date === '2026-03-05'), '缺失/非法日期回退为引用片段发生日');
+    // 空标签回退阶段名；同阶段两标签相同 → 服务端补（启动）/（完成）后缀（同日 start 先于 completion）。
+    assert.deepEqual(milestones.map((item) => item.label), ['深化推广（启动）', '深化推广（完成）']);
+    const evidence = (draft.fields as any).milestone_evidence as any[];
+    assert.ok(evidence.every((node: any) => node.date_basis === 'fragment_occurred_at' && node.confidence <= 0.3), 'date_basis 与低置信度落内部证据');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('已回退为引用片段发生日') && item.includes('深化推广')), '复核提示进 unknowns');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workbench: invalid milestones retry with feedback and salvage drops offending stages', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'csm-case-mile-salvage-'));
+  const db = new WorkbenchDatabase(dir);
+  const previousBaseMs = caseModelRetryDelays.baseMs;
+  caseModelRetryDelays.baseMs = 1;
+  try {
+    seedCaseCustomer(db);
+    const prompts: string[] = [];
+    const runtime = {
+      llm: { provider: 'fake', model: 'fake-model' },
+      models: { complete: async (_: unknown, input: any) => {
+        const prompt = input.messages[0].content;
+        prompts.push(prompt);
+        if (prompt.includes('规划客户成功案例草稿的章节结构')) {
+          const plan = casePlanContent(CASE_CONTENT, prompt);
+          const context = casePromptContext(prompt);
+          const statsRef = (context.allowed_source_refs as string[]).find((ref) => ref === 'stats:delivery');
+          const hermoryRef = (context.allowed_source_refs as string[]).find((ref: string) => (context.source_catalog as any[]).some((row) => row.source_ref === ref && row.source_type === 'ai_topic_segment'));
+          plan.milestones = [
+            // 非 Hemory 来源（stats:delivery）→ 严格拒绝（重试反馈），打捞模式丢弃 → 阶段不成对整阶段丢弃。
+            { stage: '合作启动', phase: 'start', date: '2026-03-01', label: '合作启动', source_refs: [statsRef], excerpt: '合作起点', confidence: 0.9 },
+            { stage: '合作启动', phase: 'completion', date: '2026-03-05', label: '合作启动完成', source_refs: [hermoryRef], excerpt: '客户提出希望统一管理研发项目', confidence: 0.9 },
+            // 日期倒置 → 严格拒绝，打捞模式整阶段丢弃。
+            { stage: '平台上线', phase: 'start', date: '2026-03-20', label: '平台上线启动', source_refs: [hermoryRef], excerpt: '客户提出希望统一管理研发项目', confidence: 0.8 },
+            { stage: '平台上线', phase: 'completion', date: '2026-03-10', label: '平台上线完成', source_refs: [hermoryRef], excerpt: '客户提出希望统一管理研发项目', confidence: 0.8 },
+          ];
+          return { content: [{ type: 'text', text: JSON.stringify(plan) }], stopReason: 'stop' };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(casePhaseRespond(CASE_CONTENT, prompt)) }], stopReason: 'stop' };
+      } },
+    } as any;
+    const service = new CaseService(db, caseMcp(), runtime);
+    const queued = service.generate('crm-c1');
+    await waitForJob(db, queued.jobId!);
+    // 前三次规划严格拒绝（错误进重试反馈），第 4 次打捞：违规节点丢弃，案例照常成稿但无里程碑。
+    const planPrompts = prompts.filter((prompt) => prompt.includes('规划客户成功案例草稿的章节结构'));
+    assert.ok(planPrompts.length >= 4, '里程碑违规触发规划重试');
+    assert.match(planPrompts[1], /上一次输出未通过校验/);
+    assert.match(planPrompts[1], /milestones 存在违规条目/);
+    assert.match(planPrompts[1], /非 Hemory 片段来源/);
+    assert.match(planPrompts[1], /晚于完成日期/);
+    const draft = db.listCaseDrafts('crm-c1')[0];
+    assert.ok(draft, '打捞后案例照常成稿');
+    assert.equal((draft.fields as any).milestones, undefined, '无成对阶段 → 不渲染里程碑');
+    assert.equal((draft.fields as any).milestone_evidence, undefined, '无公开投影即无内部证据');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => /里程碑.*丢弃|丢弃.*里程碑/.test(item)), '丢弃轨迹进 unknowns');
+    assert.ok((draft.fields as any).unknowns.some((item: string) => item.includes('未形成任何成对阶段节点')), '空时间线提示进 unknowns');
+  } finally { caseModelRetryDelays.baseMs = previousBaseMs; db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('workbench: case detail marks context stale and summarize sources', async () => {
@@ -4905,10 +5040,13 @@ test('workbench: case v5 pipeline degrades input budget and summarizes before fa
       // 摘要兜底路径：prompt 是摘要形态（input_summary + 收缩目录）。
       assert.ok(context.input_summary.length > 0, '摘要文本非空');
       assert.ok(context.source_catalog.length > 0, '原文目录保留供摘录校验');
+      // v20：Hemory 目录行保留发生日锚点（摘要路径下里程碑日期推理的兜底依据）。
+      assert.ok(context.source_catalog.some((row: any) => row.source_type === 'ai_topic_segment' && /^\d{4}-\d{2}-\d{2}$/.test(row.occurred_at ?? '')), 'Hemory 目录行带日级发生日');
       assert.equal(inputSummary.summarized, true);
     } else {
       // 降级路径：素材注入规模收缩（communications ≤150 片段、转写预算 24000）。
       assert.ok(context.communications?.length != null && context.communications.length <= 150, `降级后片段收缩（实际 ${context.communications?.length}）`);
+      assert.ok(context.communications?.every((fragment: any) => 'start_at' in fragment && 'end_at' in fragment), '降级注入仍带 start_at/end_at 锚点');
     }
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -6128,6 +6266,8 @@ test('workbench: milestone figure kind planned for value chapter and validated',
       // 快照含 stats 来源时 milestone 图合法落库（value 章），图注占位渲染在服务里程碑小节。
       assert.equal(figures[0].kind, 'milestone');
       assert.equal(figures[0].section, 'value');
+      const figurePrompt = prompts.find((prompt) => prompt.includes('章节配图'))!;
+      assert.match(figurePrompt, /基于已确认沟通记录推理的合作里程碑清单/, '里程碑图事实清单来自规划产物（Hemory 推理）');
       const markdown = renderCaseMarkdown(draft);
       assert.ok(markdown.indexOf('### 服务里程碑') < markdown.indexOf('> 图：'), 'milestone 图注位于服务里程碑小节');
     } else {
@@ -6876,6 +7016,10 @@ test('workbench: case update preserves internal evidence and quality review stay
     })!;
     assert.deepEqual((edited.fields as any).system_usage, [{ item: '购买账号数', content: '1500 个' }]);
     assert.deepEqual((edited.fields as any).milestones, [{ date: '2026-03', label: '合作启动' }]);
+    // v20：人工改动公开里程碑后，内部证据原样保留且写回护栏提示复核（非阻断）。
+    assert.ok(Array.isArray((edited.fields as any).milestone_evidence) && (edited.fields as any).milestone_evidence.length === 4, '内部里程碑证据不被编辑覆写');
+    const editedWarnings = caseNarrativeWarnings(edited.fields as any);
+    assert.ok(editedWarnings.some((warning) => /服务里程碑已人工修改/.test(warning)), '人工改动触发与内部证据的复核提醒');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
