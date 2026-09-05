@@ -790,15 +790,21 @@ test('workbench: a newer Hemory recording generation supersedes old active segme
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('workbench: Shanghai schedule uses 13:00 and current-day full bounds', () => {
+test('workbench: Shanghai hermory schedule ticks daytime slots and rolls over after 20:00', () => {
+  // 上海 11:00 → 顺延 13:00；14:00 → 15:00（白天 09–19 每两小时一档 + 20:00 兜底）。
   const now = new Date('2026-08-25T03:00:00Z');
   const next = nextHemorySlot(now);
   assert.equal(next.at.toISOString(), '2026-08-25T05:00:00.000Z');
   assert.equal(next.hour, 13);
+  assert.equal(nextHemorySlot(new Date('2026-08-25T06:00:00Z')).hour, 15);
+  assert.equal(nextHemorySlot(new Date('2026-08-25T11:30:00Z')).hour, 20);
+  // 上海 21:30（末槽 20:00 已过）→ 次日 09:00；上海 07:00 → 当天 09:00。
+  assert.equal(nextHemorySlot(new Date('2026-08-25T13:30:00Z')).at.toISOString(), '2026-08-26T01:00:00.000Z');
+  assert.equal(nextHemorySlot(new Date('2026-08-25T13:30:00Z')).hour, 9);
+  assert.equal(nextHemorySlot(new Date('2026-08-24T23:00:00Z')).at.toISOString(), '2026-08-25T01:00:00.000Z');
   const bounds = shanghaiDayBounds('2026-08-25', now);
   assert.equal(bounds.startedAt, '2026-08-24T16:00:00.000Z');
   assert.equal(bounds.endedAt, now.toISOString());
-  assert.equal(nextHemorySlot(new Date('2026-08-25T06:00:00Z')).hour, 20);
 });
 
 test('workbench: portfolio sync slot is 02:00 Shanghai (not server-local timezone)', () => {

@@ -66,6 +66,10 @@ const ONES_TEAM_ID = process.env.ONES_TEAM_ID ?? 'RDjYMhKq';
 /** 自动/手动增量同步扫描的滚动窗口（上海自然日，含今天）。已入库录音靠分段指纹与 upsert 去重。 */
 export const HEMORY_SYNC_WINDOW_DAYS = 7;
 
+/** Hemory 定时同步的每日槽位（上海时区）：白天 09:00–19:00 每两小时一档 + 保留 20:00 晚间兜底，
+ * 让下午的会议片段在结束后 ~2 小时内进收件箱。空转一轮仅 MCP 拉取 + 本地重算（指纹短路，零 LLM）。 */
+export const HEMORY_SYNC_HOURS = [9, 11, 13, 15, 17, 19, 20];
+
 /** 按用户执行同步的上下文：本人 MCP 连接（各自凭证）+ 身份。userId=0 表示系统/单用户兼容形态。 */
 export interface SyncUser {
   userId: number;
@@ -1408,12 +1412,12 @@ export function shanghaiSlot(date: string, hour: number): Date {
 
 export function nextHemorySlot(now = new Date()): { at: Date; date: string; hour: number } {
   const date = shanghaiDateKey(now);
-  for (const hour of [13, 20]) {
+  for (const hour of HEMORY_SYNC_HOURS) {
     const at = shanghaiSlot(date, hour);
     if (at > now) return { at, date, hour };
   }
-  const tomorrow = shanghaiDateKey(new Date(shanghaiSlot(date, 20).getTime() + 5 * 3_600_000));
-  return { at: shanghaiSlot(tomorrow, 13), date: tomorrow, hour: 13 };
+  const tomorrow = shanghaiDateKey(new Date(now.getTime() + 24 * 3_600_000));
+  return { at: shanghaiSlot(tomorrow, HEMORY_SYNC_HOURS[0]), date: tomorrow, hour: HEMORY_SYNC_HOURS[0] };
 }
 
 /** 组合同步（CRM+ONES）的每日槽位：上海时区 02:00，与 Hemory/web-intel 调度同口径（不随服务器时区漂移）。
@@ -1445,7 +1449,7 @@ export function scheduleHemorySync(service: PortfolioSyncService, db: WorkbenchD
   const catchUp = () => {
     const now = new Date();
     const date = shanghaiDateKey(now);
-    const passed = [13, 20].filter((hour) => shanghaiSlot(date, hour) <= now);
+    const passed = HEMORY_SYNC_HOURS.filter((hour) => shanghaiSlot(date, hour) <= now);
     const latest = passed.at(-1);
     if (latest && !db.hasSuccessfulSyncScope(`hemory:${date}:${latest}`)) service.refreshRecentHemory(latest);
   };
